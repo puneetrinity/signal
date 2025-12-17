@@ -3,6 +3,10 @@ import { getCachedFullProfile, cacheFullProfile } from '@/lib/redis/profile-cach
 import { getCachedProfile, saveProfile } from '@/lib/cache';
 import { fetchLinkedInProfile } from '@/lib/brightdata/linkedin';
 
+function isV1ScrapingDisabled(): boolean {
+  return process.env.DISABLE_V1_SCRAPING === 'true' || process.env.USE_NEW_DISCOVERY === 'true';
+}
+
 function normalizeLinkedinId(id: string): string {
   return id.trim().replace(/\/+$/, '');
 }
@@ -17,6 +21,17 @@ type RouteContext = {
 
 export async function GET(request: NextRequest, context: RouteContext) {
   try {
+    if (isV1ScrapingDisabled()) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            'This v1 endpoint is deprecated/disabled (LinkedIn profile scraping). Use v2: POST /api/v2/search + POST /api/v2/enrich.',
+        },
+        { status: 410 },
+      );
+    }
+
     const params = await context.params;
     const rawId = params.linkedinId ?? '';
     const linkedinId = normalizeLinkedinId(decodeURIComponent(rawId));

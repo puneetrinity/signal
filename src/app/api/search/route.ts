@@ -6,7 +6,25 @@ import { cacheProfileSummary } from '@/lib/redis/profile-cache';
 
 export async function POST(request: NextRequest) {
   try {
-    const { query } = await request.json();
+    const body = await request.json().catch(() => ({}));
+
+    // Phase 5: When v2 discovery is enabled, proxy /api/search to the compliant v2 endpoint.
+    // This lets existing UI clients keep calling /api/search while getting v2 behavior.
+    if (process.env.USE_NEW_DISCOVERY === 'true') {
+      const url = request.nextUrl.clone();
+      url.pathname = '/api/v2/search';
+
+      const response = await fetch(url.toString(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      const data = await response.json().catch(() => null);
+      return NextResponse.json(data, { status: response.status, headers: response.headers });
+    }
+
+    const { query } = body as { query?: unknown };
 
     if (!query || typeof query !== 'string') {
       return NextResponse.json(

@@ -24,7 +24,7 @@ function extractLinkedInId(url: string): string | null {
 
 /**
  * Get a cached profile from the database
- * Returns null if profile doesn't exist or is stale (older than 30 days)
+ * Returns null if profile doesn't exist or is stale (older than 180 days)
  *
  * @param linkedinUrl - LinkedIn profile URL (any region variant)
  * @returns Cached profile data or null
@@ -50,7 +50,7 @@ export async function getCachedProfile(
       return null;
     }
 
-    // Check if profile is fresh (< 30 days old)
+    // Check if profile is fresh (< 180 days old)
     const daysSinceUpdate = Math.floor(
       (Date.now() - profile.updatedAt.getTime()) / (1000 * 60 * 60 * 24)
     );
@@ -97,7 +97,7 @@ export async function getCachedProfile(
 
 /**
  * Get multiple cached profiles from the database in a single query
- * Returns only fresh profiles (< 30 days old)
+ * Returns only fresh profiles (< 180 days old)
  *
  * @param linkedinUrls - Array of LinkedIn profile URLs
  * @returns Object mapping linkedinId to ProfileData (only cached/fresh profiles)

@@ -5,12 +5,27 @@ type RouteContext = {
   params: Promise<{ id: string }>;
 };
 
+function isV1ResearchDisabled(): boolean {
+  return process.env.DISABLE_V1_SCRAPING === 'true' || process.env.USE_NEW_DISCOVERY === 'true';
+}
+
 /**
  * GET /api/research/[id]
  * Get research status and report by ID
  */
 export async function GET(_request: NextRequest, context: RouteContext) {
   try {
+    if (isV1ResearchDisabled()) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            'This v1 endpoint is deprecated/disabled (research graph uses scraping). Use v2 enrichment endpoints instead.',
+        },
+        { status: 410 }
+      );
+    }
+
     const params = await context.params;
     const { id } = params;
 

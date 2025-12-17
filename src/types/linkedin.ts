@@ -190,3 +190,114 @@ export function transformBrightDataProfile(
     memorializedAccount: data.memorialized_account,
   };
 }
+
+// ============================================================================
+// V2 Types - Compliant Recruiter Sourcing
+// ============================================================================
+
+/**
+ * v2 Search result with candidate ID
+ */
+export interface ProfileSummaryV2 extends ProfileSummary {
+  candidateId: string | null;
+}
+
+/**
+ * Identity candidate (unconfirmed match from enrichment)
+ */
+export interface IdentityCandidateData {
+  id: string;
+  platform: string;
+  platformId: string;
+  profileUrl: string;
+  confidence: number;
+  confidenceBucket: string | null;
+  scoreBreakdown: Record<string, number> | null;
+  hasContradiction: boolean;
+  contradictionNote: string | null;
+  status: 'unconfirmed' | 'confirmed' | 'rejected';
+  evidence?: CommitEmailEvidence[];
+  createdAt: string;
+  updatedAt?: string;
+}
+
+/**
+ * Commit email evidence from GitHub
+ */
+export interface CommitEmailEvidence {
+  type: 'commit_email';
+  repoFullName: string;
+  commitSha: string;
+  commitUrl: string;
+  authorName: string;
+}
+
+/**
+ * Enrichment result from v2/enrich
+ */
+export interface EnrichmentResultData {
+  candidateId: string;
+  sessionId: string;
+  status: 'completed' | 'failed' | 'partial';
+  identitiesFound: number;
+  identitiesStored: number;
+  platformsQueried: string[];
+  queriesExecuted: number;
+  earlyStopReason: string | null;
+  durationMs: number;
+  error?: string;
+}
+
+/**
+ * v2 Enrichment API response
+ */
+export interface EnrichmentResponse {
+  success: boolean;
+  version: 'v2';
+  mode: 'single' | 'batch';
+  result?: EnrichmentResultData;
+  identityCandidates?: IdentityCandidateData[];
+  timestamp: number;
+  error?: string;
+}
+
+/**
+ * Candidate data from v2/enrich GET
+ */
+export interface CandidateData {
+  id: string;
+  linkedinId: string;
+  linkedinUrl: string;
+  nameHint: string | null;
+  enrichmentStatus: string;
+  confidenceScore: number | null;
+  lastEnrichedAt: string | null;
+}
+
+/**
+ * Enrichment session summary
+ */
+export interface EnrichmentSessionSummary {
+  id: string;
+  status: string;
+  sourcesExecuted: string[] | null;
+  queriesExecuted: number | null;
+  identitiesFound: number;
+  finalConfidence: number | null;
+  durationMs: number | null;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+/**
+ * v2 Enrichment GET response (candidate details)
+ */
+export interface CandidateDetailsResponse {
+  success: boolean;
+  version: 'v2';
+  candidate: CandidateData;
+  identityCandidates: IdentityCandidateData[];
+  sessions: EnrichmentSessionSummary[];
+  timestamp: number;
+  error?: string;
+}

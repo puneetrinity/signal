@@ -1,22 +1,22 @@
 import type { Metadata } from "next";
-import { Playfair_Display, Geist_Mono } from "next/font/google";
+import { Outfit, Space_Mono } from "next/font/google";
 import "./globals.css";
-import { Navigation } from "@/components/Navigation";
 
-const playfair = Playfair_Display({
-  variable: "--font-playfair",
+const outfit = Outfit({
+  variable: "--font-outfit",
   subsets: ["latin"],
-  weight: ["400", "500", "600", "700", "800", "900"],
+  weight: ["300", "400", "500", "600", "700", "800"],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const spaceMono = Space_Mono({
+  variable: "--font-space-mono",
   subsets: ["latin"],
+  weight: ["400", "700"],
 });
 
 export const metadata: Metadata = {
-  title: "PeopleHub - LinkedIn People Search",
-  description: "Search and discover LinkedIn professionals with AI-powered search",
+  title: "Signal by VantaHire - AI-Powered Talent Discovery",
+  description: "Find the right professionals instantly. Search the web like an expert recruiter using AI, real-time data, and public sources.",
 };
 
 export default function RootLayout({
@@ -25,11 +25,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" className="dark">
       <body
-        className={`${playfair.variable} ${geistMono.variable} antialiased`}
+        className={`${outfit.variable} ${spaceMono.variable} antialiased`}
       >
-        <Navigation />
         {children}
       </body>
     </html>

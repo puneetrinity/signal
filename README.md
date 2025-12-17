@@ -77,7 +77,7 @@ Country-specific search results with automatic geo-targeting
 1. **Clone the repository**
 ```bash
 git clone https://github.com/MeirKaD/pepolehub
-cd peoplehub
+cd pepolehub
 ```
 
 2. **Install dependencies**
@@ -108,6 +108,12 @@ GOOGLE_GENERATIVE_AI_API_KEY="your-google-ai-api-key"
 
 # Redis (optional, for hot cache)
 REDIS_URL="your-redis-url"
+REDIS_TLS_ENABLED="true"
+
+# Alternatively:
+REDIS_HOST="your-redis-host"
+REDIS_PORT="6379"
+REDIS_PASSWORD="your-redis-password"
 ```
 
 4. **Set up database**

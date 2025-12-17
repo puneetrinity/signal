@@ -390,6 +390,11 @@ function getResearchCacheKey(linkedinUrl: string): string {
 function normalizeLinkedInUrl(url: string): string | null {
   try {
     const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+
+    const hostname = parsed.hostname.toLowerCase();
+    if (!hostname.endsWith('linkedin.com')) return null;
+
     // Normalize to https://www.linkedin.com/in/username format
     const pathParts = parsed.pathname.split('/').filter(Boolean);
     if (pathParts[0] === 'in' && pathParts[1]) {

@@ -1,49 +1,126 @@
 import Redis from 'ioredis';
 
 type RedisGlobal = {
-  redis: Redis | undefined;
+  redis: Redis | NoopRedis | undefined;
   redisListenersRegistered?: boolean;
   redisCleanupRegistered?: boolean;
+  redisDisabledLogged?: boolean;
 };
 
 const globalForRedis = globalThis as unknown as RedisGlobal;
 
-const requiredVars = ['REDIS_HOST', 'REDIS_PORT', 'REDIS_PASSWORD'] as const;
-const missingVars = requiredVars.filter((key) => !process.env[key]);
+class NoopRedis {
+  on(_event: string, _listener: (...args: unknown[]) => void) {
+    return this;
+  }
 
-if (missingVars.length > 0) {
-  throw new Error(
-    `[Redis] Missing required environment variables: ${missingVars.join(
-      ', ',
-    )}. Please set them in your environment before initializing the Redis client.`,
-  );
+  async get(_key: string) {
+    return null;
+  }
+
+  async setex(_key: string, _ttl: number, _value: string) {
+    return 'OK';
+  }
+
+  async del(..._keys: string[]) {
+    return 0;
+  }
+
+  async keys(_pattern: string) {
+    return [];
+  }
+
+  async exists(_key: string) {
+    return 0;
+  }
+
+  async ttl(_key: string) {
+    return -1;
+  }
+
+  async mget(...keys: string[]) {
+    return keys.map(() => null);
+  }
+
+  async incr(_key: string) {
+    return 0;
+  }
+
+  async expire(_key: string, _ttl: number) {
+    return 0;
+  }
+
+  async ping() {
+    return 'DISABLED';
+  }
+
+  async info() {
+    return '';
+  }
+
+  async quit() {
+    return 'OK';
+  }
+}
+
+type RedisClient = Redis | NoopRedis;
+
+function createRedisClient(): RedisClient {
+  if (process.env.REDIS_URL) {
+    return new Redis(process.env.REDIS_URL, {
+      tls: process.env.REDIS_TLS_ENABLED === 'true' ? {} : undefined,
+      maxRetriesPerRequest: 3,
+      retryStrategy(times) {
+        const delay = Math.min(times * 50, 2000);
+        return delay;
+      },
+      reconnectOnError(err) {
+        const targetErrors = ['READONLY', 'ECONNRESET'];
+        return targetErrors.some((code) => err.message.includes(code));
+      },
+      lazyConnect: false,
+      enableReadyCheck: true,
+      showFriendlyErrorStack: process.env.NODE_ENV === 'development',
+    });
+  }
+
+  if (process.env.REDIS_HOST && process.env.REDIS_PORT) {
+    return new Redis({
+      host: process.env.REDIS_HOST,
+      port: parseInt(process.env.REDIS_PORT || '6379', 10),
+      password: process.env.REDIS_PASSWORD,
+      tls: process.env.REDIS_TLS_ENABLED === 'true' ? {} : undefined,
+      maxRetriesPerRequest: 3,
+      retryStrategy(times) {
+        const delay = Math.min(times * 50, 2000);
+        return delay;
+      },
+      reconnectOnError(err) {
+        const targetErrors = ['READONLY', 'ECONNRESET'];
+        return targetErrors.some((code) => err.message.includes(code));
+      },
+      lazyConnect: false,
+      enableReadyCheck: true,
+      showFriendlyErrorStack: process.env.NODE_ENV === 'development',
+    });
+  }
+
+  if (!globalForRedis.redisDisabledLogged && process.env.NODE_ENV !== 'test') {
+    console.warn(
+      '[Redis] Redis is not configured (set REDIS_URL or REDIS_HOST/REDIS_PORT). Continuing without Redis hot cache.',
+    );
+    globalForRedis.redisDisabledLogged = true;
+  }
+
+  return new NoopRedis();
 }
 
 const redisInstance =
-  globalForRedis.redis ??
-  new Redis({
-    host: process.env.REDIS_HOST,
-    port: parseInt(process.env.REDIS_PORT || '6379', 10),
-    password: process.env.REDIS_PASSWORD,
-    tls: process.env.REDIS_TLS_ENABLED === 'true' ? {} : undefined,
-    maxRetriesPerRequest: 3,
-    retryStrategy(times) {
-      const delay = Math.min(times * 50, 2000);
-      return delay;
-    },
-    reconnectOnError(err) {
-      const targetErrors = ['READONLY', 'ECONNRESET'];
-      if (targetErrors.some((code) => err.message.includes(code))) {
-        return true;
-      }
-      return false;
-    },
-    lazyConnect: false,
-    enableReadyCheck: true,
-    showFriendlyErrorStack: process.env.NODE_ENV === 'development',
-  });
+  globalForRedis.redis ?? createRedisClient();
 
-if (!globalForRedis.redisListenersRegistered) {
+const isRealRedisClient = redisInstance instanceof Redis;
+
+if (isRealRedisClient && !globalForRedis.redisListenersRegistered) {
   redisInstance.on('connect', () => {
     console.log('[Redis] Connected to Redis Cloud');
   });
@@ -67,7 +144,7 @@ if (!globalForRedis.redisListenersRegistered) {
   globalForRedis.redisListenersRegistered = true;
 }
 
-if (!globalForRedis.redisCleanupRegistered) {
+if (isRealRedisClient && !globalForRedis.redisCleanupRegistered) {
   process.on('SIGTERM', async () => {
     console.log('[Redis] SIGTERM received, closing Redis connection');
     try {
@@ -84,5 +161,5 @@ if (process.env.NODE_ENV !== 'production') {
   globalForRedis.redis = redisInstance;
 }
 
-export const redis = redisInstance;
+export const redis: RedisClient = redisInstance;
 export default redis;

@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import Image from 'next/image';
 import { usePathname } from 'next/navigation';
-import { Home, History } from 'lucide-react';
+import { Home } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const navItems = [
@@ -11,11 +11,6 @@ const navItems = [
     name: 'Home',
     href: '/',
     icon: Home,
-  },
-  {
-    name: 'Previous Searches',
-    href: '/previous',
-    icon: History,
   },
 ];
 
@@ -25,41 +20,28 @@ export function Navigation() {
   return (
     <nav className="fixed top-0 left-0 right-0 z-50 px-4 sm:px-6 lg:px-8 pointer-events-none">
       <div className="pointer-events-auto mx-auto max-w-7xl">
-        <div className="relative flex h-20 items-center justify-between rounded-2xl border border-white/20 bg-white/10 px-4 sm:px-6 lg:px-8 shadow-[0_12px_35px_-20px_rgba(15,23,42,0.75)] backdrop-blur-2xl backdrop-saturate-150">
-          <div className="pointer-events-none absolute inset-0 rounded-2xl bg-gradient-to-r from-white/25 via-white/10 to-white/25 opacity-80" />
+        <div className="relative flex h-20 items-center justify-between rounded-2xl border border-purple-500/20 bg-[#141428]/80 px-4 sm:px-6 lg:px-8 shadow-[0_12px_35px_-20px_rgba(139,92,246,0.5)] backdrop-blur-2xl backdrop-saturate-150 mt-4">
+          <div className="pointer-events-none absolute inset-0 rounded-2xl bg-gradient-to-r from-purple-500/10 via-transparent to-gold-500/10 opacity-80" />
 
           {/* Logo */}
-          <div className="relative flex items-center gap-6 -ml-2">
+          <div className="relative flex items-center gap-3">
             <Link
               href="/"
-              className="pointer-events-auto hover:opacity-80 transition-opacity flex items-center"
+              className="pointer-events-auto hover:opacity-90 transition-opacity flex items-center gap-3"
             >
-              <Image
-                src="/logo.png"
-                alt="PeopleHub"
-                width={210}
-                height={60}
-                className="h-15 w-auto object-contain"
-                priority
-              />
+              <div className="h-9 w-9 overflow-hidden rounded-md">
+                <Image
+                  src="/logo.png"
+                  alt="VantaHire"
+                  width={40}
+                  height={40}
+                  className="h-10 w-10 object-cover object-top -mt-0.5"
+                  priority
+                  unoptimized
+                />
+              </div>
+              <span className="text-lg font-semibold text-[#F59E0B]">Signal</span>
             </Link>
-
-            {/*  Bright Data */}
-            <a
-              href="https://brightdata.com"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors pointer-events-auto"
-            >
-              <span className="hidden md:inline">Powered by</span>
-              <Image
-                src="https://idsai.net.technion.ac.il/files/2022/01/Logo-600.png"
-                alt="Bright Data"
-                width={80}
-                height={16}
-                className="opacity-70 hover:opacity-100 transition-opacity"
-              />
-            </a>
           </div>
 
           {/* Navigation Items */}
@@ -74,15 +56,15 @@ export function Navigation() {
                   href={item.href}
                   className={cn(
                     'relative flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 pointer-events-auto',
-                    'hover:bg-white/20',
+                    'hover:bg-purple-500/20',
                     isActive
-                      ? 'text-foreground'
-                      : 'text-muted-foreground hover:text-foreground'
+                      ? 'text-white'
+                      : 'text-zinc-400 hover:text-white'
                   )}
                 >
                   {/* Active indicator - glass pill */}
                   {isActive && (
-                    <div className="absolute inset-0 rounded-lg border border-white/40 bg-white/20 backdrop-blur-xl" />
+                    <div className="absolute inset-0 rounded-lg border border-purple-500/40 bg-purple-500/20 backdrop-blur-xl" />
                   )}
 
                   <Icon className="h-4 w-4 relative z-10" />

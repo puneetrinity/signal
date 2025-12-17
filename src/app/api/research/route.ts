@@ -5,12 +5,44 @@ import {
 } from '@/lib/cache/research-cache';
 import { runResearchGraph } from '@/lib/research/runner';
 
+function isV1ResearchDisabled(): boolean {
+  return process.env.DISABLE_V1_SCRAPING === 'true' || process.env.USE_NEW_DISCOVERY === 'true';
+}
+
+function normalizeLinkedInProfileUrl(input: string): string | null {
+  try {
+    const parsed = new URL(input);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+
+    const hostname = parsed.hostname.toLowerCase();
+    if (!hostname.endsWith('linkedin.com')) return null;
+
+    const pathParts = parsed.pathname.split('/').filter(Boolean);
+    if (pathParts[0] !== 'in' || !pathParts[1]) return null;
+
+    return `https://www.linkedin.com/in/${pathParts[1]}`;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * POST /api/research
  * Initiate a new research request for a person
  */
 export async function POST(request: NextRequest) {
   try {
+    if (isV1ResearchDisabled()) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            'This v1 endpoint is deprecated/disabled (research graph uses scraping). Use v2 enrichment endpoints instead.',
+        },
+        { status: 410 }
+      );
+    }
+
     const body = await request.json();
     const { linkedinUrl, personName } = body;
 
@@ -22,19 +54,18 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Validate LinkedIn URL format
-    const linkedinUrlRegex = /^https?:\/\/(www\.)?linkedin\.com\/in\/[a-zA-Z0-9_-]+\/?$/;
-    if (!linkedinUrlRegex.test(linkedinUrl)) {
+    const normalizedLinkedinUrl = normalizeLinkedInProfileUrl(linkedinUrl);
+    if (!normalizedLinkedinUrl) {
       return NextResponse.json(
         { success: false, error: 'Invalid LinkedIn URL format' },
         { status: 400 }
       );
     }
 
-    console.log('[Research API] Research request for:', linkedinUrl);
+    console.log('[Research API] Research request for:', normalizedLinkedinUrl);
 
     // Check if we have a fresh cached research report
-    const cachedResearch = await getCachedResearch(linkedinUrl);
+    const cachedResearch = await getCachedResearch(normalizedLinkedinUrl);
     if (cachedResearch) {
       console.log('[Research API] Returning cached research:', cachedResearch.id);
       return NextResponse.json({
@@ -54,19 +85,19 @@ export async function POST(request: NextRequest) {
     let finalPersonName = personName;
     if (!finalPersonName) {
       // Extract from LinkedIn URL as fallback
-      const match = linkedinUrl.match(/linkedin\.com\/in\/([a-zA-Z0-9_-]+)/);
-      finalPersonName = match ? match[1].replace(/-/g, ' ') : 'Unknown Person';
+      const idFromUrl = normalizedLinkedinUrl.split('/in/')[1]?.split('/')[0];
+      finalPersonName = idFromUrl ? idFromUrl.replace(/-/g, ' ') : 'Unknown Person';
     }
 
     console.log('[Research API] Creating new research record for:', finalPersonName);
 
     // Create research record in database with 'pending' status
-    const research = await createResearchRecord(linkedinUrl, finalPersonName);
+    const research = await createResearchRecord(normalizedLinkedinUrl, finalPersonName);
 
     console.log('[Research API] Created research record:', research.id);
 
     // Trigger async graph execution (don't wait for completion)
-    runResearchGraph(research.id, linkedinUrl, finalPersonName).catch((error) => {
+    runResearchGraph(research.id, normalizedLinkedinUrl, finalPersonName).catch((error) => {
       console.error('[Research API] Graph execution error:', error);
     });
 
@@ -76,7 +107,7 @@ export async function POST(request: NextRequest) {
       researchId: research.id,
       status: 'pending',
       personName: finalPersonName,
-      linkedinUrl,
+      linkedinUrl: normalizedLinkedinUrl,
       message: 'Research initiated. Use the researchId to check status.',
     });
   } catch (error) {
@@ -97,6 +128,17 @@ export async function POST(request: NextRequest) {
  */
 export async function GET(request: NextRequest) {
   try {
+    if (isV1ResearchDisabled()) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            'This v1 endpoint is deprecated/disabled (returns research built from scraped data). Use v2 enrichment endpoints instead.',
+        },
+        { status: 410 }
+      );
+    }
+
     const searchParams = request.nextUrl.searchParams;
     const limit = parseInt(searchParams.get('limit') || '20', 10);
     const offset = parseInt(searchParams.get('offset') || '0', 10);

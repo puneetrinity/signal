@@ -6,57 +6,58 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 model Person {
-  id                String   @id @default(cuid())
-  linkedinUrl       String   @unique
-  linkedinId        String   @unique // LinkedIn username (e.g., "katcook1")
-  linkedinNumId     String?  // Numeric LinkedIn ID
+  id            String  @id @default(cuid())
+  linkedinUrl   String  @unique
+  linkedinId    String  @unique // LinkedIn username (e.g., "katcook1")
+  linkedinNumId String? // Numeric LinkedIn ID
 
   // Basic Info
-  firstName         String
-  lastName          String
-  fullName          String   @db.Text
-  headline          String?  @db.Text // Position/title (called "position" in API)
-  about             String?  @db.Text
+  firstName String
+  lastName  String
+  fullName  String  @db.Text
+  headline  String? @db.Text // Position/title (called "position" in API)
+  about     String? @db.Text
 
   // Location
-  location          String?  // General location
-  city              String?
-  countryCode       String?  // ISO country code (e.g., "US")
+  location    String? // General location
+  city        String?
+  countryCode String? // ISO country code (e.g., "US")
 
   // Profile Media
-  profilePicUrl     String?
-  bannerImage       String?
-  defaultAvatar     Boolean  @default(false)
+  profilePicUrl String?
+  bannerImage   String?
+  defaultAvatar Boolean @default(false)
 
   // Current Company
-  currentCompany    String?  // Company name
-  currentCompanyId  String?  // Company LinkedIn ID
+  currentCompany   String? // Company name
+  currentCompanyId String? // Company LinkedIn ID
 
   // Rich Data (JSON fields)
-  experience        Json?    // Array of Experience objects
-  education         Json?    // Array of Education objects
-  languages         Json?    // Array of Language objects
+  experience Json? // Array of Experience objects
+  education  Json? // Array of Education objects
+  languages  Json? // Array of Language objects
 
   // Social Stats
-  connections       Int?
-  followers         Int?
+  connections Int?
+  followers   Int?
 
   // Metadata
-  searchCount       Int      @default(0) // How many times searched
-  lastViewed        DateTime @default(now())
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  searchCount Int      @default(0) // How many times searched
+  lastViewed  DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   // Flags
   memorializedAccount Boolean @default(false)
 
   // Relations
-  researches          Research[]
+  researches Research[]
 
   @@index([fullName])
   @@index([firstName, lastName])
@@ -71,7 +72,7 @@ model Person {
 model Search {
   id          String   @id @default(cuid())
   query       String   @db.Text
-  results     Json     // Array of person IDs
+  results     Json // Array of person IDs
   resultCount Int
   createdAt   DateTime @default(now())
 
@@ -80,22 +81,261 @@ model Search {
 }
 
 model Research {
-  id              String   @id @default(cuid())
-  personId        String?  // Foreign key to Person model
-  person          Person?  @relation(fields: [personId], references: [id])
-  linkedinUrl     String
-  personName      String
-  report          String   @db.Text // Markdown report
-  sources         Json     // Array of source URLs and summaries
-  metadata        Json?    // Graph execution metadata (status updates, timing, etc.)
-  status          String   // 'pending' | 'processing' | 'completed' | 'failed'
-  errorMessage    String?  @db.Text
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id           String   @id @default(cuid())
+  personId     String? // Foreign key to Person model
+  person       Person?  @relation(fields: [personId], references: [id])
+  linkedinUrl  String
+  personName   String
+  report       String   @db.Text // Markdown report
+  sources      Json // Array of source URLs and summaries
+  metadata     Json? // Graph execution metadata (status updates, timing, etc.)
+  status       String // 'pending' | 'processing' | 'completed' | 'failed'
+  errorMessage String?  @db.Text
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   @@index([personId])
   @@index([linkedinUrl])
   @@index([status])
   @@index([createdAt])
   @@map("researches")
+}
+
+// ============================================================================
+// V2 SCHEMA - Compliant Recruiter Sourcing
+// ============================================================================
+// These tables support the v2 architecture with:
+// - LinkedIn URL capture only (no scraping)
+// - Bridge-first identity discovery
+// - Human-in-the-loop confirmation
+// - No PII storage until confirmed
+// ============================================================================
+
+/// Candidate: The anchor for a LinkedIn lead
+/// Stores only URL + metadata from search snippets (NOT scraped profile data)
+model Candidate {
+  id String @id @default(cuid())
+
+  // LinkedIn anchor (URL only - no scraped data)
+  linkedinUrl String @unique
+  linkedinId  String @unique // Username from URL (e.g., "johnsmith")
+
+  // Data from search snippets (public SERP data, not scraped)
+  searchTitle   String? @db.Text // Title from Google result
+  searchSnippet String? @db.Text // Snippet from Google result
+
+  // Parsed hints from search (not authoritative)
+  nameHint     String? // Parsed from title, may be wrong
+  headlineHint String? @db.Text // Parsed from title/snippet
+  locationHint String? // Parsed from snippet
+
+  // Classification for enrichment routing
+  roleType String? // 'engineer' | 'data_scientist' | 'researcher' | 'founder' | 'designer' | 'general'
+
+  // Capture metadata
+  captureSource  String  @default("search") // 'search' | 'extension' | 'import' | 'manual'
+  searchQuery    String? @db.Text // Original query that found this candidate
+  searchProvider String? // 'searxng' | 'brave' | 'brightdata'
+
+  // Enrichment state
+  enrichmentStatus String    @default("pending") // 'pending' | 'in_progress' | 'completed' | 'failed'
+  lastEnrichedAt   DateTime?
+  confidenceScore  Float? // Overall confidence (0.0-1.0)
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  identityCandidates  IdentityCandidate[]
+  confirmedIdentities ConfirmedIdentity[]
+  enrichmentSessions  EnrichmentSession[]
+
+  @@index([linkedinId])
+  @@index([roleType])
+  @@index([enrichmentStatus])
+  @@index([confidenceScore])
+  @@index([createdAt])
+  @@map("candidates")
+}
+
+/// IdentityCandidate: Unconfirmed identity signals
+/// Stores evidence pointers, NOT the actual PII (e.g., commit URL, not email)
+model IdentityCandidate {
+  id          String    @id @default(cuid())
+  candidateId String
+  candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  // Platform identity
+  platform   String // 'github' | 'stackoverflow' | 'kaggle' | 'orcid' | etc.
+  platformId String // Username/ID on that platform
+  profileUrl String // Full profile URL
+
+  // Confidence scoring
+  status           String  @default("unconfirmed") // 'unconfirmed' | 'confirmed' | 'rejected'
+  confidence       Float // 0.0 to 1.0
+  confidenceBucket String? // 'auto_merge' | 'suggest' | 'low' | 'rejected'
+
+  // Scoring breakdown
+  scoreBreakdown Json? // { bridgeWeight, nameMatch, companyMatch, ... }
+
+  // Evidence pointers (NO PII like emails stored here)
+  // Example: { type: "commit_email", commitUrl: "...", commitSha: "..." }
+  evidence Json?
+
+  // Contradiction tracking
+  hasContradiction  Boolean @default(false)
+  contradictionNote String? @db.Text
+
+  // Discovery metadata
+  discoveredAt DateTime @default(now())
+  discoveredBy String? // Session ID or 'manual'
+  searchQuery  String?  @db.Text // Query that found this
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([candidateId, platform, platformId])
+  @@index([candidateId])
+  @@index([platform])
+  @@index([status])
+  @@index([confidence])
+  @@index([createdAt])
+  @@map("identity_candidates")
+}
+
+/// ConfirmedIdentity: Verified identity links (can store PII after confirmation)
+/// Only populated after human or subject confirmation
+model ConfirmedIdentity {
+  id          String    @id @default(cuid())
+  candidateId String
+  candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  // Platform identity (copied from IdentityCandidate on confirmation)
+  platform   String
+  platformId String
+  profileUrl String
+
+  // Contact info (NOW allowed to store PII after confirmation)
+  // Example: { email: "...", source: "github_commit", sourceUrl: "..." }
+  contactInfo Json?
+
+  // Profile data (public data from the platform, fetched at confirmation time)
+  profileData Json? // Platform-specific profile fields
+
+  // Confirmation tracking
+  confirmedBy      String // 'recruiter:{userId}' | 'subject:{method}' | 'auto:{reason}'
+  confirmedAt      DateTime @default(now())
+  confirmationNote String?  @db.Text
+
+  // Original identity candidate reference
+  identityCandidateId String? @unique
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([candidateId, platform, platformId])
+  @@index([candidateId])
+  @@index([platform])
+  @@index([confirmedBy])
+  @@index([createdAt])
+  @@map("confirmed_identities")
+}
+
+/// EnrichmentSession: Tracks enrichment runs for audit and debugging
+model EnrichmentSession {
+  id          String    @id @default(cuid())
+  candidateId String
+  candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  // Session state
+  status String @default("pending") // 'pending' | 'running' | 'completed' | 'failed'
+
+  // Execution plan
+  roleType        String? // Role type used for source selection
+  sourcesPlanned  Json? // Array of sources to query
+  sourcesExecuted Json? // Array of sources actually queried
+
+  // Budget tracking
+  queriesPlanned  Int?
+  queriesExecuted Int?
+  earlyStopReason String? // 'confidence_threshold' | 'budget_exhausted' | null
+
+  // Results summary
+  identitiesFound     Int    @default(0)
+  identitiesConfirmed Int    @default(0)
+  finalConfidence     Float?
+
+  // Error tracking
+  errorMessage String? @db.Text
+  errorDetails Json?
+
+  // Timing
+  startedAt   DateTime?
+  completedAt DateTime?
+  durationMs  Int?
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([candidateId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("enrichment_sessions")
+}
+
+/// AuditLog: General audit trail for compliance
+model AuditLog {
+  id String @id @default(cuid())
+
+  // What happened
+  action       String // 'candidate.created' | 'identity.confirmed' | 'email.revealed' | etc.
+  resourceType String // 'candidate' | 'identity_candidate' | 'confirmed_identity'
+  resourceId   String
+
+  // Who did it
+  actorType String // 'system' | 'recruiter' | 'subject'
+  actorId   String? // User ID if applicable
+
+  // Context
+  metadata  Json? // Action-specific details
+  ipAddress String?
+  userAgent String? @db.Text
+
+  // Timestamp
+  createdAt DateTime @default(now())
+
+  @@index([action])
+  @@index([resourceType, resourceId])
+  @@index([actorType, actorId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+/// SearchCacheV2: DB-based search cache (alternative to Redis)
+model SearchCacheV2 {
+  id String @id @default(cuid())
+
+  // Cache key (normalized query hash)
+  queryHash String @unique
+  queryText String @db.Text
+
+  // Cached data
+  parsedQuery Json // ParsedSearchQuery
+  results     Json // Array of candidate summaries
+  resultCount Int
+
+  // Provider info
+  provider String? // 'searxng' | 'brave' | 'brightdata'
+
+  // TTL management
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([queryHash])
+  @@index([expiresAt])
+  @@map("search_cache_v2")
 }

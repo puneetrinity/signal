@@ -6,6 +6,10 @@ import type { ProfileData } from '@/types/linkedin';
 
 const MAX_BATCH_SIZE = 50;
 
+function isV1ScrapingDisabled(): boolean {
+  return process.env.DISABLE_V1_SCRAPING === 'true' || process.env.USE_NEW_DISCOVERY === 'true';
+}
+
 function normalizeInputId(id: unknown): string | null {
   if (typeof id !== 'string') {
     return null;
@@ -39,6 +43,17 @@ function buildLinkedinUrl(linkedinId: string): string {
 
 export async function POST(request: NextRequest) {
   try {
+    if (isV1ScrapingDisabled()) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            'This v1 endpoint is deprecated/disabled (LinkedIn profile scraping). Use v2: POST /api/v2/search + POST /api/v2/enrich.',
+        },
+        { status: 410 },
+      );
+    }
+
     const body = await request.json();
     const rawIds = body?.linkedinIds;
 

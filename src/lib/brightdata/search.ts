@@ -5,6 +5,8 @@ import type { GoogleSearchResult, ProfileSummary } from '@/types/linkedin';
  * Direct API calls to search Google and extract LinkedIn URLs
  */
 const BRIGHTDATA_API_URL = 'https://api.brightdata.com/request';
+const RESULTS_PER_PAGE = 10;
+const MAX_SEARCH_PAGES = 5; // Up to ~50 Google organic results (10/page)
 
 interface BrightDataGoogleSearchResult {
   title: string;
@@ -43,7 +45,7 @@ function getApiHeaders() {
  */
 function buildGoogleSearchUrl(query: string, page: number = 0, countryCode?: string | null): string {
   const encodedQuery = encodeURIComponent(query);
-  const start = page * 10;
+  const start = page * RESULTS_PER_PAGE;
   let url = `https://www.google.com/search?q=${encodedQuery}&start=${start}&brd_json=1`;
 
   if (countryCode) {
@@ -136,7 +138,16 @@ function isValidLinkedInProfileUrl(url: string): boolean {
 function normalizeLinkedInUrl(url: string): string {
   try {
     const parsed = new URL(url);
-    return `https://www.linkedin.com${parsed.pathname}`;
+    const segments = parsed.pathname.split('/').filter(Boolean);
+    const inIndex = segments.findIndex((segment) => segment === 'in');
+    const linkedinId = inIndex >= 0 ? segments[inIndex + 1] : undefined;
+
+    if (linkedinId) {
+      return `https://www.linkedin.com/in/${linkedinId}`;
+    }
+
+    const pathname = parsed.pathname.replace(/\/$/, '');
+    return `https://www.linkedin.com${pathname}`;
   } catch {
     return url;
   }
@@ -208,21 +219,46 @@ export async function searchLinkedInProfiles(
   maxResults: number = 10,
   countryCode?: string | null,
 ): Promise<ProfileSummary[]> {
+  const requested = Math.max(1, Math.min(maxResults, 50));
+
   console.log('[Google Search] Searching for LinkedIn profiles:', {
     query,
-    maxResults,
+    maxResults: requested,
     countryCode,
   });
 
   try {
-    const searchResults = await searchGoogle(query, 0, countryCode);
-    const organicResults = searchResults.organic ?? [];
+    const summaries: ProfileSummary[] = [];
+    const seenLinkedinIds = new Set<string>();
 
-    const normalizedResults = organicResults.map((result, index) => normalizeGoogleResult(result, index));
+    for (let page = 0; page < MAX_SEARCH_PAGES && summaries.length < requested; page++) {
+      const searchResults = await searchGoogle(query, page, countryCode);
+      const organicResults = searchResults.organic ?? [];
 
-    const linkedinResults = normalizedResults.filter((result) => isValidLinkedInProfileUrl(result.link));
+      if (organicResults.length === 0) {
+        break;
+      }
 
-    const summaries = linkedinResults.slice(0, maxResults).map(extractProfileSummary);
+      const normalizedResults = organicResults.map((result, index) =>
+        normalizeGoogleResult(result, page * RESULTS_PER_PAGE + index),
+      );
+
+      const linkedinResults = normalizedResults.filter((result) => isValidLinkedInProfileUrl(result.link));
+
+      for (const result of linkedinResults) {
+        const summary = extractProfileSummary(result);
+        if (seenLinkedinIds.has(summary.linkedinId)) {
+          continue;
+        }
+
+        seenLinkedinIds.add(summary.linkedinId);
+        summaries.push(summary);
+
+        if (summaries.length >= requested) {
+          break;
+        }
+      }
+    }
 
     console.log('[Google Search] Found summaries:', summaries.length);
     return summaries;

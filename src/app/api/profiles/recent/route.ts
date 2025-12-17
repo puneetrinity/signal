@@ -5,6 +5,10 @@ import type { Experience, Education, Language } from '@/types/linkedin';
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 
+function isV1DataDisabled(): boolean {
+  return process.env.DISABLE_V1_SCRAPING === 'true' || process.env.USE_NEW_DISCOVERY === 'true';
+}
+
 /**
  * GET /api/profiles/recent
  *
@@ -20,6 +24,17 @@ const MAX_LIMIT = 100;
  */
 export async function GET(request: NextRequest) {
   try {
+    if (isV1DataDisabled()) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            'This v1 endpoint is deprecated/disabled (returns cached LinkedIn profile data). Use v2 candidates/identities endpoints.',
+        },
+        { status: 410 },
+      );
+    }
+
     const searchParams = request.nextUrl.searchParams;
 
     // Parse limit parameter
