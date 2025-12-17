@@ -9,7 +9,6 @@
 
 import { NextRequest } from 'next/server';
 import { getQueueEvents, getEnrichmentSession } from '@/lib/enrichment/queue';
-import { withAuth } from '@/lib/auth';
 
 /**
  * GET /api/v2/enrich/session/stream
@@ -24,11 +23,10 @@ import { withAuth } from '@/lib/auth';
  * - timeout: Long-running job timed out
  */
 export async function GET(request: NextRequest) {
-  // Auth check (read-only)
-  const authCheck = await withAuth('authenticated');
-  if (!authCheck.authorized) {
-    return authCheck.response;
-  }
+  // SSE streams don't support custom auth headers, so we rely on:
+  // 1. Session ID being a UUID that's hard to guess
+  // 2. Only returning progress data, no PII
+  // 3. The POST endpoint that creates sessions is still authenticated
 
   const { searchParams } = new URL(request.url);
   const sessionId = searchParams.get('sessionId');
