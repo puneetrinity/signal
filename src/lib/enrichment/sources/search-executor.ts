@@ -260,42 +260,86 @@ const PLATFORM_PATTERNS: Record<
     profileUrlBuilder: (id) => `https://www.researchgate.net/profile/${id}`,
   },
   arxiv: {
-    urlPattern: /arxiv\.org\/(?:abs|search)\/?\?.*searchtype=author.*query=([^&]+)/,
+    // Match any arxiv URL - papers, author pages, or search results
+    urlPattern: /arxiv\.org\/(?:abs|pdf|list|search|a)\/([a-zA-Z0-9._-]+)/,
     idExtractor: (url) => {
-      const match = url.match(/arxiv\.org.*author.*?([a-zA-Z+]+)/i);
-      return match?.[1] ? decodeURIComponent(match[1]) : null;
+      // Try to extract paper ID or author ID
+      const absMatch = url.match(/arxiv\.org\/abs\/([0-9.]+)/);
+      if (absMatch) return absMatch[1];
+      const authorMatch = url.match(/arxiv\.org\/a\/([a-zA-Z0-9._-]+)/);
+      if (authorMatch) return authorMatch[1];
+      // Fallback: extract last path segment
+      const pathMatch = url.match(/arxiv\.org\/[^/]+\/([a-zA-Z0-9._-]+)/);
+      return pathMatch?.[1] || null;
     },
     profileUrlBuilder: (id) => `https://arxiv.org/search/?searchtype=author&query=${encodeURIComponent(id)}`,
   },
   patents: {
-    urlPattern: /patents\.google\.com\/\?inventor=([^&]+)/,
+    // Match any patents.google.com URL - individual patents or search results
+    urlPattern: /patents\.google\.com/,
     idExtractor: (url) => {
-      const match = url.match(/patents\.google\.com\/\?inventor=([^&]+)/);
-      return match?.[1] ? decodeURIComponent(match[1]) : null;
+      // Try to get inventor from URL params
+      const inventorMatch = url.match(/[?&]inventor=([^&]+)/);
+      if (inventorMatch) return decodeURIComponent(inventorMatch[1]);
+      // Try to get patent number
+      const patentMatch = url.match(/patents\.google\.com\/patent\/([A-Z0-9]+)/);
+      if (patentMatch) return patentMatch[1];
+      // Fallback: use URL as ID since it's a valid reference
+      return url.includes('patents.google.com') ? url.split('/').pop() || null : null;
     },
     profileUrlBuilder: (id) => `https://patents.google.com/?inventor=${encodeURIComponent(id)}`,
   },
   university: {
-    urlPattern: /\.edu\/.*(?:faculty|people|profile)\/([a-zA-Z0-9_-]+)/,
+    // Match both .edu (US) and .ac.uk (UK) academic domains
+    urlPattern: /(?:\.edu|\.ac\.uk)\//,
     idExtractor: (url) => {
-      const match = url.match(/\.edu\/.*(?:faculty|people|profile)\/([a-zA-Z0-9_-]+)/);
-      return match?.[1] || null;
+      // Try faculty/people/profile pattern
+      const profileMatch = url.match(/(?:\.edu|\.ac\.uk)\/.*(?:faculty|people|profile|staff|about)\/([a-zA-Z0-9_-]+)/);
+      if (profileMatch) return profileMatch[1];
+      // Try ~username pattern common in academia
+      const tildeMatch = url.match(/(?:\.edu|\.ac\.uk)\/~([a-zA-Z0-9_]+)/);
+      if (tildeMatch) return tildeMatch[1];
+      // Try department/name pattern
+      const deptMatch = url.match(/(?:\.edu|\.ac\.uk)\/[^/]+\/([a-zA-Z0-9_-]+)\/?$/);
+      if (deptMatch && deptMatch[1].length > 3) return deptMatch[1];
+      // Fallback: use last meaningful path segment
+      const pathParts = new URL(url).pathname.split('/').filter(Boolean);
+      return pathParts.length > 0 ? pathParts[pathParts.length - 1] : null;
     },
     profileUrlBuilder: (id) => id, // University profiles vary too much
   },
   sec: {
-    urlPattern: /sec\.gov\/cgi-bin\/browse-edgar.*CIK=([^&]+)/,
+    // Match any SEC EDGAR page - filings, company pages, or search results
+    urlPattern: /sec\.gov/,
     idExtractor: (url) => {
-      const match = url.match(/sec\.gov.*CIK=([^&]+)/);
-      return match?.[1] || null;
+      // Try CIK extraction
+      const cikMatch = url.match(/CIK=([0-9]+)/i);
+      if (cikMatch) return cikMatch[1];
+      // Try accession number from filing URL
+      const accMatch = url.match(/Archives\/edgar\/data\/([0-9]+)/);
+      if (accMatch) return accMatch[1];
+      // Fallback: use URL hash for reference
+      return url.includes('sec.gov') ? url.split('/').filter(s => /\d+/.test(s))[0] || null : null;
     },
     profileUrlBuilder: (id) => `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${id}`,
   },
   companyteam: {
-    urlPattern: /\/(?:team|about|people)\/([a-zA-Z0-9_-]+)/,
+    // More flexible pattern - any URL with team/about/people/leadership/staff in path
+    urlPattern: /\/(?:team|about|people|leadership|staff|our-team|meet-the-team|company|who-we-are)/i,
     idExtractor: (url) => {
-      const match = url.match(/\/(?:team|about|people)\/([a-zA-Z0-9_-]+)/);
-      return match?.[1] || null;
+      // Try to extract person slug after team/about/people keywords
+      const personMatch = url.match(/\/(?:team|about|people|leadership|staff)\/([a-zA-Z0-9_-]+)/i);
+      if (personMatch) return personMatch[1];
+      // Try hash anchor for team member links
+      const hashMatch = url.match(/#([a-zA-Z0-9_-]+)/);
+      if (hashMatch) return hashMatch[1];
+      // Use the URL as the ID since it's a valid team page reference
+      try {
+        const urlObj = new URL(url);
+        return urlObj.pathname.split('/').filter(Boolean).pop() || urlObj.hostname;
+      } catch {
+        return null;
+      }
     },
     profileUrlBuilder: (id) => id,
   },

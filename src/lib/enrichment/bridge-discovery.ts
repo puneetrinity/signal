@@ -22,7 +22,7 @@ import {
 import {
   calculateConfidenceScore,
   classifyConfidence,
-  meetsStorageThreshold,
+  shouldPersistIdentity,
   detectContradictions,
   type ScoreBreakdown,
 } from './scoring';
@@ -260,8 +260,8 @@ export async function discoverGitHubIdentities(
           const { hasContradiction, note: contradictionNote } =
             detectContradictions(scoreInput);
 
-          // Only store if meets threshold
-          if (meetsStorageThreshold(confidence)) {
+          // Only store if meets threshold AND has meaningful signals
+          if (shouldPersistIdentity(scoreBreakdown)) {
             identitiesFound.push({
               platform: 'github',
               platformId: result.login,

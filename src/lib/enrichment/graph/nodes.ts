@@ -22,6 +22,7 @@ import {
   type EphemeralPlatformDataItem,
 } from './ephemeral';
 import { generateCandidateSummary } from '../summary/generate';
+import { shouldPersistIdentity, type ScoreBreakdown } from '../scoring';
 import {
   type EnrichmentState,
   type PartialEnrichmentState,
@@ -31,6 +32,20 @@ import {
   type PlatformQueryResult,
   DEFAULT_BUDGET,
 } from './types';
+
+/**
+ * Get the minimum confidence threshold from env or default
+ */
+function getMinConfidence(): number {
+  const envValue = process.env.ENRICHMENT_MIN_CONFIDENCE;
+  if (envValue) {
+    const parsed = parseFloat(envValue);
+    if (!isNaN(parsed) && parsed >= 0 && parsed <= 1) {
+      return parsed;
+    }
+  }
+  return 0.35;
+}
 
 /**
  * Node progress percentages for observability
@@ -318,7 +333,7 @@ export async function searchPlatformNode(
     const result = await source.discover(sourceHints, {
       maxResults: state.budget?.maxIdentitiesPerPlatform || 5,
       maxQueries: 3,
-      minConfidence: 0.35,
+      minConfidence: getMinConfidence(),
     });
 
     const platformResult: PlatformQueryResult = {
@@ -439,9 +454,15 @@ export async function persistResultsNode(
   };
 
   try {
-    // Filter and transform identities for persistence
+    // Filter identities using the guard function (requires name match + secondary signal)
     const identitiesToPersist = state.identitiesFound
-      .filter((i) => i.confidence >= 0.35); // Only persist above threshold
+      .filter((i) => {
+        if (!i.scoreBreakdown) {
+          // Fallback to simple threshold if no breakdown
+          return i.confidence >= getMinConfidence();
+        }
+        return shouldPersistIdentity(i.scoreBreakdown as ScoreBreakdown);
+      });
 
     // Upsert identity candidates using Prisma
     for (const identity of identitiesToPersist) {
