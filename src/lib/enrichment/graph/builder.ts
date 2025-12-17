@@ -9,7 +9,6 @@
 
 import { StateGraph, END, Send } from '@langchain/langgraph';
 import { v4 as uuidv4 } from 'uuid';
-import type { EnrichmentPlatform } from '../sources/types';
 import {
   EnrichmentStateAnnotation,
   type EnrichmentState,
@@ -247,9 +246,10 @@ export async function buildEnrichmentGraphWithCheckpointer(
   // Dynamic import (non-literal) to avoid TS module resolution errors when the optional
   // dependency isn't installed in all environments.
   const moduleName = '@langchain/langgraph-checkpoint-postgres';
-  const { PostgresSaver } = (await import(moduleName)) as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { PostgresSaver } = (await import(moduleName)) as { PostgresSaver: { fromConnString: (url: string) => { setup: () => Promise<void> } } };
 
-  const checkpointer = PostgresSaver.fromConnString(connectionString) as any;
+  const checkpointer = PostgresSaver.fromConnString(connectionString);
   await checkpointer.setup();
 
   const graph = new StateGraph(EnrichmentStateAnnotation)
