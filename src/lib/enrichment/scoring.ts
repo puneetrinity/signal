@@ -11,8 +11,8 @@
  * Confidence buckets:
  * - auto_merge: >= 0.9 (very high confidence, could auto-confirm)
  * - suggest: >= 0.7 (high confidence, recommend to recruiter)
- * - low: >= 0.4 (possible match, needs review)
- * - rejected: < 0.4 (unlikely match)
+ * - low: >= 0.3 (possible match, needs review)
+ * - rejected: < 0.3 (unlikely match)
  *
  * @see docs/ARCHITECTURE_V2.1.md
  */
@@ -277,16 +277,17 @@ export function calculateConfidenceScore(input: ScoringInput): ScoreBreakdown {
 export function classifyConfidence(score: number): ConfidenceBucket {
   if (score >= 0.9) return 'auto_merge';
   if (score >= 0.7) return 'suggest';
-  if (score >= 0.4) return 'low';
+  if (score >= 0.3) return 'low';
   return 'rejected';
 }
 
 /**
  * Check if score meets threshold for storing
  * We don't store rejected matches to avoid noise
+ * Threshold lowered to 0.3 to allow name-based matches without bridge evidence
  */
 export function meetsStorageThreshold(score: number): boolean {
-  return score >= 0.4;
+  return score >= 0.3;
 }
 
 /**

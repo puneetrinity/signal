@@ -101,7 +101,7 @@ const ENABLE_COMMIT_EMAIL_EVIDENCE = process.env.ENABLE_COMMIT_EMAIL_EVIDENCE ==
 
 const DEFAULT_OPTIONS: Required<BridgeDiscoveryOptions> = {
   maxGitHubResults: 5,
-  confidenceThreshold: 0.4,
+  confidenceThreshold: 0.3, // Lowered to allow name-based matches without bridge evidence
   includeCommitEvidence: ENABLE_COMMIT_EMAIL_EVIDENCE,
   maxCommitRepos: 3,
 };
@@ -477,7 +477,7 @@ export async function discoverAllPlatformIdentities(
       searchResult = await discoverAcrossSources(toSourceHints(hints), roleType, {
         maxResults: options.maxGitHubResults || 5,
         maxQueries: 3,
-        minConfidence: options.confidenceThreshold || 0.4,
+        minConfidence: options.confidenceThreshold || 0.3,
         maxSources: options.maxSources || 5,
         parallelism: 3,
       });

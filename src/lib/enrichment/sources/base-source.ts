@@ -36,7 +36,7 @@ const DEFAULT_OPTIONS: Required<DiscoveryOptions> = {
   maxResults: 5,
   maxQueries: 3,
   timeout: 30000,
-  minConfidence: 0.4,
+  minConfidence: 0.3, // Lowered to allow name-based matches
 };
 
 /**
@@ -355,7 +355,7 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
   ): 'auto_merge' | 'suggest' | 'low' | 'rejected' {
     if (confidence >= 0.9) return 'auto_merge';
     if (confidence >= 0.7) return 'suggest';
-    if (confidence >= 0.4) return 'low';
+    if (confidence >= 0.3) return 'low';
     return 'rejected';
   }
 

@@ -318,7 +318,7 @@ export async function searchPlatformNode(
     const result = await source.discover(sourceHints, {
       maxResults: state.budget?.maxIdentitiesPerPlatform || 5,
       maxQueries: 3,
-      minConfidence: 0.4,
+      minConfidence: 0.3,
     });
 
     const platformResult: PlatformQueryResult = {
@@ -441,7 +441,7 @@ export async function persistResultsNode(
   try {
     // Filter and transform identities for persistence
     const identitiesToPersist = state.identitiesFound
-      .filter((i) => i.confidence >= 0.4); // Only persist above threshold
+      .filter((i) => i.confidence >= 0.3); // Only persist above threshold
 
     // Upsert identity candidates using Prisma
     for (const identity of identitiesToPersist) {
