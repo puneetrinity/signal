@@ -36,7 +36,7 @@ const DEFAULT_OPTIONS: Required<DiscoveryOptions> = {
   maxResults: 5,
   maxQueries: 3,
   timeout: 30000,
-  minConfidence: 0.3, // Lowered to allow name-based matches
+  minConfidence: 0.35, // Configurable via ENRICHMENT_MIN_CONFIDENCE env var
 };
 
 /**
@@ -257,20 +257,22 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
     activityScore = Math.min(activityScore, 1);
 
     // Bridge weight (profile link to LinkedIn is strongest signal)
-    const bridgeWeight = hasBridgeEvidence ? 0.5 : 0;
+    const bridgeWeight = hasBridgeEvidence ? 0.4 : 0;
 
-    // Calculate total score
-    const total = Math.min(
-      1,
-      this.baseWeight * (
-        bridgeWeight * 1.0 +
-        nameMatch * 0.35 +
-        companyMatch * 0.25 +
-        locationMatch * 0.15 +
-        profileCompleteness * 0.15 +
-        activityScore * 0.1
-      )
-    );
+    // Calculate base score from signals (not multiplied by baseWeight)
+    // Weights sum to 1.0: bridge(0.4) + name(0.3) + company(0.15) + location(0.1) + profile(0.05)
+    const baseScore =
+      bridgeWeight +
+      nameMatch * 0.3 +
+      companyMatch * 0.15 +
+      locationMatch * 0.1 +
+      (profileCompleteness * 0.5 + activityScore * 0.5) * 0.05;
+
+    // Platform weight is used as a small bonus for more reliable platforms, not a multiplier
+    // This ensures name matches can still reach threshold regardless of platform
+    const platformBonus = this.baseWeight * 0.1; // Max +0.05 for high-weight platforms
+
+    const total = Math.min(1, baseScore + platformBonus);
 
     return {
       bridgeWeight,
@@ -355,7 +357,7 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
   ): 'auto_merge' | 'suggest' | 'low' | 'rejected' {
     if (confidence >= 0.9) return 'auto_merge';
     if (confidence >= 0.7) return 'suggest';
-    if (confidence >= 0.3) return 'low';
+    if (confidence >= 0.35) return 'low';
     return 'rejected';
   }
 

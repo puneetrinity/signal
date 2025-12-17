@@ -11,8 +11,8 @@
  * Confidence buckets:
  * - auto_merge: >= 0.9 (very high confidence, could auto-confirm)
  * - suggest: >= 0.7 (high confidence, recommend to recruiter)
- * - low: >= 0.3 (possible match, needs review)
- * - rejected: < 0.3 (unlikely match)
+ * - low: >= 0.35 (possible match, needs review)
+ * - rejected: < 0.35 (unlikely match)
  *
  * @see docs/ARCHITECTURE_V2.1.md
  */
@@ -277,17 +277,60 @@ export function calculateConfidenceScore(input: ScoringInput): ScoreBreakdown {
 export function classifyConfidence(score: number): ConfidenceBucket {
   if (score >= 0.9) return 'auto_merge';
   if (score >= 0.7) return 'suggest';
-  if (score >= 0.3) return 'low';
+  if (score >= 0.35) return 'low';
   return 'rejected';
+}
+
+/**
+ * Get the minimum confidence threshold for storing identities
+ * Configurable via ENRICHMENT_MIN_CONFIDENCE env var (default: 0.35)
+ */
+function getStorageThreshold(): number {
+  const envValue = process.env.ENRICHMENT_MIN_CONFIDENCE;
+  if (envValue) {
+    const parsed = parseFloat(envValue);
+    if (!isNaN(parsed) && parsed >= 0 && parsed <= 1) {
+      return parsed;
+    }
+  }
+  return 0.35; // Default: requires name match + some secondary signal
 }
 
 /**
  * Check if score meets threshold for storing
  * We don't store rejected matches to avoid noise
- * Threshold lowered to 0.3 to allow name-based matches without bridge evidence
  */
 export function meetsStorageThreshold(score: number): boolean {
-  return score >= 0.3;
+  return score >= getStorageThreshold();
+}
+
+/**
+ * Check if an identity should be persisted based on score breakdown
+ * Requires: total >= threshold AND (bridge evidence OR name match + secondary signal)
+ * This prevents storing random matches without meaningful evidence
+ */
+export function shouldPersistIdentity(breakdown: ScoreBreakdown): boolean {
+  const threshold = getStorageThreshold();
+
+  // Must meet minimum threshold
+  if (breakdown.total < threshold) {
+    return false;
+  }
+
+  // If we have bridge evidence (LinkedIn link), always persist
+  if (breakdown.bridgeWeight > 0) {
+    return true;
+  }
+
+  // Otherwise, require meaningful name match (> 0.15 means at least partial match)
+  // AND at least one secondary signal (company, location, or profile completeness)
+  const hasNameMatch = breakdown.nameMatch >= 0.15;
+  const hasSecondarySignal =
+    breakdown.companyMatch > 0 ||
+    breakdown.locationMatch > 0 ||
+    breakdown.profileCompleteness >= 0.03; // At least has name + bio
+
+  return hasNameMatch && hasSecondarySignal;
 }
 
 /**
