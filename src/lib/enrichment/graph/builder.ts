@@ -52,8 +52,9 @@ function routeAfterGitHub(state: EnrichmentState): string | Send[] {
     return NODES.AGGREGATE;
   }
 
-  // Otherwise, fan out to search platforms in parallel
-  const platforms = getNextPlatformBatch(state, 3);
+  // Use budget-controlled parallelism (default: 3, configurable via env)
+  const maxParallel = state.budget?.maxParallelPlatforms || DEFAULT_BUDGET.maxParallelPlatforms;
+  const platforms = getNextPlatformBatch(state, maxParallel);
   if (platforms.length === 0) {
     return NODES.AGGREGATE;
   }
@@ -80,8 +81,9 @@ function routeAfterSearch(state: EnrichmentState): string | Send[] {
     return NODES.AGGREGATE;
   }
 
-  // Get next batch
-  const nextBatch = remaining.slice(0, 3);
+  // Use budget-controlled parallelism
+  const maxParallel = state.budget?.maxParallelPlatforms || DEFAULT_BUDGET.maxParallelPlatforms;
+  const nextBatch = remaining.slice(0, maxParallel);
   if (nextBatch.length === 0) {
     return NODES.AGGREGATE;
   }

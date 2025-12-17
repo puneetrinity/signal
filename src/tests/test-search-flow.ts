@@ -17,12 +17,12 @@ async function testSearchFlow() {
     console.log(`  - Role: ${parsed.role}`);
     console.log(`  - Location: ${parsed.location || 'N/A'}`);
     console.log(`  - Keywords: ${parsed.keywords.join(', ')}`);
-    console.log(`  - Google Query: ${parsed.googleQuery}\n`);
+    console.log(`  - Search Query: ${parsed.searchQuery}\n`);
 
     // Step 2: Search Google and extract LinkedIn profile summaries
-    console.log('[2/2] Searching Google for LinkedIn profile summaries...');
+    console.log('[2/2] Searching for LinkedIn profile summaries...');
     const summaries = await searchLinkedInProfiles(
-      parsed.googleQuery,
+      parsed.searchQuery,
       parsed.count,
       parsed.countryCode
     );

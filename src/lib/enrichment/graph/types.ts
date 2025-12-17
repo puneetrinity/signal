@@ -65,22 +65,44 @@ export interface EnrichmentProgressEvent {
  * Budget configuration for enrichment
  */
 export interface EnrichmentBudget {
+  /** Maximum total queries across all platforms */
   maxQueries: number;
+  /** Maximum number of platforms to query */
   maxPlatforms: number;
+  /** Maximum identities to return per platform */
   maxIdentitiesPerPlatform: number;
+  /** Overall timeout in milliseconds */
   timeoutMs: number;
+  /** Confidence threshold to stop early */
   minConfidenceForEarlyStop: number;
+  /** Maximum platforms to query in parallel (cost control) */
+  maxParallelPlatforms: number;
+}
+
+/**
+ * Parse environment variable as integer with fallback
+ */
+function parseEnvInt(envVar: string | undefined, defaultValue: number): number {
+  if (!envVar) return defaultValue;
+  const parsed = parseInt(envVar, 10);
+  return Number.isNaN(parsed) ? defaultValue : parsed;
 }
 
 /**
  * Default budget configuration
+ *
+ * Environment overrides:
+ * - ENRICHMENT_MAX_PARALLEL_PLATFORMS: Override maxParallelPlatforms
+ * - ENRICHMENT_MAX_PLATFORMS: Override maxPlatforms
+ * - ENRICHMENT_MAX_QUERIES: Override maxQueries
  */
 export const DEFAULT_BUDGET: EnrichmentBudget = {
-  maxQueries: 30,
-  maxPlatforms: 5,
+  maxQueries: parseEnvInt(process.env.ENRICHMENT_MAX_QUERIES, 30),
+  maxPlatforms: parseEnvInt(process.env.ENRICHMENT_MAX_PLATFORMS, 5),
   maxIdentitiesPerPlatform: 5,
   timeoutMs: 60000,
   minConfidenceForEarlyStop: 0.9,
+  maxParallelPlatforms: parseEnvInt(process.env.ENRICHMENT_MAX_PARALLEL_PLATFORMS, 3),
 };
 
 /**
@@ -137,6 +159,20 @@ export const EnrichmentStateAnnotation = Annotation.Root({
   // Timing
   startedAt: Annotation<string>,
   completedAt: Annotation<string | null>,
+
+  // Observability
+  lastCompletedNode: Annotation<string | null>,
+  progressPct: Annotation<number>,
+  errorsBySource: Annotation<Record<string, string[]>>({
+    reducer: (current, update) => {
+      const merged = { ...current };
+      for (const [source, errors] of Object.entries(update)) {
+        merged[source] = [...(merged[source] || []), ...errors];
+      }
+      return merged;
+    },
+    default: () => ({}),
+  }),
 
   // Summary output (stored; platform data remains ephemeral)
   summaryText: Annotation<string | null>,

@@ -35,7 +35,10 @@ export interface ParsedSearchQuery {
   keywords: string[];
 
   /** Optimized search query for LinkedIn discovery */
-  googleQuery: string;
+  searchQuery: string;
+
+  /** @deprecated Use searchQuery instead */
+  googleQuery?: string;
 
   /** Optional: Role type classification for v2 enrichment */
   roleType?: 'engineer' | 'data_scientist' | 'researcher' | 'founder' | 'designer' | 'general';

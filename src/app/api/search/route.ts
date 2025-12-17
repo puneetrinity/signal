@@ -74,7 +74,7 @@ export async function POST(request: NextRequest) {
     console.log('[Search API] Parsed query:', parsedQuery);
 
     const summaries = await searchLinkedInProfiles(
-      parsedQuery.googleQuery,
+      parsedQuery.searchQuery,
       parsedQuery.count,
       parsedQuery.countryCode,
     );

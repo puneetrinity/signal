@@ -91,10 +91,18 @@ export interface BridgeDiscoveryOptions {
   maxCommitRepos?: number;
 }
 
+/**
+ * Commit email extraction is disabled by default for compliance.
+ * Set ENABLE_COMMIT_EMAIL_EVIDENCE=true to enable gathering commit email pointers.
+ * Note: This only gathers evidence pointers (URLs), not the actual emails.
+ * Actual email extraction requires explicit confirmation flow.
+ */
+const ENABLE_COMMIT_EMAIL_EVIDENCE = process.env.ENABLE_COMMIT_EMAIL_EVIDENCE === 'true';
+
 const DEFAULT_OPTIONS: Required<BridgeDiscoveryOptions> = {
   maxGitHubResults: 5,
   confidenceThreshold: 0.4,
-  includeCommitEvidence: true,
+  includeCommitEvidence: ENABLE_COMMIT_EMAIL_EVIDENCE,
   maxCommitRepos: 3,
 };
 
@@ -216,13 +224,16 @@ export async function discoverGitHubIdentities(
           const hasProfileLink =
             linkedInId?.toLowerCase() === hints.linkedinId.toLowerCase();
 
-          // Get commit evidence if enabled
+          // Get commit evidence if enabled (disabled by default for compliance)
           let commitEvidence: CommitEmailEvidence[] = [];
           if (opts.includeCommitEvidence) {
             commitEvidence = await github.getCommitEvidence(
               result.login,
               opts.maxCommitRepos
             );
+          } else if (queriesExecuted === 1 && searchResults.indexOf(result) === 0) {
+            // Log once per discovery run
+            console.log('[BridgeDiscovery] Commit email evidence disabled (set ENABLE_COMMIT_EMAIL_EVIDENCE=true to enable)');
           }
 
           // Calculate confidence score

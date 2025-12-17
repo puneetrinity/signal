@@ -33,6 +33,20 @@ import {
 } from './types';
 
 /**
+ * Node progress percentages for observability
+ */
+const NODE_PROGRESS: Record<string, number> = {
+  loadCandidate: 10,
+  githubBridge: 30,
+  searchPlatform: 50,
+  aggregateResults: 60,
+  persistIdentities: 70,
+  fetchPlatformData: 80,
+  generateSummary: 90,
+  persistSummary: 100,
+};
+
+/**
  * Load candidate data and prepare enrichment hints
  */
 export async function loadCandidateNode(
@@ -114,6 +128,8 @@ export async function loadCandidateNode(
       platformsRemaining: platformsToQuery,
       budget: { ...DEFAULT_BUDGET, ...state.budget },
       progressEvents: [progressEvent, completeEvent],
+      lastCompletedNode: 'loadCandidate',
+      progressPct: NODE_PROGRESS.loadCandidate,
     };
   } catch (error) {
     const errorEntry: EnrichmentError = {
@@ -128,6 +144,9 @@ export async function loadCandidateNode(
       status: 'failed',
       errors: [errorEntry],
       progressEvents: [progressEvent],
+      lastCompletedNode: 'loadCandidate',
+      progressPct: NODE_PROGRESS.loadCandidate,
+      errorsBySource: { system: [errorEntry.message] },
     };
   }
 }
@@ -229,6 +248,8 @@ export async function githubBridgeNode(
       bestConfidence: identities[0]?.confidence || null,
       earlyStopReason: highConfidenceFound ? 'high_confidence_github' : null,
       progressEvents: [progressEvent, completeEvent],
+      lastCompletedNode: 'githubBridge',
+      progressPct: NODE_PROGRESS.githubBridge,
     };
   } catch (error) {
     const errorEntry: EnrichmentError = {
@@ -250,6 +271,9 @@ export async function githubBridgeNode(
       errors: [errorEntry],
       sourcesExecuted: ['github'],
       progressEvents: [progressEvent, errorEvent],
+      lastCompletedNode: 'githubBridge',
+      progressPct: NODE_PROGRESS.githubBridge,
+      errorsBySource: { github: [errorEntry.message] },
     };
   }
 }
@@ -324,6 +348,8 @@ export async function searchPlatformNode(
       queriesExecuted: result.queriesExecuted,
       sourcesExecuted: [platform],
       progressEvents: [progressEvent, completeEvent],
+      lastCompletedNode: 'searchPlatform',
+      progressPct: NODE_PROGRESS.searchPlatform,
     };
   } catch (error) {
     const errorEntry: EnrichmentError = {
@@ -345,6 +371,9 @@ export async function searchPlatformNode(
       errors: [errorEntry],
       sourcesExecuted: [platform],
       progressEvents: [progressEvent, errorEvent],
+      lastCompletedNode: 'searchPlatform',
+      progressPct: NODE_PROGRESS.searchPlatform,
+      errorsBySource: { [platform]: [errorEntry.message] },
     };
   }
 }
@@ -392,6 +421,8 @@ export async function aggregateResultsNode(
     completedAt: new Date().toISOString(),
     identitiesFound: sortedIdentities,
     progressEvents: [progressEvent, completeEvent],
+    lastCompletedNode: 'aggregateResults',
+    progressPct: NODE_PROGRESS.aggregateResults,
   };
 }
 
@@ -403,7 +434,7 @@ export async function persistResultsNode(
 ): Promise<PartialEnrichmentState> {
   const progressEvent: EnrichmentProgressEvent = {
     type: 'node_start',
-    node: 'persistResults',
+    node: 'persistIdentities',
     timestamp: new Date().toISOString(),
   };
 
@@ -463,13 +494,15 @@ export async function persistResultsNode(
 
     const completeEvent: EnrichmentProgressEvent = {
       type: 'node_complete',
-      node: 'persistResults',
+      node: 'persistIdentities',
       data: { identitiesFound: identitiesToPersist.length },
       timestamp: new Date().toISOString(),
     };
 
     return {
       progressEvents: [progressEvent, completeEvent],
+      lastCompletedNode: 'persistIdentities',
+      progressPct: NODE_PROGRESS.persistIdentities,
     };
   } catch (error) {
     const errorEntry: EnrichmentError = {
@@ -482,8 +515,53 @@ export async function persistResultsNode(
     return {
       errors: [errorEntry],
       progressEvents: [progressEvent],
+      lastCompletedNode: 'persistIdentities',
+      progressPct: NODE_PROGRESS.persistIdentities,
+      errorsBySource: { system: [errorEntry.message] },
     };
   }
+}
+
+/**
+ * Per-platform timeout configuration (ms)
+ */
+const PLATFORM_TIMEOUTS: Record<string, number> = {
+  github: 10000,    // GitHub API is reliable
+  crunchbase: 5000, // Often blocked/slow
+  angellist: 5000,  // Often blocked/slow
+  twitter: 8000,
+  default: 8000,
+};
+
+/**
+ * Wrap a promise with a timeout.
+ * Clears the timer when the promise resolves to avoid memory leaks.
+ *
+ * LIMITATION: The underlying fetch is not aborted - this is just a race.
+ * Orphaned requests may continue consuming resources until they complete.
+ *
+ * SCALE HARDENING (future):
+ * For true cancellation under high volume, add AbortSignal support:
+ * 1. Add optional `signal?: AbortSignal` to GitHubClient.request()
+ * 2. Pass signal to fetch() call in request()
+ * 3. In retry loop: check signal.aborted or catch AbortError → exit immediately
+ * 4. Thread signal through getUser(), getUserRepos(), extractEmailFromCommit()
+ * 5. Apply same pattern to search executors (Brave, SearXNG) if needed
+ *
+ * @see src/lib/enrichment/github.ts for implementation target
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout>;
+
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    clearTimeout(timeoutId);
+  });
 }
 
 async function buildEphemeralPlatformData(state: EnrichmentState): Promise<EphemeralPlatformDataItem[]> {
@@ -495,53 +573,50 @@ async function buildEphemeralPlatformData(state: EnrichmentState): Promise<Ephem
 
   const github = getGitHubClient();
 
-  const items: EphemeralPlatformDataItem[] = await Promise.all(
+  // Use Promise.allSettled with per-platform timeouts for resilience
+  const results = await Promise.allSettled(
     identities.map(async (identity) => {
+      const timeout = PLATFORM_TIMEOUTS[identity.platform] || PLATFORM_TIMEOUTS.default;
+
       if (identity.platform === 'github') {
-        try {
-          const [profile, repos] = await Promise.all([
-            github.getUser(identity.platformId),
-            github.getUserRepos(identity.platformId, 10),
-          ]);
+        return withTimeout(
+          (async () => {
+            const [profile, repos] = await Promise.all([
+              github.getUser(identity.platformId),
+              github.getUserRepos(identity.platformId, 10),
+            ]);
 
-          // Extract unique languages from repos
-          const languages = [...new Set(repos.map((r) => r.language).filter(Boolean))] as string[];
+            // Extract unique languages from repos
+            const languages = [...new Set(repos.map((r) => r.language).filter(Boolean))] as string[];
 
-          // Get top repos by stars
-          const topRepos = repos
-            .sort((a, b) => b.stars - a.stars)
-            .slice(0, 5)
-            .map((r) => ({ name: r.name, language: r.language, stars: r.stars }));
+            // Get top repos by stars
+            const topRepos = repos
+              .sort((a, b) => b.stars - a.stars)
+              .slice(0, 5)
+              .map((r) => ({ name: r.name, language: r.language, stars: r.stars }));
 
-          return {
-            platform: identity.platform,
-            platformId: identity.platformId,
-            profileUrl: identity.profileUrl,
-            fetchedAt: now,
-            data: {
-              name: profile.name ?? null,
-              bio: profile.bio ?? null,
-              company: profile.company ?? null,
-              location: profile.location ?? null,
-              followers: profile.followers ?? null,
-              publicRepos: profile.public_repos ?? null,
-              blog: profile.blog ?? null,
-              createdAt: profile.created_at ?? null,
-              languages,
-              topRepos,
-            },
-          };
-        } catch (error) {
-          return {
-            platform: identity.platform,
-            platformId: identity.platformId,
-            profileUrl: identity.profileUrl,
-            fetchedAt: now,
-            data: {
-              error: error instanceof Error ? error.message : 'GitHub fetch failed',
-            },
-          };
-        }
+            return {
+              platform: identity.platform,
+              platformId: identity.platformId,
+              profileUrl: identity.profileUrl,
+              fetchedAt: now,
+              data: {
+                name: profile.name ?? null,
+                bio: profile.bio ?? null,
+                company: profile.company ?? null,
+                location: profile.location ?? null,
+                followers: profile.followers ?? null,
+                publicRepos: profile.public_repos ?? null,
+                blog: profile.blog ?? null,
+                createdAt: profile.created_at ?? null,
+                languages,
+                topRepos,
+              },
+            } as EphemeralPlatformDataItem;
+          })(),
+          timeout,
+          `github:${identity.platformId}`
+        );
       }
 
       // For platforms without an official API integration, keep minimal public metadata only.
@@ -551,9 +626,27 @@ async function buildEphemeralPlatformData(state: EnrichmentState): Promise<Ephem
         profileUrl: identity.profileUrl,
         fetchedAt: now,
         data: {},
-      };
+      } as EphemeralPlatformDataItem;
     })
   );
+
+  // Collect successful results and create error entries for failures
+  const items: EphemeralPlatformDataItem[] = results.map((result, i) => {
+    if (result.status === 'fulfilled') {
+      return result.value;
+    }
+    // Return error entry for failed/timed out fetches
+    const identity = identities[i];
+    return {
+      platform: identity.platform,
+      platformId: identity.platformId,
+      profileUrl: identity.profileUrl,
+      fetchedAt: now,
+      data: {
+        error: result.reason instanceof Error ? result.reason.message : 'Platform fetch failed',
+      },
+    };
+  });
 
   if (sessionId) {
     setEphemeralPlatformData(sessionId, items);
@@ -583,7 +676,11 @@ export async function fetchPlatformDataNode(
       timestamp: new Date().toISOString(),
     };
 
-    return { progressEvents: [progressStart, progressComplete] };
+    return {
+      progressEvents: [progressStart, progressComplete],
+      lastCompletedNode: 'fetchPlatformData',
+      progressPct: NODE_PROGRESS.fetchPlatformData,
+    };
   } catch (error) {
     const errorEntry: EnrichmentError = {
       platform: 'system',
@@ -597,7 +694,13 @@ export async function fetchPlatformDataNode(
       data: { error: errorEntry.message },
       timestamp: new Date().toISOString(),
     };
-    return { errors: [errorEntry], progressEvents: [progressStart, errorEvent] };
+    return {
+      errors: [errorEntry],
+      progressEvents: [progressStart, errorEvent],
+      lastCompletedNode: 'fetchPlatformData',
+      progressPct: NODE_PROGRESS.fetchPlatformData,
+      errorsBySource: { system: [errorEntry.message] },
+    };
   }
 }
 
@@ -659,6 +762,8 @@ export async function generateSummaryNode(
       summaryTokens: tokens,
       summaryGeneratedAt: new Date().toISOString(),
       progressEvents: [progressStart, progressComplete],
+      lastCompletedNode: 'generateSummary',
+      progressPct: NODE_PROGRESS.generateSummary,
     };
   } catch (error) {
     const errorEntry: EnrichmentError = {
@@ -673,7 +778,13 @@ export async function generateSummaryNode(
       data: { error: errorEntry.message },
       timestamp: new Date().toISOString(),
     };
-    return { errors: [errorEntry], progressEvents: [progressStart, errorEvent] };
+    return {
+      errors: [errorEntry],
+      progressEvents: [progressStart, errorEvent],
+      lastCompletedNode: 'generateSummary',
+      progressPct: NODE_PROGRESS.generateSummary,
+      errorsBySource: { system: [errorEntry.message] },
+    };
   }
 }
 
@@ -741,7 +852,11 @@ export async function persistSummaryNode(
       timestamp: new Date().toISOString(),
     };
 
-    return { progressEvents: [progressStart, progressComplete] };
+    return {
+      progressEvents: [progressStart, progressComplete],
+      lastCompletedNode: 'persistSummary',
+      progressPct: NODE_PROGRESS.persistSummary,
+    };
   } catch (error) {
     const errorEntry: EnrichmentError = {
       platform: 'system',
@@ -755,7 +870,13 @@ export async function persistSummaryNode(
       data: { error: errorEntry.message },
       timestamp: new Date().toISOString(),
     };
-    return { errors: [errorEntry], progressEvents: [progressStart, errorEvent] };
+    return {
+      errors: [errorEntry],
+      progressEvents: [progressStart, errorEvent],
+      lastCompletedNode: 'persistSummary',
+      progressPct: NODE_PROGRESS.persistSummary,
+      errorsBySource: { system: [errorEntry.message] },
+    };
   }
 }
 

@@ -319,7 +319,7 @@ export async function POST(request: NextRequest) {
 
     // Execute search using provider abstraction with metadata
     const searchResult = await searchLinkedInProfilesWithMeta(
-      parsedQuery.googleQuery,
+      parsedQuery.searchQuery,
       parsedQuery.count,
       parsedQuery.countryCode
     );

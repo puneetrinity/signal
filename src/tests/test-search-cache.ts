@@ -15,7 +15,8 @@ async function testSearchCache() {
     location: 'Israel',
     countryCode: 'IL',
     keywords: ['AI', 'Engineer'],
-    googleQuery: query,
+    searchQuery: query,
+    googleQuery: query, // deprecated
   };
 
   const results: ProfileSummary[] = [
@@ -39,14 +40,14 @@ async function testSearchCache() {
     },
   ];
 
-  const cacheKey = getSearchCacheKey(parsedQuery.googleQuery);
+  const cacheKey = getSearchCacheKey(parsedQuery.searchQuery);
 
   console.log('Caching sample search results...');
-  const cached = await cacheSearchResults(parsedQuery.googleQuery, parsedQuery, results);
+  const cached = await cacheSearchResults(parsedQuery.searchQuery, parsedQuery, results);
   console.log('Cache write success:', cached);
 
   console.log('\nFetching from cache...');
-  const cachedResults = await getCachedSearchResults(parsedQuery.googleQuery);
+  const cachedResults = await getCachedSearchResults(parsedQuery.searchQuery);
   console.log('Cache hit:', Boolean(cachedResults));
 
   if (cachedResults) {

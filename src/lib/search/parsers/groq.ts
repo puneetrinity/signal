@@ -26,7 +26,7 @@ const SearchQuerySchema = z.object({
   location: z.string().optional().nullable(),
   countryCode: z.string().length(2).optional().nullable(),
   keywords: z.array(z.string()),
-  googleQuery: z.string(),
+  searchQuery: z.string(),
   roleType: z
     .enum(['engineer', 'data_scientist', 'researcher', 'founder', 'designer', 'general'])
     .optional()
@@ -41,7 +41,7 @@ const SYSTEM_PROMPT = `Parse the search query into structured data for LinkedIn 
 RULES:
 1. If query is a person's name: count=1, role=null, location=null, countryCode=null
 2. If query is a job search: extract count (default 10), role, location, countryCode (geographic only)
-3. googleQuery format: site:linkedin.com/in "{role or name}" "{location}" {keywords}
+3. searchQuery format: site:linkedin.com/in "{role or name}" "{location}" {keywords}
 4. roleType: classify as engineer/data_scientist/researcher/founder/designer/general
 
 EXAMPLES:
@@ -111,7 +111,8 @@ export const groqParser: ParserProvider = {
         location: object.location,
         countryCode: object.countryCode,
         keywords: object.keywords,
-        googleQuery: object.googleQuery,
+        searchQuery: object.searchQuery,
+        googleQuery: object.searchQuery, // deprecated
         roleType: object.roleType,
       };
     } catch (error) {

@@ -112,6 +112,41 @@ SOURCE_REGISTRY.set('companyteam', companyTeamSource);
 SOURCE_REGISTRY.set('angellist', angelListSource);
 
 /**
+ * Platforms known to be unreliable (often blocked, rate limited, or slow).
+ * These are deprioritized and may be skipped if SKIP_UNRELIABLE_PLATFORMS=true.
+ *
+ * Configure via environment:
+ * - SKIP_UNRELIABLE_PLATFORMS=true: Skip these platforms entirely
+ * - UNRELIABLE_PLATFORMS: Comma-separated list of additional platforms to mark as unreliable
+ */
+const DEFAULT_UNRELIABLE_PLATFORMS = new Set<EnrichmentPlatform>([
+  'crunchbase',  // Often blocked by bot detection
+  'angellist',   // Frequently rate limited or blocked
+]);
+
+function getUnreliablePlatforms(): Set<EnrichmentPlatform> {
+  const platforms = new Set(DEFAULT_UNRELIABLE_PLATFORMS);
+  const envPlatforms = process.env.UNRELIABLE_PLATFORMS;
+  if (envPlatforms) {
+    for (const p of envPlatforms.split(',')) {
+      platforms.add(p.trim() as EnrichmentPlatform);
+    }
+  }
+  return platforms;
+}
+
+function shouldSkipUnreliable(): boolean {
+  return process.env.SKIP_UNRELIABLE_PLATFORMS === 'true';
+}
+
+/**
+ * Check if a platform is marked as unreliable
+ */
+export function isPlatformUnreliable(platform: EnrichmentPlatform): boolean {
+  return getUnreliablePlatforms().has(platform);
+}
+
+/**
  * Get a source by platform
  */
 export function getSource(platform: EnrichmentPlatform): EnrichmentSource | undefined {
@@ -126,20 +161,36 @@ export function getAllSources(): EnrichmentSource[] {
 }
 
 /**
- * Get sources for a specific role type, in priority order
+ * Get sources for a specific role type, in priority order.
+ * If SKIP_UNRELIABLE_PLATFORMS=true, unreliable platforms are excluded.
+ * Otherwise, unreliable platforms are moved to the end of the list.
  */
 export function getSourcesForRoleType(roleType: RoleType): EnrichmentSource[] {
   const sourceConfigs = getSourcesForRole(roleType);
   const sources: EnrichmentSource[] = [];
+  const unreliableSources: EnrichmentSource[] = [];
+  const skipUnreliable = shouldSkipUnreliable();
+  const unreliablePlatforms = getUnreliablePlatforms();
 
   for (const config of sourceConfigs) {
     const source = SOURCE_REGISTRY.get(config.platform);
     if (source) {
-      sources.push(source);
+      if (unreliablePlatforms.has(config.platform)) {
+        if (skipUnreliable) {
+          // Skip entirely if configured
+          console.log(`[SourceRegistry] Skipping unreliable platform: ${config.platform}`);
+          continue;
+        }
+        // Deprioritize - add to end
+        unreliableSources.push(source);
+      } else {
+        sources.push(source);
+      }
     }
   }
 
-  return sources;
+  // Add unreliable sources at the end (if not skipping)
+  return [...sources, ...unreliableSources];
 }
 
 /**
@@ -331,4 +382,5 @@ export default {
   discoverAcrossSources,
   checkAllSourcesHealth,
   getSourceStats,
+  isPlatformUnreliable,
 };

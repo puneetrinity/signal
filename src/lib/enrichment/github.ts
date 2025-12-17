@@ -170,6 +170,16 @@ export class GitHubClient {
 
   /**
    * Make authenticated request to GitHub API with retry/backoff
+   *
+   * TODO (scale hardening): Add optional AbortSignal support for cancellation.
+   * When implementing:
+   * - Add `signal?: AbortSignal` parameter
+   * - Pass signal to fetch(): fetch(url, { ...options, signal })
+   * - In retry loop: if (signal?.aborted) throw new Error('Aborted')
+   * - On catch: if (error.name === 'AbortError') don't retry, rethrow immediately
+   * - Thread signal through getUser(), getUserRepos(), extractEmailFromCommit()
+   *
+   * @see src/lib/enrichment/graph/nodes.ts withTimeout() for caller context
    */
   private async request<T>(
     endpoint: string,
@@ -412,6 +422,9 @@ export class GitHubClient {
    * Extract email from a specific commit (for confirmation flow)
    * Only call this when revealing email to recruiter
    *
+   * ⚠️ COMPLIANCE NOTE: This extracts PII (email) from public commits.
+   * Ensure appropriate consent/legal basis before exposing to end users.
+   *
    * @param repoFullName - Repository full name (owner/repo)
    * @param commitSha - Commit SHA
    * @returns Email address or null
@@ -420,7 +433,15 @@ export class GitHubClient {
     repoFullName: string,
     commitSha: string
   ): Promise<string | null> {
+    // Check if email extraction is allowed
+    if (process.env.DISABLE_EMAIL_EXTRACTION === 'true') {
+      console.warn('[GitHub] Email extraction disabled via DISABLE_EMAIL_EXTRACTION');
+      return null;
+    }
+
     try {
+      console.log(`[GitHub] Extracting email from commit (compliance-sensitive operation)`);
+
       const commit = await this.request<GitHubCommit>(
         `/repos/${repoFullName}/commits/${commitSha}`
       );

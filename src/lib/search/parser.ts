@@ -11,7 +11,9 @@ export interface ParsedSearchQuery {
   location?: string | null;
   countryCode?: string | null;
   keywords: string[];
-  googleQuery: string;
+  searchQuery: string;
+  /** @deprecated Use searchQuery instead */
+  googleQuery?: string;
 }
 
 /**
@@ -23,7 +25,7 @@ const SearchQuerySchema = z.object({
   location: z.string().optional().nullable().describe('Location or region (e.g., "San Francisco", "Remote", "Israel"). Can also be a company name if no geographic location is specified. Set to null if not mentioned.'),
   countryCode: z.string().length(2).optional().nullable().describe('2-letter ISO country code (e.g., "US", "IL", "GB", "DE"). Extract from location ONLY if it is a geographic location. Return null if location is a company name or not mentioned.'),
   keywords: z.array(z.string()).describe('Additional keywords or qualifications (e.g., ["Python", "startup", "AI", "MiniMax"]). For individual name searches, include the person\'s name here.'),
-  googleQuery: z.string().describe('Optimized Google search query for LinkedIn profiles using site:linkedin.com/in. For individuals, use their full name in quotes.'),
+  searchQuery: z.string().describe('Optimized search query for LinkedIn profiles using site:linkedin.com/in. For individuals, use their full name in quotes.'),
 });
 
 /**
@@ -98,34 +100,34 @@ Examples:
 JOB/ROLE SEARCHES:
 - Input: "5 AI Engineers in Israel with Python experience"
   Output: count=5, role="AI Engineer", location="Israel", countryCode="IL", keywords=["Python"]
-  googleQuery: site:linkedin.com/in "AI Engineer" "Israel" Python
+  searchQuery: site:linkedin.com/in "AI Engineer" "Israel" Python
 
 - Input: "10 Product Managers in San Francisco"
   Output: count=10, role="Product Manager", location="San Francisco", countryCode="US", keywords=[]
-  googleQuery: site:linkedin.com/in "Product Manager" "San Francisco"
+  searchQuery: site:linkedin.com/in "Product Manager" "San Francisco"
 
 - Input: "Software engineers that works in minimax"
   Output: count=10, role="Software Engineer", location="MiniMax", countryCode=null, keywords=["MiniMax"]
-  googleQuery: site:linkedin.com/in "Software Engineer" MiniMax
+  searchQuery: site:linkedin.com/in "Software Engineer" MiniMax
 
 - Input: "Java developers at Google"
   Output: count=10, role="Java Developer", location="Google", countryCode=null, keywords=["Java", "Google"]
-  googleQuery: site:linkedin.com/in "Java Developer" Google
+  searchQuery: site:linkedin.com/in "Java Developer" Google
 
 INDIVIDUAL SEARCHES:
 - Input: "Elon Musk"
   Output: count=1, role=null, location=null, countryCode=null, keywords=["Elon Musk"]
-  googleQuery: site:linkedin.com/in "Elon Musk"
+  searchQuery: site:linkedin.com/in "Elon Musk"
 
 - Input: "Satya Nadella"
   Output: count=1, role=null, location=null, countryCode=null, keywords=["Satya Nadella"]
-  googleQuery: site:linkedin.com/in "Satya Nadella"
+  searchQuery: site:linkedin.com/in "Satya Nadella"
 
 - Input: "John Smith CEO"
   Output: count=1, role=null, location=null, countryCode=null, keywords=["John Smith", "CEO"]
-  googleQuery: site:linkedin.com/in "John Smith" CEO
+  searchQuery: site:linkedin.com/in "John Smith" CEO
 
-Keep the googleQuery simple and effective for finding relevant LinkedIn profiles.`,
+Keep the searchQuery simple and effective for finding relevant LinkedIn profiles.`,
     });
 
     console.log(`[Parser] Parsed query: "${query}" -> role="${object.role}", count=${object.count}, country=${object.countryCode}`);
@@ -136,7 +138,8 @@ Keep the googleQuery simple and effective for finding relevant LinkedIn profiles
       location: object.location,
       countryCode: object.countryCode,
       keywords: object.keywords,
-      googleQuery: object.googleQuery,
+      searchQuery: object.searchQuery,
+      googleQuery: object.searchQuery, // deprecated, for backwards compatibility
     };
   } catch (error) {
     console.error('[Parser] Error parsing search query:', error);
