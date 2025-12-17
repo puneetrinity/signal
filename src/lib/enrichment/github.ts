@@ -556,6 +556,7 @@ export class GitHubClient {
 
 // Singleton instance
 let githubClient: GitHubClient | null = null;
+let hasLoggedTokenWarning = false;
 
 /**
  * Get GitHub client instance
@@ -563,6 +564,15 @@ let githubClient: GitHubClient | null = null;
 export function getGitHubClient(): GitHubClient {
   if (!githubClient) {
     githubClient = new GitHubClient();
+
+    // Log warning about unauthenticated rate limits
+    if (!process.env.GITHUB_TOKEN && !hasLoggedTokenWarning) {
+      hasLoggedTokenWarning = true;
+      console.warn(
+        '[GitHub] ⚠️  GITHUB_TOKEN not set - using unauthenticated rate limits (60 req/hr vs 5000 req/hr with token). ' +
+        'Get a token at: https://github.com/settings/tokens'
+      );
+    }
   }
   return githubClient;
 }

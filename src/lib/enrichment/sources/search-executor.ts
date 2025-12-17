@@ -41,6 +41,7 @@ export function getEnrichmentProviderConfig(): {
 
 /**
  * Execute raw search with enrichment-specific fallback logic
+ * IMPORTANT: Preserves partial primary results when fallback fails/returns fewer
  */
 async function searchRawWithFallback(
   query: string,
@@ -51,16 +52,18 @@ async function searchRawWithFallback(
 
   console.log(`[EnrichmentSearch] Primary: ${config.primary}, Fallback: ${config.fallback || 'none'}`);
 
+  let primaryResults: RawSearchResult[] = [];
+
   // Try primary provider (Brave)
   try {
-    const results = await primary.searchRaw(query, maxResults);
+    primaryResults = await primary.searchRaw(query, maxResults);
 
-    if (results.length >= config.minResultsBeforeFallback) {
-      console.log(`[EnrichmentSearch] Primary (${config.primary}) returned ${results.length} results`);
-      return results;
+    if (primaryResults.length >= config.minResultsBeforeFallback) {
+      console.log(`[EnrichmentSearch] Primary (${config.primary}) returned ${primaryResults.length} results`);
+      return primaryResults;
     }
 
-    console.log(`[EnrichmentSearch] Primary (${config.primary}) returned only ${results.length} results (min: ${config.minResultsBeforeFallback})`);
+    console.log(`[EnrichmentSearch] Primary (${config.primary}) returned only ${primaryResults.length} results (min: ${config.minResultsBeforeFallback})`);
   } catch (error) {
     console.error(
       `[EnrichmentSearch] Primary (${config.primary}) failed:`,
@@ -74,14 +77,14 @@ async function searchRawWithFallback(
       const fallback = getProvider(config.fallback);
       console.log(`[EnrichmentSearch] Trying fallback: ${config.fallback}`);
 
-      const results = await fallback.searchRaw(query, maxResults);
+      const fallbackResults = await fallback.searchRaw(query, maxResults);
 
-      if (results.length > 0) {
-        console.log(`[EnrichmentSearch] Fallback (${config.fallback}) returned ${results.length} results`);
-        return results;
+      if (fallbackResults.length > primaryResults.length) {
+        console.log(`[EnrichmentSearch] Fallback (${config.fallback}) returned ${fallbackResults.length} results (better than primary's ${primaryResults.length})`);
+        return fallbackResults;
       }
 
-      console.log(`[EnrichmentSearch] Fallback (${config.fallback}) returned 0 results`);
+      console.log(`[EnrichmentSearch] Fallback (${config.fallback}) returned ${fallbackResults.length} results (not better than primary's ${primaryResults.length})`);
     } catch (error) {
       console.error(
         `[EnrichmentSearch] Fallback (${config.fallback}) failed:`,
@@ -90,7 +93,12 @@ async function searchRawWithFallback(
     }
   }
 
-  // Both failed or returned insufficient results
+  // Return whatever we have from primary (even if partial)
+  if (primaryResults.length > 0) {
+    console.log(`[EnrichmentSearch] Using partial primary results: ${primaryResults.length}`);
+    return primaryResults;
+  }
+
   console.log('[EnrichmentSearch] No results from any provider');
   return [];
 }

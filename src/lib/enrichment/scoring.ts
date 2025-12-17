@@ -19,13 +19,19 @@
 
 /**
  * Score breakdown for transparency
+ *
+ * Weight distribution (without bridge evidence, max = 0.60):
+ * - Name match: 30% (increased from 25% to allow name-only matches)
+ * - Company match: 15%
+ * - Location match: 10%
+ * - Profile completeness: 5% (reduced to compensate for name increase)
  */
 export interface ScoreBreakdown {
   bridgeWeight: number; // 0-0.4 based on evidence type
-  nameMatch: number; // 0-0.25 based on name similarity
+  nameMatch: number; // 0-0.30 based on name similarity
   companyMatch: number; // 0-0.15 based on company match
   locationMatch: number; // 0-0.1 based on location match
-  profileCompleteness: number; // 0-0.1 based on profile data
+  profileCompleteness: number; // 0-0.05 based on profile data
   total: number; // Sum of all weights
 }
 
@@ -214,12 +220,15 @@ function calculateProfileCompleteness(input: ScoringInput): number {
 /**
  * Calculate overall confidence score
  *
- * Weights:
- * - Bridge evidence: 40% (strongest signal)
- * - Name match: 25%
+ * Weights (designed to allow name-only matches to pass threshold):
+ * - Bridge evidence: 40% (strongest signal - LinkedIn link or commit evidence)
+ * - Name match: 30% (increased to allow name-only matches to reach 0.35)
  * - Company match: 15%
  * - Location match: 10%
- * - Profile completeness: 10%
+ * - Profile completeness: 5% (reduced to compensate)
+ *
+ * Without bridge evidence, perfect name match (0.30) + any secondary signal
+ * can reach 0.35 threshold.
  */
 export function calculateConfidenceScore(input: ScoringInput): ScoreBreakdown {
   // Bridge evidence weight (0-0.4)
@@ -232,12 +241,12 @@ export function calculateConfidenceScore(input: ScoringInput): ScoreBreakdown {
     bridgeWeight = Math.min(0.3, 0.15 + input.commitCount * 0.05);
   }
 
-  // Name match weight (0-0.25)
+  // Name match weight (0-0.30)
   const nameSimilarity = calculateNameSimilarity(
     input.candidateName,
     input.platformName
   );
-  const nameMatch = nameSimilarity * 0.25;
+  const nameMatch = nameSimilarity * 0.30;
 
   // Company match weight (0-0.15)
   const companyMatchRaw = calculateCompanyMatch(
@@ -253,9 +262,9 @@ export function calculateConfidenceScore(input: ScoringInput): ScoreBreakdown {
   );
   const locationMatch = locationMatchRaw * 0.1;
 
-  // Profile completeness weight (0-0.1)
+  // Profile completeness weight (0-0.05)
   const completenessRaw = calculateProfileCompleteness(input);
-  const profileCompleteness = completenessRaw * 0.1;
+  const profileCompleteness = completenessRaw * 0.05;
 
   // Total score
   const total =

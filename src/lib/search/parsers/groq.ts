@@ -18,7 +18,51 @@ import { generateObject } from 'ai';
 import type { ParserProvider, ParsedSearchQuery, ParserProviderType } from './types';
 
 /**
+ * Valid role types for enrichment source selection
+ */
+const VALID_ROLE_TYPES = ['engineer', 'data_scientist', 'researcher', 'founder', 'designer', 'general'] as const;
+
+/**
+ * Map common LLM-generated role types to valid enum values
+ */
+const ROLE_TYPE_ALIASES: Record<string, typeof VALID_ROLE_TYPES[number]> = {
+  developer: 'engineer',
+  'software engineer': 'engineer',
+  'software developer': 'engineer',
+  programmer: 'engineer',
+  'ml engineer': 'engineer',
+  'machine learning engineer': 'engineer',
+  scientist: 'data_scientist',
+  'data analyst': 'data_scientist',
+  academic: 'researcher',
+  professor: 'researcher',
+  phd: 'researcher',
+  ceo: 'founder',
+  cto: 'founder',
+  entrepreneur: 'founder',
+  cofounder: 'founder',
+  'co-founder': 'founder',
+  'ui designer': 'designer',
+  'ux designer': 'designer',
+  'product designer': 'designer',
+};
+
+/**
+ * Coerce roleType string to valid enum value
+ * Falls back to 'general' for unknown types
+ */
+function coerceRoleType(value: string | undefined | null): typeof VALID_ROLE_TYPES[number] {
+  if (!value) return 'general';
+  const lower = value.toLowerCase().trim();
+  if (VALID_ROLE_TYPES.includes(lower as typeof VALID_ROLE_TYPES[number])) {
+    return lower as typeof VALID_ROLE_TYPES[number];
+  }
+  return ROLE_TYPE_ALIASES[lower] || 'general';
+}
+
+/**
  * Zod schema for structured output (same as Gemini)
+ * Uses .transform() to coerce invalid roleType values to 'general'
  */
 const SearchQuerySchema = z.object({
   count: z.number().min(1).max(50),
@@ -28,8 +72,10 @@ const SearchQuerySchema = z.object({
   keywords: z.array(z.string()),
   searchQuery: z.string(),
   roleType: z
-    .enum(['engineer', 'data_scientist', 'researcher', 'founder', 'designer', 'general'])
+    .string()
     .optional()
+    .nullable()
+    .transform(coerceRoleType)
     .describe('Classification of the role for enrichment source selection'),
 });
 
