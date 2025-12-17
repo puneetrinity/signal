@@ -287,6 +287,17 @@ export interface CandidateData {
 }
 
 /**
+ * AI-generated structured summary
+ */
+export interface AISummaryStructured {
+  skills?: string[];
+  highlights?: string[];
+  talkingPoints?: string[];
+  caveats?: string[];
+  confidence?: number;
+}
+
+/**
  * Enrichment session summary
  */
 export interface EnrichmentSessionSummary {
@@ -299,6 +310,11 @@ export interface EnrichmentSessionSummary {
   durationMs: number | null;
   createdAt: string;
   completedAt: string | null;
+  // AI Summary fields
+  summary?: string | null;
+  summaryStructured?: AISummaryStructured | null;
+  summaryModel?: string | null;
+  summaryGeneratedAt?: string | null;
 }
 
 /**

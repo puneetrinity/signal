@@ -44,7 +44,6 @@ export default function ProfileSummaryCard({ summary }: ProfileSummaryCardProps)
   const getAuthHeaders = useAuthHeaders();
   const [isExpanded, setIsExpanded] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [isEnriching, setIsEnriching] = useState(false);
   const [isResearching, setIsResearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [researchError, setResearchError] = useState<string | null>(null);
@@ -79,39 +78,13 @@ export default function ProfileSummaryCard({ summary }: ProfileSummaryCardProps)
     return data;
   }, [isV2Mode, v2HasValidId, summary]);
 
-  // v2: Run enrichment
-  const runEnrichment = useCallback(async () => {
+  // v2: Open enrichment page in new tab
+  const openEnrichmentPage = useCallback(() => {
     if (!isV2Mode || !v2HasValidId) return;
 
     const candidateId = (summary as ProfileSummaryV2).candidateId;
-    setIsEnriching(true);
-    setError(null);
-
-    try {
-      const response = await fetch('/api/v2/enrich', {
-        method: 'POST',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({ candidateId }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        // Handle auth errors gracefully
-        if (response.status === 401) {
-          throw new Error('Authentication required. Please configure API keys.');
-        }
-        throw new Error(data.error || 'Enrichment failed');
-      }
-
-      // Refresh details after enrichment
-      await fetchV2Details();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Enrichment failed');
-    } finally {
-      setIsEnriching(false);
-    }
-  }, [isV2Mode, v2HasValidId, summary, fetchV2Details, getAuthHeaders]);
+    window.open(`/enrich/${candidateId}`, '_blank');
+  }, [isV2Mode, v2HasValidId, summary]);
 
   // v2: Reveal email
   const handleRevealEmail = useCallback(
@@ -305,26 +278,17 @@ export default function ProfileSummaryCard({ summary }: ProfileSummaryCardProps)
         )}
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* v2: Enrich button (instead of Research) */}
+          {/* v2: Enrich button opens new tab */}
           {isV2Mode ? (
             <Button
               size="sm"
-              onClick={runEnrichment}
-              disabled={isEnriching || !v2HasValidId}
+              onClick={openEnrichmentPage}
+              disabled={!v2HasValidId}
               className="bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 disabled:opacity-50"
               title={!v2HasValidId ? 'Candidate failed to persist' : undefined}
             >
-              {isEnriching ? (
-                <>
-                  <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                  Enriching...
-                </>
-              ) : (
-                <>
-                  <Sparkles className="mr-1 h-4 w-4" />
-                  Enrich
-                </>
-              )}
+              <Sparkles className="mr-1 h-4 w-4" />
+              Enrich
             </Button>
           ) : (
             /* v1: Research button */

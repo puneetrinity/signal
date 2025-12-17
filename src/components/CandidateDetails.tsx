@@ -7,6 +7,7 @@ import type {
   CandidateData,
   IdentityCandidateData,
   EnrichmentSessionSummary,
+  AISummaryStructured,
 } from '@/types/linkedin';
 import {
   Github,
@@ -33,6 +34,10 @@ import {
   Twitter,
   Palette,
   Brush,
+  Sparkles,
+  MessageSquare,
+  Lightbulb,
+  AlertTriangle,
 } from 'lucide-react';
 import { useState } from 'react';
 
@@ -412,6 +417,93 @@ export default function CandidateDetails({
       </div>
 
       <Separator />
+
+      {/* AI Summary */}
+      {latestSession?.summary && (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 text-foreground">
+            <Sparkles className="h-4 w-4 text-purple-500" />
+            <h4 className="text-sm font-semibold">AI Summary</h4>
+            {latestSession.summaryModel && (
+              <span className="text-xs text-muted-foreground">({latestSession.summaryModel})</span>
+            )}
+          </div>
+
+          <p className="text-sm leading-relaxed">{latestSession.summary}</p>
+
+          {latestSession.summaryStructured && (
+            <div className="space-y-3">
+              {/* Skills */}
+              {(latestSession.summaryStructured as AISummaryStructured).skills &&
+               (latestSession.summaryStructured as AISummaryStructured).skills!.length > 0 && (
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                    <Code className="h-3 w-3" />
+                    Skills
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {(latestSession.summaryStructured as AISummaryStructured).skills!.map((skill, idx) => (
+                      <Badge key={idx} variant="secondary" className="text-xs">
+                        {skill}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Highlights */}
+              {(latestSession.summaryStructured as AISummaryStructured).highlights &&
+               (latestSession.summaryStructured as AISummaryStructured).highlights!.length > 0 && (
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                    <Lightbulb className="h-3 w-3" />
+                    Highlights
+                  </div>
+                  <ul className="text-xs space-y-1 pl-4 list-disc">
+                    {(latestSession.summaryStructured as AISummaryStructured).highlights!.map((h, idx) => (
+                      <li key={idx}>{h}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Talking Points */}
+              {(latestSession.summaryStructured as AISummaryStructured).talkingPoints &&
+               (latestSession.summaryStructured as AISummaryStructured).talkingPoints!.length > 0 && (
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                    <MessageSquare className="h-3 w-3" />
+                    Talking Points
+                  </div>
+                  <ul className="text-xs space-y-1 pl-4 list-disc">
+                    {(latestSession.summaryStructured as AISummaryStructured).talkingPoints!.map((tp, idx) => (
+                      <li key={idx}>{tp}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Caveats */}
+              {(latestSession.summaryStructured as AISummaryStructured).caveats &&
+               (latestSession.summaryStructured as AISummaryStructured).caveats!.length > 0 && (
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1 text-xs font-medium text-orange-500">
+                    <AlertTriangle className="h-3 w-3" />
+                    Caveats
+                  </div>
+                  <ul className="text-xs space-y-1 pl-4 list-disc text-orange-600">
+                    {(latestSession.summaryStructured as AISummaryStructured).caveats!.map((c, idx) => (
+                      <li key={idx}>{c}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {latestSession?.summary && <Separator />}
 
       {/* Latest Session */}
       {latestSession && (

@@ -195,7 +195,7 @@ export async function GET(request: NextRequest) {
 
       const identityCandidates = await getIdentityCandidates(candidateId);
 
-      // Get recent enrichment sessions
+      // Get recent enrichment sessions (including AI summary)
       const sessions = await prisma.enrichmentSession.findMany({
         where: { candidateId },
         orderBy: { createdAt: 'desc' },
@@ -210,6 +210,11 @@ export async function GET(request: NextRequest) {
           durationMs: true,
           createdAt: true,
           completedAt: true,
+          // AI Summary fields
+          summary: true,
+          summaryStructured: true,
+          summaryModel: true,
+          summaryGeneratedAt: true,
         },
       });
 
