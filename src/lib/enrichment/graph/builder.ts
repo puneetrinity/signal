@@ -22,6 +22,9 @@ import {
   searchPlatformNode,
   aggregateResultsNode,
   persistResultsNode,
+  fetchPlatformDataNode,
+  generateSummaryNode,
+  persistSummaryNode,
   shouldContinueSearching,
   getNextPlatformBatch,
 } from './nodes';
@@ -34,7 +37,10 @@ const NODES = {
   GITHUB_BRIDGE: 'githubBridge',
   SEARCH_PLATFORMS: 'searchPlatforms',
   AGGREGATE: 'aggregate',
-  PERSIST: 'persist',
+  PERSIST_IDENTITIES: 'persistIdentities',
+  FETCH_PLATFORM_DATA: 'fetchPlatformData',
+  GENERATE_SUMMARY: 'generateSummary',
+  PERSIST_SUMMARY: 'persistSummary',
 } as const;
 
 /**
@@ -100,7 +106,10 @@ export function buildEnrichmentGraph() {
     .addNode(NODES.GITHUB_BRIDGE, githubBridgeNode)
     .addNode(NODES.SEARCH_PLATFORMS, searchPlatformNode)
     .addNode(NODES.AGGREGATE, aggregateResultsNode)
-    .addNode(NODES.PERSIST, persistResultsNode)
+    .addNode(NODES.PERSIST_IDENTITIES, persistResultsNode)
+    .addNode(NODES.FETCH_PLATFORM_DATA, fetchPlatformDataNode)
+    .addNode(NODES.GENERATE_SUMMARY, generateSummaryNode)
+    .addNode(NODES.PERSIST_SUMMARY, persistSummaryNode)
 
     // Add edges
     .addEdge('__start__', NODES.LOAD_CANDIDATE)
@@ -112,8 +121,11 @@ export function buildEnrichmentGraph() {
     })
     .addConditionalEdges(NODES.GITHUB_BRIDGE, routeAfterGitHub)
     .addConditionalEdges(NODES.SEARCH_PLATFORMS, routeAfterSearch)
-    .addEdge(NODES.AGGREGATE, NODES.PERSIST)
-    .addEdge(NODES.PERSIST, END);
+    .addEdge(NODES.AGGREGATE, NODES.PERSIST_IDENTITIES)
+    .addEdge(NODES.PERSIST_IDENTITIES, NODES.FETCH_PLATFORM_DATA)
+    .addEdge(NODES.FETCH_PLATFORM_DATA, NODES.GENERATE_SUMMARY)
+    .addEdge(NODES.GENERATE_SUMMARY, NODES.PERSIST_SUMMARY)
+    .addEdge(NODES.PERSIST_SUMMARY, END);
 
   return graph.compile();
 }
@@ -137,6 +149,12 @@ export function createInitialState(input: EnrichmentGraphInput): Partial<Enrichm
     earlyStopReason: null,
     bestConfidence: null,
     completedAt: null,
+    summaryText: null,
+    summaryStructured: null,
+    summaryEvidence: null,
+    summaryModel: null,
+    summaryTokens: null,
+    summaryGeneratedAt: null,
   };
 }
 
@@ -194,10 +212,8 @@ export async function runEnrichment(
   const initialState = createInitialState(input);
 
   // Use sessionId as thread_id for checkpointer resumability
-  const config =
-    useCheckpointer && input.sessionId
-      ? { configurable: { thread_id: input.sessionId } }
-      : undefined;
+  const threadId = (initialState as EnrichmentState).sessionId;
+  const config = useCheckpointer ? { configurable: { thread_id: threadId } } : undefined;
 
   // Stream the graph execution
   const stream = await graph.stream(initialState as EnrichmentState, {
@@ -207,12 +223,15 @@ export async function runEnrichment(
 
   let finalState: EnrichmentState | null = null;
 
+  let emittedProgressCount = 0;
   for await (const state of stream) {
     finalState = state as EnrichmentState;
 
     // Emit progress events if callback provided
     if (options?.onProgress && finalState.progressEvents) {
-      for (const event of finalState.progressEvents) {
+      const nextEvents = finalState.progressEvents.slice(emittedProgressCount);
+      emittedProgressCount = finalState.progressEvents.length;
+      for (const event of nextEvents) {
         options.onProgress(event);
       }
     }
@@ -258,7 +277,10 @@ export async function buildEnrichmentGraphWithCheckpointer(
     .addNode(NODES.GITHUB_BRIDGE, githubBridgeNode)
     .addNode(NODES.SEARCH_PLATFORMS, searchPlatformNode)
     .addNode(NODES.AGGREGATE, aggregateResultsNode)
-    .addNode(NODES.PERSIST, persistResultsNode)
+    .addNode(NODES.PERSIST_IDENTITIES, persistResultsNode)
+    .addNode(NODES.FETCH_PLATFORM_DATA, fetchPlatformDataNode)
+    .addNode(NODES.GENERATE_SUMMARY, generateSummaryNode)
+    .addNode(NODES.PERSIST_SUMMARY, persistSummaryNode)
     .addEdge('__start__', NODES.LOAD_CANDIDATE)
     .addConditionalEdges(NODES.LOAD_CANDIDATE, (state) => {
       if (state.status === 'failed') {
@@ -268,8 +290,11 @@ export async function buildEnrichmentGraphWithCheckpointer(
     })
     .addConditionalEdges(NODES.GITHUB_BRIDGE, routeAfterGitHub)
     .addConditionalEdges(NODES.SEARCH_PLATFORMS, routeAfterSearch)
-    .addEdge(NODES.AGGREGATE, NODES.PERSIST)
-    .addEdge(NODES.PERSIST, END);
+    .addEdge(NODES.AGGREGATE, NODES.PERSIST_IDENTITIES)
+    .addEdge(NODES.PERSIST_IDENTITIES, NODES.FETCH_PLATFORM_DATA)
+    .addEdge(NODES.FETCH_PLATFORM_DATA, NODES.GENERATE_SUMMARY)
+    .addEdge(NODES.GENERATE_SUMMARY, NODES.PERSIST_SUMMARY)
+    .addEdge(NODES.PERSIST_SUMMARY, END);
 
   // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
   return graph.compile({ checkpointer });

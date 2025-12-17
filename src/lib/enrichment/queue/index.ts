@@ -82,6 +82,15 @@ export interface EnrichmentSession {
   startedAt: string | null;
   completedAt: string | null;
   durationMs: number | null;
+
+  // Optional summary output (v2.1)
+  summary?: string | null;
+  summaryStructured?: unknown | null;
+  summaryEvidence?: unknown | null;
+  summaryModel?: string | null;
+  summaryTokens?: number | null;
+  summaryGeneratedAt?: string | null;
+
   createdAt: string;
   updatedAt: string;
 }
@@ -218,12 +227,16 @@ export async function getEnrichmentSession(
   }
 
   // Convert Prisma dates to ISO strings
+  // Prisma client types may be stale until `prisma generate` runs in the target environment.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sessionAny: any = session;
   return {
-    ...session,
+    ...sessionAny,
     sourcesPlanned: session.sourcesPlanned as string[] | null,
     sourcesExecuted: session.sourcesExecuted as string[] | null,
     startedAt: session.startedAt?.toISOString() || null,
     completedAt: session.completedAt?.toISOString() || null,
+    summaryGeneratedAt: sessionAny.summaryGeneratedAt?.toISOString?.() || null,
     createdAt: session.createdAt.toISOString(),
     updatedAt: session.updatedAt.toISOString(),
   } as EnrichmentSession;
@@ -244,11 +257,14 @@ export async function getRecentSessions(
 
   // Convert Prisma dates to ISO strings
   return sessions.map((session) => ({
-    ...session,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ...(session as any),
     sourcesPlanned: session.sourcesPlanned as string[] | null,
     sourcesExecuted: session.sourcesExecuted as string[] | null,
     startedAt: session.startedAt?.toISOString() || null,
     completedAt: session.completedAt?.toISOString() || null,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    summaryGeneratedAt: (session as any).summaryGeneratedAt?.toISOString?.() || null,
     createdAt: session.createdAt.toISOString(),
     updatedAt: session.updatedAt.toISOString(),
   })) as EnrichmentSession[];

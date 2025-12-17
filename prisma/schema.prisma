@@ -277,6 +277,14 @@ model EnrichmentSession {
   completedAt DateTime?
   durationMs  Int?
 
+  // Optional summary output (generated after discovery)
+  summary            String?  @db.Text
+  summaryStructured  Json?
+  summaryEvidence    Json?
+  summaryModel       String?
+  summaryTokens      Int?
+  summaryGeneratedAt DateTime?
+
   // Timestamps
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

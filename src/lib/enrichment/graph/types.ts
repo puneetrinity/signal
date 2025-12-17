@@ -137,6 +137,14 @@ export const EnrichmentStateAnnotation = Annotation.Root({
   // Timing
   startedAt: Annotation<string>,
   completedAt: Annotation<string | null>,
+
+  // Summary output (stored; platform data remains ephemeral)
+  summaryText: Annotation<string | null>,
+  summaryStructured: Annotation<Record<string, unknown> | null>,
+  summaryEvidence: Annotation<Array<Record<string, unknown>> | null>,
+  summaryModel: Annotation<string | null>,
+  summaryTokens: Annotation<number | null>,
+  summaryGeneratedAt: Annotation<string | null>,
 });
 
 /**

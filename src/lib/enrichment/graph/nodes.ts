@@ -14,6 +14,14 @@ import { getSourcesForRoleType, getSource } from '../sources';
 import { discoverGitHubIdentities, type CandidateHints } from '../bridge-discovery';
 import { prisma } from '@/lib/prisma';
 import type { Prisma } from '@prisma/client';
+import { getGitHubClient } from '../github';
+import {
+  clearEphemeralPlatformData,
+  getEphemeralPlatformData,
+  setEphemeralPlatformData,
+  type EphemeralPlatformDataItem,
+} from './ephemeral';
+import { generateCandidateSummary } from '../summary/generate';
 import {
   type EnrichmentState,
   type PartialEnrichmentState,
@@ -74,6 +82,14 @@ export async function loadCandidateNode(
 
     // Determine role type
     const roleType = hints.roleType || state.roleType || 'general';
+
+    // Mark candidate as in progress (best-effort)
+    await prisma.candidate
+      .update({
+        where: { id: state.candidateId },
+        data: { enrichmentStatus: 'in_progress' },
+      })
+      .catch(() => {});
 
     // Get platforms for this role (excluding github which is handled separately)
     const allPlatforms = getSourcesForRoleType(roleType).map((s) => s.platform);
@@ -420,6 +436,7 @@ export async function persistResultsNode(
           evidence,
           hasContradiction: identity.hasContradiction,
           contradictionNote: identity.contradictionNote,
+          discoveredBy: state.sessionId || undefined,
         },
         create: {
           candidateId: state.candidateId,
@@ -433,6 +450,7 @@ export async function persistResultsNode(
           hasContradiction: identity.hasContradiction,
           contradictionNote: identity.contradictionNote,
           status: 'unconfirmed',
+          discoveredBy: state.sessionId || undefined,
         },
       });
     }
@@ -465,6 +483,264 @@ export async function persistResultsNode(
       errors: [errorEntry],
       progressEvents: [progressEvent],
     };
+  }
+}
+
+async function buildEphemeralPlatformData(state: EnrichmentState): Promise<EphemeralPlatformDataItem[]> {
+  const sessionId = state.sessionId;
+  const now = new Date().toISOString();
+  const identities = [...state.identitiesFound]
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, 10);
+
+  const github = getGitHubClient();
+
+  const items: EphemeralPlatformDataItem[] = await Promise.all(
+    identities.map(async (identity) => {
+      if (identity.platform === 'github') {
+        try {
+          const profile = await github.getUser(identity.platformId);
+          return {
+            platform: identity.platform,
+            platformId: identity.platformId,
+            profileUrl: identity.profileUrl,
+            fetchedAt: now,
+            data: {
+              name: profile.name ?? null,
+              bio: profile.bio ?? null,
+              company: profile.company ?? null,
+              location: profile.location ?? null,
+              followers: profile.followers ?? null,
+              publicRepos: profile.public_repos ?? null,
+              blog: profile.blog ?? null,
+              createdAt: profile.created_at ?? null,
+            },
+          };
+        } catch (error) {
+          return {
+            platform: identity.platform,
+            platformId: identity.platformId,
+            profileUrl: identity.profileUrl,
+            fetchedAt: now,
+            data: {
+              error: error instanceof Error ? error.message : 'GitHub fetch failed',
+            },
+          };
+        }
+      }
+
+      // For platforms without an official API integration, keep minimal public metadata only.
+      return {
+        platform: identity.platform,
+        platformId: identity.platformId,
+        profileUrl: identity.profileUrl,
+        fetchedAt: now,
+        data: {},
+      };
+    })
+  );
+
+  if (sessionId) {
+    setEphemeralPlatformData(sessionId, items);
+  }
+
+  return items;
+}
+
+/**
+ * Fetch additional platform data (ephemeral; not stored in checkpointed state)
+ */
+export async function fetchPlatformDataNode(
+  state: EnrichmentState
+): Promise<PartialEnrichmentState> {
+  const progressStart: EnrichmentProgressEvent = {
+    type: 'node_start',
+    node: 'fetchPlatformData',
+    timestamp: new Date().toISOString(),
+  };
+
+  try {
+    await buildEphemeralPlatformData(state);
+    const progressComplete: EnrichmentProgressEvent = {
+      type: 'node_complete',
+      node: 'fetchPlatformData',
+      data: { identitiesFound: state.identitiesFound.length },
+      timestamp: new Date().toISOString(),
+    };
+
+    return { progressEvents: [progressStart, progressComplete] };
+  } catch (error) {
+    const errorEntry: EnrichmentError = {
+      platform: 'system',
+      message: error instanceof Error ? error.message : 'Failed to fetch platform data',
+      timestamp: new Date().toISOString(),
+      recoverable: true,
+    };
+    const errorEvent: EnrichmentProgressEvent = {
+      type: 'error',
+      node: 'fetchPlatformData',
+      data: { error: errorEntry.message },
+      timestamp: new Date().toISOString(),
+    };
+    return { errors: [errorEntry], progressEvents: [progressStart, errorEvent] };
+  }
+}
+
+/**
+ * Generate recruiter-facing summary (stored)
+ */
+export async function generateSummaryNode(
+  state: EnrichmentState
+): Promise<PartialEnrichmentState> {
+  const progressStart: EnrichmentProgressEvent = {
+    type: 'node_start',
+    node: 'generateSummary',
+    timestamp: new Date().toISOString(),
+  };
+
+  try {
+    if (!state.hints) {
+      throw new Error('Missing candidate hints for summary');
+    }
+
+    const sessionId = state.sessionId;
+    let platformData = sessionId ? getEphemeralPlatformData(sessionId) : null;
+    if (!platformData) {
+      platformData = await buildEphemeralPlatformData(state);
+    }
+
+    const identities = [...state.identitiesFound].sort((a, b) => b.confidence - a.confidence).slice(0, 10);
+
+    const { summary, evidence, model, tokens } = await generateCandidateSummary({
+      candidate: {
+        linkedinId: state.hints.linkedinId,
+        linkedinUrl: state.hints.linkedinUrl,
+        nameHint: state.hints.nameHint,
+        headlineHint: state.hints.headlineHint,
+        locationHint: state.hints.locationHint,
+        companyHint: state.hints.companyHint,
+        roleType: state.hints.roleType,
+      },
+      identities,
+      platformData,
+    });
+
+    if (sessionId) {
+      clearEphemeralPlatformData(sessionId);
+    }
+
+    const progressComplete: EnrichmentProgressEvent = {
+      type: 'node_complete',
+      node: 'generateSummary',
+      data: { identitiesFound: identities.length, confidence: summary.confidence },
+      timestamp: new Date().toISOString(),
+    };
+
+    return {
+      summaryText: summary.summary,
+      summaryStructured: summary.structured as unknown as Record<string, unknown>,
+      summaryEvidence: evidence as unknown as Array<Record<string, unknown>>,
+      summaryModel: model,
+      summaryTokens: tokens,
+      summaryGeneratedAt: new Date().toISOString(),
+      progressEvents: [progressStart, progressComplete],
+    };
+  } catch (error) {
+    const errorEntry: EnrichmentError = {
+      platform: 'system',
+      message: error instanceof Error ? error.message : 'Failed to generate summary',
+      timestamp: new Date().toISOString(),
+      recoverable: true,
+    };
+    const errorEvent: EnrichmentProgressEvent = {
+      type: 'error',
+      node: 'generateSummary',
+      data: { error: errorEntry.message },
+      timestamp: new Date().toISOString(),
+    };
+    return { errors: [errorEntry], progressEvents: [progressStart, errorEvent] };
+  }
+}
+
+/**
+ * Persist summary to EnrichmentSession and update Candidate status
+ */
+export async function persistSummaryNode(
+  state: EnrichmentState
+): Promise<PartialEnrichmentState> {
+  const progressStart: EnrichmentProgressEvent = {
+    type: 'node_start',
+    node: 'persistSummary',
+    timestamp: new Date().toISOString(),
+  };
+
+  try {
+    const sessionId = state.sessionId;
+    if (!sessionId) {
+      throw new Error('Missing sessionId for persistSummary');
+    }
+
+    const bestConfidence =
+      typeof state.bestConfidence === 'number'
+        ? state.bestConfidence
+        : state.identitiesFound.length > 0
+          ? Math.max(...state.identitiesFound.map((i) => i.confidence))
+          : null;
+
+    // Prisma client types may be stale until `prisma generate` runs in the target environment.
+    // Use a narrow `any` cast to allow compilation while keeping runtime behavior correct.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const updateData: any = {
+      summary: state.summaryText || null,
+      summaryStructured: state.summaryStructured
+        ? (JSON.parse(JSON.stringify(state.summaryStructured)) as Prisma.InputJsonValue)
+        : undefined,
+      summaryEvidence: state.summaryEvidence
+        ? (JSON.parse(JSON.stringify(state.summaryEvidence)) as Prisma.InputJsonValue)
+        : undefined,
+      summaryModel: state.summaryModel || null,
+      summaryTokens: state.summaryTokens ?? null,
+      summaryGeneratedAt: state.summaryGeneratedAt ? new Date(state.summaryGeneratedAt) : new Date(),
+    };
+
+    await prisma.enrichmentSession.update({
+      where: { id: sessionId },
+      data: updateData,
+    });
+
+    await prisma.candidate
+      .update({
+        where: { id: state.candidateId },
+        data: {
+          enrichmentStatus: state.status === 'failed' ? 'failed' : 'completed',
+          confidenceScore: bestConfidence ?? undefined,
+          lastEnrichedAt: new Date(),
+        },
+      })
+      .catch(() => {});
+
+    const progressComplete: EnrichmentProgressEvent = {
+      type: 'node_complete',
+      node: 'persistSummary',
+      data: { confidence: bestConfidence ?? undefined },
+      timestamp: new Date().toISOString(),
+    };
+
+    return { progressEvents: [progressStart, progressComplete] };
+  } catch (error) {
+    const errorEntry: EnrichmentError = {
+      platform: 'system',
+      message: error instanceof Error ? error.message : 'Failed to persist summary',
+      timestamp: new Date().toISOString(),
+      recoverable: true,
+    };
+    const errorEvent: EnrichmentProgressEvent = {
+      type: 'error',
+      node: 'persistSummary',
+      data: { error: errorEntry.message },
+      timestamp: new Date().toISOString(),
+    };
+    return { errors: [errorEntry], progressEvents: [progressStart, errorEvent] };
   }
 }
 
