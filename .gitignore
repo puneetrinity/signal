@@ -46,7 +46,7 @@ next-env.d.ts
 
 # prisma
 prisma/.env
-prisma/migrations
+# Note: prisma/migrations should be tracked for prisma migrate deploy
 
 # IDE
 .vscode/*
