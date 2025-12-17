@@ -246,10 +246,11 @@ export async function buildEnrichmentGraphWithCheckpointer(
   // Dynamic import (non-literal) to avoid TS module resolution errors when the optional
   // dependency isn't installed in all environments.
   const moduleName = '@langchain/langgraph-checkpoint-postgres';
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { PostgresSaver } = (await import(moduleName)) as { PostgresSaver: { fromConnString: (url: string) => { setup: () => Promise<void> } } };
-
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call
+  const { PostgresSaver } = await import(moduleName);
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call
   const checkpointer = PostgresSaver.fromConnString(connectionString);
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call
   await checkpointer.setup();
 
   const graph = new StateGraph(EnrichmentStateAnnotation)
@@ -270,6 +271,7 @@ export async function buildEnrichmentGraphWithCheckpointer(
     .addEdge(NODES.AGGREGATE, NODES.PERSIST)
     .addEdge(NODES.PERSIST, END);
 
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
   return graph.compile({ checkpointer });
 }
 
