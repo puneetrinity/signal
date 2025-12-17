@@ -6,6 +6,7 @@ import { Loader2, Clock } from 'lucide-react';
 import { SearchBar } from '@/components/SearchBar';
 import { LoadingState } from '@/components/LoadingState';
 import ProfileSummaryCard from '@/components/ProfileSummaryCard';
+import { ApiKeySettings } from '@/components/ApiKeySettings';
 import type { ProfileSummary } from '@/types/linkedin';
 
 interface SearchMetadata {
@@ -92,7 +93,10 @@ function SearchContent() {
     <div className="min-h-screen px-4 py-8 pt-24">
       <div className="mx-auto max-w-7xl">
         <div className="mb-8 flex flex-col gap-4">
-          <h1 className="text-3xl font-bold">Search Results</h1>
+          <div className="flex items-center justify-between">
+            <h1 className="text-3xl font-bold">Search Results</h1>
+            <ApiKeySettings />
+          </div>
           <SearchBar onSearch={handleSearch} isLoading={isLoading} />
         </div>
 

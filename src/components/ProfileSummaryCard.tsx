@@ -13,6 +13,7 @@ import type {
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { useAuthHeaders } from '@/contexts/ApiKeyContext';
 import {
   ChevronDown,
   ChevronUp,
@@ -40,6 +41,7 @@ function hasValidCandidateId(summary: ProfileSummaryV2): boolean {
 
 export default function ProfileSummaryCard({ summary }: ProfileSummaryCardProps) {
   const router = useRouter();
+  const getAuthHeaders = useAuthHeaders();
   const [isExpanded, setIsExpanded] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isEnriching, setIsEnriching] = useState(false);
@@ -88,7 +90,7 @@ export default function ProfileSummaryCard({ summary }: ProfileSummaryCardProps)
     try {
       const response = await fetch('/api/v2/enrich', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ candidateId }),
       });
 
@@ -109,7 +111,7 @@ export default function ProfileSummaryCard({ summary }: ProfileSummaryCardProps)
     } finally {
       setIsEnriching(false);
     }
-  }, [isV2Mode, v2HasValidId, summary, fetchV2Details]);
+  }, [isV2Mode, v2HasValidId, summary, fetchV2Details, getAuthHeaders]);
 
   // v2: Reveal email
   const handleRevealEmail = useCallback(
@@ -117,7 +119,7 @@ export default function ProfileSummaryCard({ summary }: ProfileSummaryCardProps)
       try {
         const response = await fetch('/api/v2/identity/reveal', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getAuthHeaders(),
           body: JSON.stringify({ identityCandidateId }),
         });
 
@@ -137,7 +139,7 @@ export default function ProfileSummaryCard({ summary }: ProfileSummaryCardProps)
         return null;
       }
     },
-    []
+    [getAuthHeaders]
   );
 
   // v2: Confirm identity
@@ -146,7 +148,7 @@ export default function ProfileSummaryCard({ summary }: ProfileSummaryCardProps)
       try {
         const response = await fetch('/api/v2/identity/confirm', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getAuthHeaders(),
           body: JSON.stringify({
             identityCandidateId,
             method: 'recruiter_manual',
@@ -171,7 +173,7 @@ export default function ProfileSummaryCard({ summary }: ProfileSummaryCardProps)
         return false;
       }
     },
-    [fetchV2Details]
+    [fetchV2Details, getAuthHeaders]
   );
 
   // v2: Reject identity
@@ -180,7 +182,7 @@ export default function ProfileSummaryCard({ summary }: ProfileSummaryCardProps)
       try {
         const response = await fetch('/api/v2/identity/confirm', {
           method: 'DELETE',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getAuthHeaders(),
           body: JSON.stringify({ identityCandidateId }),
         });
 
@@ -202,7 +204,7 @@ export default function ProfileSummaryCard({ summary }: ProfileSummaryCardProps)
         return false;
       }
     },
-    [fetchV2Details]
+    [fetchV2Details, getAuthHeaders]
   );
 
   // Handle expand - different behavior for v1 vs v2
