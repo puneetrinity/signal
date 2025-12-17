@@ -1,6 +1,6 @@
-# Railway configuration for worker service
-# Deploy this as a separate service pointing to the same repo
-# with start command override: npm run worker:enrichment
+# Railway configuration
+# Main service: npm run start
+# Worker service: Override startCommand to npm run worker:enrichment
 
 [build]
 builder = "nixpacks"
@@ -11,3 +11,7 @@ healthcheckPath = "/"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
+
+# Run migrations before starting the service
+# This runs once per deployment, after build
+releaseCommand = "npx prisma migrate deploy"
