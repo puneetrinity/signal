@@ -443,6 +443,40 @@ export class GitHubClient {
   }
 
   /**
+   * Get user's top repositories with language info
+   * @param username - GitHub username
+   * @param limit - Max repos to return
+   */
+  async getUserRepos(
+    username: string,
+    limit: number = 10
+  ): Promise<Array<{ name: string; language: string | null; stars: number; description: string | null }>> {
+    try {
+      const repos = await this.request<
+        Array<{
+          name: string;
+          language: string | null;
+          stargazers_count: number;
+          description: string | null;
+          fork: boolean;
+        }>
+      >(`/users/${encodeURIComponent(username)}/repos?sort=pushed&per_page=${limit}`);
+
+      return repos
+        .filter((r) => !r.fork)
+        .slice(0, limit)
+        .map((r) => ({
+          name: r.name,
+          language: r.language,
+          stars: r.stargazers_count,
+          description: r.description,
+        }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * Check rate limit status
    */
   async getRateLimit(): Promise<{

@@ -499,7 +499,20 @@ async function buildEphemeralPlatformData(state: EnrichmentState): Promise<Ephem
     identities.map(async (identity) => {
       if (identity.platform === 'github') {
         try {
-          const profile = await github.getUser(identity.platformId);
+          const [profile, repos] = await Promise.all([
+            github.getUser(identity.platformId),
+            github.getUserRepos(identity.platformId, 10),
+          ]);
+
+          // Extract unique languages from repos
+          const languages = [...new Set(repos.map((r) => r.language).filter(Boolean))] as string[];
+
+          // Get top repos by stars
+          const topRepos = repos
+            .sort((a, b) => b.stars - a.stars)
+            .slice(0, 5)
+            .map((r) => ({ name: r.name, language: r.language, stars: r.stars }));
+
           return {
             platform: identity.platform,
             platformId: identity.platformId,
@@ -514,6 +527,8 @@ async function buildEphemeralPlatformData(state: EnrichmentState): Promise<Ephem
               publicRepos: profile.public_repos ?? null,
               blog: profile.blog ?? null,
               createdAt: profile.created_at ?? null,
+              languages,
+              topRepos,
             },
           };
         } catch (error) {

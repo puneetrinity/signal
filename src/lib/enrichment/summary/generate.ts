@@ -68,23 +68,31 @@ function buildPrompt(input: GenerateSummaryInput): string {
     data: p.data,
   }));
 
-  return `You are helping a recruiter. Write a concise candidate summary using ONLY the provided inputs.
+  return `You are helping a recruiter understand a software engineering candidate. Write a concise summary using ONLY the provided inputs.
 
 STRICT RULES:
 - Do NOT include or infer email addresses, phone numbers, home addresses, or any private identifiers.
-- If information is missing/uncertain, say so briefly in caveats.
-- Prefer concrete signals from platform profiles over guesses.
+- Extract SKILLS from: programming languages in repos, technologies mentioned in bio/headline, frameworks evident from repo names.
+- HIGHLIGHTS should include: notable repos (especially with stars), years of experience indicators, companies worked at.
+- TALKING POINTS should be conversation starters a recruiter could use.
 
-Candidate (SERP hints, not authoritative):
+OUTPUT REQUIREMENTS:
+- "skills": Array of programming languages/frameworks/tools (e.g., "JavaScript", "React", "Python", "AWS"). Extract from languages array and repo names.
+- "highlights": Notable achievements, metrics (stars, repos, followers), companies.
+- "talkingPoints": Questions or topics to discuss with the candidate.
+- "summary": 2-3 sentence overview.
+- "confidence": 0-1 based on data quality.
+
+Candidate (SERP hints):
 ${JSON.stringify(candidate, null, 2)}
 
-Discovered identities (ranked signals):
+Discovered identities:
 ${JSON.stringify(identityLines, null, 2)}
 
-Fetched platform data (public profile fields only; may be partial):
+Platform data (includes languages and repos):
 ${JSON.stringify(platformDataLines, null, 2)}
 
-Return JSON matching the schema: summary (string), structured (skills/highlights/talkingPoints), confidence (0-1), caveats (array).`;
+Return valid JSON matching schema: { summary, structured: { skills, highlights, talkingPoints }, confidence, caveats }.`;
 }
 
 export async function generateCandidateSummary(
