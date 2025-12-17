@@ -196,6 +196,18 @@ export function transformBrightDataProfile(
 // ============================================================================
 
 /**
+ * Role type for identity enrichment prioritization
+ * Used to select appropriate platforms for discovery
+ */
+export type RoleType =
+  | 'engineer'
+  | 'data_scientist'
+  | 'researcher'
+  | 'founder'
+  | 'designer'
+  | 'general';
+
+/**
  * v2 Search result with candidate ID
  */
 export interface ProfileSummaryV2 extends ProfileSummary {

@@ -18,6 +18,21 @@ import {
   Search,
   Mail,
   Loader2,
+  Code,
+  Code2,
+  Package,
+  Database,
+  GraduationCap,
+  BookOpen,
+  FlaskConical,
+  FileText,
+  Briefcase,
+  Building2,
+  PenLine,
+  Video,
+  Twitter,
+  Palette,
+  Brush,
 } from 'lucide-react';
 import { useState } from 'react';
 
@@ -56,11 +71,108 @@ function getConfidenceBadgeVariant(
 
 function getPlatformIcon(platform: string) {
   switch (platform) {
+    // Code & Engineering
     case 'github':
       return <Github className="h-4 w-4" />;
+    case 'stackoverflow':
+      return <Code className="h-4 w-4" />;
+    case 'npm':
+    case 'pypi':
+      return <Package className="h-4 w-4" />;
+    case 'dockerhub':
+      return <Database className="h-4 w-4" />;
+    case 'leetcode':
+    case 'hackerearth':
+    case 'codepen':
+    case 'gitlab':
+    case 'devto':
+    case 'gist':
+      return <Code2 className="h-4 w-4" />;
+    // Data Science & ML
+    case 'kaggle':
+    case 'huggingface':
+    case 'paperswithcode':
+    case 'openreview':
+      return <Database className="h-4 w-4" />;
+    // Academic & Authority
+    case 'orcid':
+    case 'scholar':
+    case 'semanticscholar':
+    case 'researchgate':
+    case 'university':
+      return <GraduationCap className="h-4 w-4" />;
+    case 'arxiv':
+      return <BookOpen className="h-4 w-4" />;
+    case 'patents':
+      return <FlaskConical className="h-4 w-4" />;
+    // Business & Founder
+    case 'sec':
+      return <FileText className="h-4 w-4" />;
+    case 'crunchbase':
+    case 'angellist':
+      return <Briefcase className="h-4 w-4" />;
+    case 'companyteam':
+      return <Building2 className="h-4 w-4" />;
+    // Content & Thought Leadership
+    case 'medium':
+    case 'substack':
+      return <PenLine className="h-4 w-4" />;
+    case 'youtube':
+      return <Video className="h-4 w-4" />;
+    case 'twitter':
+      return <Twitter className="h-4 w-4" />;
+    // Design
+    case 'dribbble':
+      return <Palette className="h-4 w-4" />;
+    case 'behance':
+      return <Brush className="h-4 w-4" />;
     default:
       return <ExternalLink className="h-4 w-4" />;
   }
+}
+
+function getPlatformLabel(platform: string): string {
+  const labels: Record<string, string> = {
+    // Code & Engineering
+    github: 'GitHub',
+    stackoverflow: 'Stack Overflow',
+    npm: 'npm',
+    pypi: 'PyPI',
+    leetcode: 'LeetCode',
+    hackerearth: 'HackerEarth',
+    codepen: 'CodePen',
+    gitlab: 'GitLab',
+    dockerhub: 'Docker Hub',
+    gist: 'GitHub Gist',
+    devto: 'Dev.to',
+    // Data Science & ML
+    kaggle: 'Kaggle',
+    huggingface: 'Hugging Face',
+    paperswithcode: 'Papers With Code',
+    openreview: 'OpenReview',
+    // Academic
+    orcid: 'ORCID',
+    scholar: 'Google Scholar',
+    semanticscholar: 'Semantic Scholar',
+    researchgate: 'ResearchGate',
+    university: 'University',
+    arxiv: 'arXiv',
+    patents: 'Google Patents',
+    // Founder
+    sec: 'SEC EDGAR',
+    crunchbase: 'Crunchbase',
+    angellist: 'AngelList',
+    companyteam: 'Company Team',
+    // Content
+    medium: 'Medium',
+    substack: 'Substack',
+    youtube: 'YouTube',
+    twitter: 'Twitter/X',
+    // Design
+    dribbble: 'Dribbble',
+    behance: 'Behance',
+  };
+  return labels[platform] || platform;
 }
 
 function getStatusIcon(status: string) {
@@ -128,7 +240,10 @@ function IdentityCandidateCard({
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-center gap-2">
           {getPlatformIcon(identity.platform)}
-          <span className="font-medium text-foreground">{identity.platformId}</span>
+          <div className="flex flex-col">
+            <span className="text-xs text-muted-foreground">{getPlatformLabel(identity.platform)}</span>
+            <span className="font-medium text-foreground">{identity.platformId}</span>
+          </div>
           {getStatusIcon(identity.status)}
         </div>
         <div className="flex items-center gap-2">
@@ -335,11 +450,21 @@ export default function CandidateDetails({
         <>
           <Separator />
           <div className="space-y-3">
-            <div className="flex items-center gap-2 text-foreground">
-              <Github className="h-4 w-4" />
-              <h4 className="text-sm font-semibold">
-                Identity Candidates ({identityCandidates.length})
-              </h4>
+            <div className="flex items-center justify-between text-foreground">
+              <div className="flex items-center gap-2">
+                <Search className="h-4 w-4" />
+                <h4 className="text-sm font-semibold">
+                  Identity Candidates ({identityCandidates.length})
+                </h4>
+              </div>
+              {/* Platform summary */}
+              <div className="flex items-center gap-1">
+                {Array.from(new Set(identityCandidates.map((ic) => ic.platform))).map((platform) => (
+                  <span key={platform} title={getPlatformLabel(platform)}>
+                    {getPlatformIcon(platform)}
+                  </span>
+                ))}
+              </div>
             </div>
 
             {/* Confirmed */}

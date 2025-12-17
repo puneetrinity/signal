@@ -11,13 +11,15 @@
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
     "db:seed": "tsx prisma/seed.ts",
-    "db:generate": "prisma generate"
+    "db:generate": "prisma generate",
+    "worker:enrichment": "tsx src/lib/enrichment/worker.ts"
   },
   "dependencies": {
     "@ai-sdk/google": "^2.0.17",
     "@ai-sdk/groq": "^2.0.33",
-    "@langchain/core": "^1.0.3",
-    "@langchain/langgraph": "^1.0.1",
+    "@langchain/core": "^1.1.6",
+    "@langchain/langgraph": "^1.0.5",
+    "@langchain/langgraph-checkpoint-postgres": "^1.0.0",
     "@modelcontextprotocol/sdk": "^1.19.1",
     "@prisma/client": "^6.5.0",
     "@radix-ui/react-avatar": "^1.1.10",
@@ -31,6 +33,7 @@
     "@tanstack/react-query": "^5.62.18",
     "@types/three": "^0.180.0",
     "ai": "^5.0.60",
+    "bullmq": "^5.66.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
@@ -45,6 +48,7 @@
     "remark-gfm": "^4.0.1",
     "tailwind-merge": "^2.6.0",
     "three": "^0.180.0",
+    "uuid": "^10.0.0",
     "zod": "^3.25.76",
     "zustand": "^5.0.2"
   },

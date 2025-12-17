@@ -13,6 +13,7 @@
 import { prisma } from '@/lib/prisma';
 import {
   discoverGitHubIdentities,
+  discoverAllPlatformIdentities,
   getPlatformsForRoleType,
   type CandidateHints,
   type DiscoveredIdentity,
@@ -31,6 +32,8 @@ export * from './bridge-discovery';
 export interface EnrichmentOptions extends BridgeDiscoveryOptions {
   platforms?: string[];
   maxIdentitiesPerPlatform?: number;
+  enableMultiPlatform?: boolean;
+  maxSources?: number;
 }
 
 /**
@@ -246,22 +249,49 @@ export async function enrichCandidate(
   const sourcesExecuted: string[] = [];
 
   try {
-    // Discover identities on each platform
-    for (const platform of platforms) {
-      if (earlyStopReason) break;
+    // Check if multi-platform discovery is enabled (default: true)
+    const enableMultiPlatform = options.enableMultiPlatform !== false;
 
-      sourcesExecuted.push(platform);
+    if (enableMultiPlatform) {
+      // Use new multi-platform discovery
+      console.log(`[Enrichment] Multi-platform discovery for ${candidateId} (role: ${candidate.roleType})`);
 
-      if (platform === 'github') {
-        const result = await discoverGitHubIdentities(candidateId, hints, options);
-        allIdentities.push(...result.identitiesFound);
-        totalQueries += result.queriesExecuted;
+      const multiResult = await discoverAllPlatformIdentities(candidateId, hints, {
+        ...options,
+        maxSources: options.maxSources || 5,
+        includeSearchSources: true,
+      });
 
-        if (result.earlyStopReason) {
-          earlyStopReason = result.earlyStopReason;
+      allIdentities.push(...multiResult.allIdentities);
+      totalQueries = multiResult.totalQueriesExecuted;
+
+      // Track which sources were executed
+      sourcesExecuted.push('github');
+      if (multiResult.searchResult) {
+        sourcesExecuted.push(...multiResult.searchResult.sourcesQueried);
+      }
+
+      // Check for early stop
+      if (multiResult.githubResult.earlyStopReason) {
+        earlyStopReason = multiResult.githubResult.earlyStopReason;
+      }
+    } else {
+      // Legacy single-platform discovery
+      for (const platform of platforms) {
+        if (earlyStopReason) break;
+
+        sourcesExecuted.push(platform);
+
+        if (platform === 'github') {
+          const result = await discoverGitHubIdentities(candidateId, hints, options);
+          allIdentities.push(...result.identitiesFound);
+          totalQueries += result.queriesExecuted;
+
+          if (result.earlyStopReason) {
+            earlyStopReason = result.earlyStopReason;
+          }
         }
       }
-      // TODO: Add other platforms (stackoverflow, kaggle, etc.)
     }
 
     // Store identities in database

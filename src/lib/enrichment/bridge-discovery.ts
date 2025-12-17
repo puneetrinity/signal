@@ -6,6 +6,7 @@
  * - Name + Company/Location matching
  * - GitHub profile links to LinkedIn
  * - Commit email patterns
+ * - Multi-platform search discovery
  *
  * Returns IdentityCandidate entries with evidence pointers (NOT PII).
  *
@@ -25,6 +26,13 @@ import {
   detectContradictions,
   type ScoreBreakdown,
 } from './scoring';
+import {
+  discoverAcrossSources,
+  type CandidateHints as SourceCandidateHints,
+  type DiscoveredIdentity as SourceDiscoveredIdentity,
+  type MultiSourceDiscoveryResult,
+} from './sources';
+import type { RoleType } from '@/types/linkedin';
 
 /**
  * Candidate hints from search results (NOT scraped data)
@@ -36,6 +44,7 @@ export interface CandidateHints {
   headlineHint: string | null;
   locationHint: string | null;
   roleType: string | null;
+  companyHint?: string | null;
 }
 
 /**
@@ -311,36 +320,197 @@ export async function discoverGitHubIdentities(
 
 /**
  * Check if a platform is supported for bridge discovery
+ * Only returns true for implemented sources
  */
 export function isSupportedPlatform(platform: string): boolean {
-  return ['github'].includes(platform.toLowerCase());
+  const supported = [
+    // Code & Engineering
+    'github',       // Direct API
+    'stackoverflow',
+    'npm',
+    'pypi',
+    'leetcode',
+    'hackerearth',
+    'gitlab',
+    'dockerhub',
+    'codepen',
+    'gist',
+    'devto',
+    // Data Science & ML
+    'kaggle',
+    'huggingface',
+    'paperswithcode',
+    'openreview',
+    // Academic
+    'orcid',
+    'scholar',
+    'semanticscholar',
+    'researchgate',
+    'arxiv',
+    'patents',
+    'university',
+    // Founder
+    'sec',
+    'crunchbase',
+    'angellist',
+    'companyteam',
+    // Content
+    'medium',
+    'substack',
+    'youtube',
+    'twitter',
+    // Design
+    'dribbble',
+    'behance',
+  ];
+  return supported.includes(platform.toLowerCase());
 }
 
 /**
  * Get supported platforms for a role type
- * Engineers -> GitHub, StackOverflow
- * Researchers -> GitHub, ORCID, Google Scholar
- * Data Scientists -> GitHub, Kaggle
+ * Uses the v2.1 matrix priorities - only includes implemented sources
  */
 export function getPlatformsForRoleType(roleType: string | null): string[] {
   switch (roleType) {
     case 'engineer':
-      return ['github']; // TODO: Add stackoverflow
+      return ['github', 'stackoverflow', 'npm', 'pypi', 'leetcode', 'hackerearth', 'gitlab', 'dockerhub', 'codepen', 'gist', 'devto'];
     case 'data_scientist':
-      return ['github']; // TODO: Add kaggle
+      return ['github', 'kaggle', 'huggingface', 'paperswithcode', 'openreview', 'scholar', 'gist', 'stackoverflow'];
     case 'researcher':
-      return ['github']; // TODO: Add orcid, scholar
+      return ['orcid', 'scholar', 'semanticscholar', 'openreview', 'researchgate', 'arxiv', 'patents', 'university', 'github'];
     case 'founder':
-      return ['github']; // TODO: Add twitter, crunchbase
+      return ['sec', 'crunchbase', 'angellist', 'companyteam', 'github', 'twitter', 'medium', 'youtube', 'substack'];
     case 'designer':
-      return []; // TODO: Add dribbble, behance
+      return ['dribbble', 'behance', 'github', 'codepen', 'twitter', 'medium'];
     default:
-      return ['github'];
+      return ['github', 'stackoverflow', 'twitter', 'medium', 'companyteam'];
   }
+}
+
+/**
+ * Convert local CandidateHints to source-compatible format
+ */
+function toSourceHints(hints: CandidateHints): SourceCandidateHints {
+  // Extract company from headline if not provided
+  let companyHint = hints.companyHint || null;
+  if (!companyHint && hints.headlineHint) {
+    const match = hints.headlineHint.match(/(?:at|@|,)\s*([A-Z][A-Za-z0-9\s&]+?)(?:\s*[-|·]|$)/);
+    if (match) {
+      companyHint = match[1].trim();
+    }
+  }
+
+  return {
+    linkedinId: hints.linkedinId,
+    linkedinUrl: hints.linkedinUrl,
+    nameHint: hints.nameHint,
+    headlineHint: hints.headlineHint,
+    locationHint: hints.locationHint,
+    companyHint,
+    roleType: (hints.roleType as RoleType) || null,
+  };
+}
+
+/**
+ * Convert source DiscoveredIdentity to local format
+ */
+function fromSourceIdentity(identity: SourceDiscoveredIdentity): DiscoveredIdentity {
+  return {
+    platform: identity.platform,
+    platformId: identity.platformId,
+    profileUrl: identity.profileUrl,
+    confidence: identity.confidence,
+    confidenceBucket: identity.confidenceBucket,
+    scoreBreakdown: identity.scoreBreakdown,
+    evidence: null, // Search-based discovery doesn't have commit evidence
+    hasContradiction: identity.hasContradiction,
+    contradictionNote: identity.contradictionNote,
+    platformProfile: {
+      name: identity.platformProfile.name,
+      company: identity.platformProfile.company,
+      location: identity.platformProfile.location,
+      bio: identity.platformProfile.bio,
+      followers: identity.platformProfile.followers || 0,
+      publicRepos: identity.platformProfile.publicRepos || 0,
+    },
+  };
+}
+
+/**
+ * Discover identities across all relevant platforms for a candidate
+ * Uses both GitHub API (for commit evidence) and search-based discovery
+ */
+export async function discoverAllPlatformIdentities(
+  candidateId: string,
+  hints: CandidateHints,
+  options: BridgeDiscoveryOptions & {
+    maxSources?: number;
+    includeSearchSources?: boolean;
+  } = {}
+): Promise<{
+  githubResult: BridgeDiscoveryResult;
+  searchResult: MultiSourceDiscoveryResult | null;
+  allIdentities: DiscoveredIdentity[];
+  totalQueriesExecuted: number;
+}> {
+  const includeSearch = options.includeSearchSources !== false;
+  const roleType = (hints.roleType as RoleType) || 'general';
+
+  // Start GitHub discovery (uses direct API for commit evidence)
+  const githubResult = await discoverGitHubIdentities(candidateId, hints, options);
+
+  // Start search-based discovery for other platforms
+  let searchResult: MultiSourceDiscoveryResult | null = null;
+  if (includeSearch) {
+    try {
+      searchResult = await discoverAcrossSources(toSourceHints(hints), roleType, {
+        maxResults: options.maxGitHubResults || 5,
+        maxQueries: 3,
+        minConfidence: options.confidenceThreshold || 0.4,
+        maxSources: options.maxSources || 5,
+        parallelism: 3,
+      });
+    } catch (error) {
+      console.error(
+        '[BridgeDiscovery] Search-based discovery failed:',
+        error instanceof Error ? error.message : error
+      );
+    }
+  }
+
+  // Combine all identities
+  const allIdentities: DiscoveredIdentity[] = [...githubResult.identitiesFound];
+
+  if (searchResult) {
+    for (const identity of searchResult.allIdentities) {
+      // Skip GitHub results from search (we have better data from API)
+      if (identity.platform === 'github') continue;
+
+      allIdentities.push(fromSourceIdentity(identity));
+    }
+  }
+
+  // Sort by confidence
+  allIdentities.sort((a, b) => b.confidence - a.confidence);
+
+  const totalQueriesExecuted =
+    githubResult.queriesExecuted + (searchResult?.totalQueriesExecuted || 0);
+
+  console.log(
+    `[BridgeDiscovery] Total: ${allIdentities.length} identities from ${1 + (searchResult?.sourcesQueried.length || 0)} platforms, ${totalQueriesExecuted} queries`
+  );
+
+  return {
+    githubResult,
+    searchResult,
+    allIdentities,
+    totalQueriesExecuted,
+  };
 }
 
 export default {
   discoverGitHubIdentities,
+  discoverAllPlatformIdentities,
   isSupportedPlatform,
   getPlatformsForRoleType,
 };
