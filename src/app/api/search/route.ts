@@ -11,8 +11,22 @@ export async function POST(request: NextRequest) {
     // Phase 5: When v2 discovery is enabled, proxy /api/search to the compliant v2 endpoint.
     // This lets existing UI clients keep calling /api/search while getting v2 behavior.
     if (process.env.USE_NEW_DISCOVERY === 'true') {
-      const url = request.nextUrl.clone();
-      url.pathname = '/api/v2/search';
+      // NOTE: On some platforms (e.g. Railway), request.nextUrl can resolve to an internal
+      // origin like https://localhost:3000 which causes "ERR_SSL_PACKET_LENGTH_TOO_LONG".
+      // Build the proxy origin from forwarded headers instead.
+      const forwardedProto =
+        request.headers.get('x-forwarded-proto') ?? request.nextUrl.protocol.replace(':', '');
+      const forwardedHost =
+        request.headers.get('x-forwarded-host') ?? request.headers.get('host');
+
+      if (!forwardedHost) {
+        return NextResponse.json(
+          { success: false, error: 'Missing Host header for v2 proxy' },
+          { status: 500 },
+        );
+      }
+
+      const url = new URL('/api/v2/search', `${forwardedProto}://${forwardedHost}`);
 
       const response = await fetch(url.toString(), {
         method: 'POST',

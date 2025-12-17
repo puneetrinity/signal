@@ -2038,6 +2038,8 @@ export interface GitHubEnrichedData {
 
 Compatibility: when `USE_NEW_DISCOVERY=true`, the legacy `POST /api/search` route proxies to `POST /api/v2/search` to keep older clients working.
 
+Deployment note (Railway/Proxies): the proxy builds the origin using `x-forwarded-proto` + `x-forwarded-host` to avoid TLS errors when the internal server is plain HTTP.
+
 **Request:**
 ```json
 {
