@@ -1,4 +1,4 @@
-# PeopleHub Architecture v2.1
+# Signal Architecture v2.1
 
 ## Compliant Recruiter Sourcing Tool
 
