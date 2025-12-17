@@ -1,12 +1,13 @@
 # Railway configuration
-# Main service: npm run start
-# Worker service: Override startCommand to npm run worker:enrichment
+# Start command should be set per-service in Railway dashboard:
+# - signal: npm run start (default)
+# - enrichment-worker: npm run worker:enrichment
 
 [build]
 builder = "nixpacks"
 
 [deploy]
-startCommand = "npm run start"
+# Don't set startCommand here - let each service configure its own in dashboard
 healthcheckPath = "/"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
