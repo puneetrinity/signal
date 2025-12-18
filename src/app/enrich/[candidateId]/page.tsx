@@ -78,10 +78,10 @@ export default function EnrichmentPage({ params }: PageProps) {
     }
   }, [candidateId]);
 
-  // Start enrichment
+  // Start enrichment via async endpoint (uses LangGraph with AI summary)
   const startEnrichment = useCallback(async () => {
     try {
-      const response = await fetch('/api/v2/enrich', {
+      const response = await fetch('/api/v2/enrich/async', {
         method: 'POST',
         headers: getAuthHeaders(),
         body: JSON.stringify({ candidateId }),
@@ -93,8 +93,8 @@ export default function EnrichmentPage({ params }: PageProps) {
         throw new Error(data.error || 'Failed to start enrichment');
       }
 
-      if (data.result?.sessionId) {
-        setSessionId(data.result.sessionId);
+      if (data.sessionId) {
+        setSessionId(data.sessionId);
       }
 
       return data;
@@ -163,12 +163,13 @@ export default function EnrichmentPage({ params }: PageProps) {
         // First, fetch existing candidate data
         await fetchCandidate();
 
-        // Start enrichment
+        // Start enrichment via async endpoint
         setStatus('running');
         const result = await startEnrichment();
 
-        if (result.result?.sessionId) {
-          eventSource = subscribeToStream(result.result.sessionId);
+        // Async endpoint returns sessionId directly
+        if (result.sessionId) {
+          eventSource = subscribeToStream(result.sessionId);
         } else {
           // No session returned, enrichment may have been instant or already done
           await fetchCandidate();
