@@ -9,6 +9,30 @@ type RedisGlobal = {
 
 const globalForRedis = globalThis as unknown as RedisGlobal;
 
+/**
+ * Detect if we're in a build environment (Docker build, next build, etc.)
+ * During build, network is often unavailable and env vars may not be set correctly
+ */
+function isBuildTime(): boolean {
+  // Next.js sets this during build
+  if (process.env.NEXT_PHASE === 'phase-production-build') {
+    return true;
+  }
+  // Docker/Nixpacks build doesn't have access to runtime network
+  if (process.env.CI === 'true' || process.env.BUILDING === 'true') {
+    return true;
+  }
+  // Railway internal hostnames only work at runtime, not during build
+  // If REDIS_URL contains .railway.internal, we're likely in a Railway build
+  // where the hostname won't resolve yet
+  const redisUrl = process.env.REDIS_URL || '';
+  if (redisUrl.includes('.railway.internal') && !process.env.RAILWAY_ENVIRONMENT) {
+    // RAILWAY_ENVIRONMENT is set at runtime but not during build
+    return true;
+  }
+  return false;
+}
+
 class NoopRedis {
   on(_event: string, _listener: (...args: unknown[]) => void) {
     return this;
@@ -66,6 +90,15 @@ class NoopRedis {
 type RedisClient = Redis | NoopRedis;
 
 function createRedisClient(): RedisClient {
+  // During build time, always return NoopRedis to avoid network issues
+  if (isBuildTime()) {
+    if (!globalForRedis.redisDisabledLogged) {
+      console.log('[Redis] Build-time detected, using NoopRedis');
+      globalForRedis.redisDisabledLogged = true;
+    }
+    return new NoopRedis();
+  }
+
   if (process.env.REDIS_URL) {
     return new Redis(process.env.REDIS_URL, {
       tls: process.env.REDIS_TLS_ENABLED === 'true' ? {} : undefined,
@@ -78,7 +111,7 @@ function createRedisClient(): RedisClient {
         const targetErrors = ['READONLY', 'ECONNRESET'];
         return targetErrors.some((code) => err.message.includes(code));
       },
-      lazyConnect: false,
+      lazyConnect: true, // Don't connect immediately - wait for first command
       enableReadyCheck: true,
       showFriendlyErrorStack: process.env.NODE_ENV === 'development',
     });
@@ -99,7 +132,7 @@ function createRedisClient(): RedisClient {
         const targetErrors = ['READONLY', 'ECONNRESET'];
         return targetErrors.some((code) => err.message.includes(code));
       },
-      lazyConnect: false,
+      lazyConnect: true, // Don't connect immediately - wait for first command
       enableReadyCheck: true,
       showFriendlyErrorStack: process.env.NODE_ENV === 'development',
     });

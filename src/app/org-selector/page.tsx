@@ -1,5 +1,8 @@
 'use client';
 
+// Disable static prerendering - this page requires auth
+export const dynamic = 'force-dynamic';
+
 import { OrganizationList, useAuth } from '@clerk/nextjs';
 import { useRouter } from 'next/navigation';
 import { useEffect } from 'react';

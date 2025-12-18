@@ -107,16 +107,41 @@ export interface EnrichmentSession {
 }
 
 /**
+ * Detect if we're in a build environment
+ * During build, Redis connections will fail as network isn't available
+ */
+function isBuildTime(): boolean {
+  // Next.js sets this during build
+  if (process.env.NEXT_PHASE === 'phase-production-build') {
+    return true;
+  }
+  // Docker/Nixpacks build
+  if (process.env.CI === 'true' || process.env.BUILDING === 'true') {
+    return true;
+  }
+  // Railway internal hostnames only work at runtime
+  const redisUrl = process.env.REDIS_URL || '';
+  if (redisUrl.includes('.railway.internal') && !process.env.RAILWAY_ENVIRONMENT) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Redis connection singleton
  */
 let redisConnection: IORedis | null = null;
 
 function getRedisConnection(): IORedis {
   if (!redisConnection) {
+    if (isBuildTime()) {
+      throw new Error('[Queue] Cannot create Redis connection during build time');
+    }
     const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
     redisConnection = new IORedis(redisUrl, {
       maxRetriesPerRequest: null, // Required by BullMQ
       enableReadyCheck: false,
+      lazyConnect: true, // Don't connect immediately
     });
   }
   return redisConnection;

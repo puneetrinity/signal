@@ -1,5 +1,8 @@
 'use client';
 
+// Disable static prerendering - this page requires auth
+export const dynamic = 'force-dynamic';
+
 import { useEffect, useState, useCallback } from 'react';
 import { PersonCard } from '@/components/PersonCard';
 import { LoadingState } from '@/components/LoadingState';
