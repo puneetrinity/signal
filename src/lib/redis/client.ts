@@ -12,22 +12,17 @@ const globalForRedis = globalThis as unknown as RedisGlobal;
 /**
  * Detect if we're in a build environment (Docker build, next build, etc.)
  * During build, network is often unavailable and env vars may not be set correctly
+ *
+ * NOTE: This only returns true for Next.js static generation.
+ * At runtime (including worker processes), Redis should always connect.
  */
 function isBuildTime(): boolean {
-  // Next.js sets this during build
+  // Next.js sets this during static page generation
   if (process.env.NEXT_PHASE === 'phase-production-build') {
     return true;
   }
-  // Docker/Nixpacks build doesn't have access to runtime network
-  if (process.env.CI === 'true' || process.env.BUILDING === 'true') {
-    return true;
-  }
-  // Railway internal hostnames only work at runtime, not during build
-  // If REDIS_URL contains .railway.internal, we're likely in a Railway build
-  // where the hostname won't resolve yet
-  const redisUrl = process.env.REDIS_URL || '';
-  if (redisUrl.includes('.railway.internal') && !process.env.RAILWAY_ENVIRONMENT) {
-    // RAILWAY_ENVIRONMENT is set at runtime but not during build
+  // Explicit build flag (set in Dockerfile/CI)
+  if (process.env.BUILDING === 'true') {
     return true;
   }
   return false;

@@ -109,19 +109,17 @@ export interface EnrichmentSession {
 /**
  * Detect if we're in a build environment
  * During build, Redis connections will fail as network isn't available
+ *
+ * NOTE: This should only return true for Next.js static generation.
+ * The worker runs at runtime and should always be able to connect to Redis.
  */
 function isBuildTime(): boolean {
-  // Next.js sets this during build
+  // Next.js sets this during static page generation
   if (process.env.NEXT_PHASE === 'phase-production-build') {
     return true;
   }
-  // Docker/Nixpacks build
-  if (process.env.CI === 'true' || process.env.BUILDING === 'true') {
-    return true;
-  }
-  // Railway internal hostnames only work at runtime
-  const redisUrl = process.env.REDIS_URL || '';
-  if (redisUrl.includes('.railway.internal') && !process.env.RAILWAY_ENVIRONMENT) {
+  // Explicit build flag (set in Dockerfile/CI)
+  if (process.env.BUILDING === 'true') {
     return true;
   }
   return false;
