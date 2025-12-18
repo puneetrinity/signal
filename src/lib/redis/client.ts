@@ -9,25 +9,6 @@ type RedisGlobal = {
 
 const globalForRedis = globalThis as unknown as RedisGlobal;
 
-/**
- * Detect if we're in a build environment (Docker build, next build, etc.)
- * During build, network is often unavailable and env vars may not be set correctly
- *
- * NOTE: This only returns true for Next.js static generation.
- * At runtime (including worker processes), Redis should always connect.
- */
-function isBuildTime(): boolean {
-  // Next.js sets this during static page generation
-  if (process.env.NEXT_PHASE === 'phase-production-build') {
-    return true;
-  }
-  // Explicit build flag (set in Dockerfile/CI)
-  if (process.env.BUILDING === 'true') {
-    return true;
-  }
-  return false;
-}
-
 class NoopRedis {
   on(_event: string, _listener: (...args: unknown[]) => void) {
     return this;
@@ -85,15 +66,8 @@ class NoopRedis {
 type RedisClient = Redis | NoopRedis;
 
 function createRedisClient(): RedisClient {
-  // During build time, always return NoopRedis to avoid network issues
-  if (isBuildTime()) {
-    if (!globalForRedis.redisDisabledLogged) {
-      console.log('[Redis] Build-time detected, using NoopRedis');
-      globalForRedis.redisDisabledLogged = true;
-    }
-    return new NoopRedis();
-  }
-
+  // Redis with lazyConnect: true won't connect until first command
+  // This is safe during build - no connection attempt is made
   if (process.env.REDIS_URL) {
     return new Redis(process.env.REDIS_URL, {
       tls: process.env.REDIS_TLS_ENABLED === 'true' ? {} : undefined,
