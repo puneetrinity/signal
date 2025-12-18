@@ -10,9 +10,10 @@
  */
 
 import type { RoleType } from '@/types/linkedin';
-import type { EnrichmentPlatform, CandidateHints } from './types';
+import type { EnrichmentPlatform, CandidateHints, QueryCandidate } from './types';
 import { BaseEnrichmentSource } from './base-source';
 import type { EnrichmentSearchResult } from './search-executor';
+import { generateHandleVariants } from './handle-variants';
 
 /**
  * Kaggle profile extraction
@@ -173,19 +174,42 @@ export class KaggleSource extends BaseEnrichmentSource {
   }
 
   buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
-    const queries: string[] = [];
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
 
-    // Primary: Profile search
-    if (hints.nameHint) {
-      queries.push(`site:kaggle.com "${hints.nameHint}"`);
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+    const variants = generateHandleVariants(hints.linkedinId, hints.nameHint, 2);
+
+    // HANDLE_MODE: Kaggle is handle-heavy: kaggle.com/username
+    for (const variant of variants) {
+      if (candidates.length >= maxQueries) break;
+      candidates.push({
+        query: `site:kaggle.com/${variant.handle}`,
+        mode: 'handle',
+        variantId: variant.source === 'linkedinId' ? 'handle:clean' : 'handle:derived',
+      });
     }
 
-    // Secondary: With company/org
-    if (hints.nameHint && hints.companyHint && queries.length < maxQueries) {
-      queries.push(`site:kaggle.com "${hints.nameHint}" "${hints.companyHint}"`);
+    // NAME_MODE: Profile search
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:kaggle.com "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full',
+      });
     }
 
-    return queries.slice(0, maxQueries);
+    // NAME + COMPANY: With company/org
+    if (hints.nameHint && hints.companyHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:kaggle.com "${hints.nameHint}" "${hints.companyHint}"`,
+        mode: 'name',
+        variantId: 'name+company',
+      });
+    }
+
+    return candidates.slice(0, maxQueries);
   }
 }
 
@@ -204,19 +228,42 @@ export class HuggingFaceSource extends BaseEnrichmentSource {
   }
 
   buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
-    const queries: string[] = [];
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
 
-    // Primary: User profile search
-    if (hints.nameHint) {
-      queries.push(`site:huggingface.co "${hints.nameHint}"`);
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+    const variants = generateHandleVariants(hints.linkedinId, hints.nameHint, 2);
+
+    // HANDLE_MODE: HuggingFace uses handles: huggingface.co/username
+    for (const variant of variants) {
+      if (candidates.length >= maxQueries) break;
+      candidates.push({
+        query: `site:huggingface.co/${variant.handle}`,
+        mode: 'handle',
+        variantId: variant.source === 'linkedinId' ? 'handle:clean' : 'handle:derived',
+      });
     }
 
-    // Secondary: Organization search
-    if (hints.companyHint && queries.length < maxQueries) {
-      queries.push(`site:huggingface.co "${hints.companyHint}"`);
+    // NAME_MODE: User profile search
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:huggingface.co "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full',
+      });
     }
 
-    return queries.slice(0, maxQueries);
+    // COMPANY_MODE: Organization search
+    if (hints.companyHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:huggingface.co "${hints.companyHint}"`,
+        mode: 'name',
+        variantId: 'company:org',
+      });
+    }
+
+    return candidates.slice(0, maxQueries);
   }
 }
 
@@ -239,19 +286,31 @@ export class PapersWithCodeSource extends BaseEnrichmentSource {
   }
 
   buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
-    const queries: string[] = [];
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
 
-    // Primary: Author profile search
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+
+    // NAME_MODE: Author profile search (name-based platform)
     if (hints.nameHint) {
-      queries.push(`site:paperswithcode.com/author "${hints.nameHint}"`);
+      candidates.push({
+        query: `site:paperswithcode.com/author "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:author_page',
+      });
     }
 
-    // Secondary: Paper search with name
-    if (hints.nameHint && queries.length < maxQueries) {
-      queries.push(`site:paperswithcode.com "${hints.nameHint}"`);
+    // NAME_MODE: Paper search with name
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:paperswithcode.com "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full',
+      });
     }
 
-    return queries.slice(0, maxQueries);
+    return candidates.slice(0, maxQueries);
   }
 }
 

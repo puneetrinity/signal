@@ -12,6 +12,7 @@ import type { RoleType } from '@/types/linkedin';
 import type { EnrichmentPlatform, DiscoveredIdentity as SourceDiscoveredIdentity } from '../sources/types';
 import { getSourcesForRoleType, getSource } from '../sources';
 import { discoverGitHubIdentities, type CandidateHints } from '../bridge-discovery';
+import { buildVariantStats } from '../sources/variant-taxonomy';
 import { prisma } from '@/lib/prisma';
 import type { Prisma } from '@prisma/client';
 import { getGitHubClient } from '../github';
@@ -30,6 +31,7 @@ import {
   type EnrichmentError,
   type EnrichmentProgressEvent,
   type PlatformQueryResult,
+  type EnrichmentRunTrace,
   DEFAULT_BUDGET,
 } from './types';
 
@@ -60,6 +62,127 @@ const NODE_PROGRESS: Record<string, number> = {
   generateSummary: 90,
   persistSummary: 100,
 };
+
+/**
+ * Build run trace from state for observability
+ * Phase A.5: Per-platform diagnostics for debugging 0-hit enrichments
+ * Phase B: Canonical variant stats for metrics aggregation
+ */
+function buildRunTrace(state: EnrichmentState): EnrichmentRunTrace {
+  const platformResults: EnrichmentRunTrace['platformResults'] = {};
+  const providersUsed: Record<string, number> = {};
+  const rateLimitedProviders = new Set<string>();
+
+  // Aggregate variant IDs across all platforms
+  const allExecutedVariants: string[] = [];
+  const allRejectedVariants: string[] = [];
+
+  // Aggregate per-platform results
+  for (const result of state.platformResults || []) {
+    const bestConfidence = result.identities.length > 0
+      ? Math.max(...result.identities.map(i => i.confidence))
+      : null;
+
+    const provider = result.diagnostics?.provider;
+    if (provider) {
+      providersUsed[provider] = (providersUsed[provider] || 0) + 1;
+      if (result.diagnostics?.rateLimited) {
+        rateLimitedProviders.add(provider);
+      }
+    }
+
+    // Collect variant IDs for canonical aggregation
+    if (result.diagnostics?.variantsExecuted) {
+      allExecutedVariants.push(...result.diagnostics.variantsExecuted);
+    }
+    if (result.diagnostics?.variantsRejected) {
+      allRejectedVariants.push(...result.diagnostics.variantsRejected);
+    }
+
+    platformResults[result.platform] = {
+      queriesExecuted: result.queriesExecuted,
+      rawResultCount: result.diagnostics?.rawResultCount ?? 0,
+      identitiesFound: result.identities.length,
+      bestConfidence,
+      durationMs: result.durationMs,
+      error: result.error,
+      rateLimited: result.diagnostics?.rateLimited,
+    };
+  }
+
+  // Calculate totals
+  const totalQueriesExecuted = state.queriesExecuted ?? 0;
+  const platformsQueried = Object.keys(platformResults).length;
+  const platformsWithHits = Object.values(platformResults).filter(p => p.identitiesFound > 0).length;
+  const bestConfidence = state.bestConfidence ?? null;
+  const startTime = state.startedAt ? new Date(state.startedAt).getTime() : Date.now();
+  const durationMs = Date.now() - startTime;
+
+  // Use persist stats if available, otherwise fall back to identitiesFound count
+  const persistStats = state.persistStats ?? {
+    identitiesFoundTotal: state.identitiesFound?.length ?? 0,
+    identitiesAboveMinConfidence: state.identitiesFound?.length ?? 0,
+    identitiesPassingPersistGuard: state.identitiesFound?.length ?? 0,
+    identitiesPersisted: state.identitiesFound?.length ?? 0,
+    persistErrors: 0,
+    perPlatform: {},
+  };
+
+  // Merge per-platform filter stage counts into platformResults
+  if (persistStats.perPlatform) {
+    for (const [platform, counts] of Object.entries(persistStats.perPlatform)) {
+      if (platformResults[platform]) {
+        platformResults[platform].identitiesAboveMinConfidence = counts.aboveMinConfidence;
+        platformResults[platform].identitiesPassingPersistGuard = counts.passingPersistGuard;
+        platformResults[platform].identitiesPersisted = counts.persisted;
+      }
+    }
+  }
+
+  // Build canonical variant stats (only if we have variant data)
+  const variantStats = (allExecutedVariants.length > 0 || allRejectedVariants.length > 0)
+    ? buildVariantStats(allExecutedVariants, allRejectedVariants)
+    : undefined;
+
+  return {
+    input: {
+      candidateId: state.candidateId,
+      linkedinId: state.hints?.linkedinId ?? '',
+      linkedinUrl: state.hints?.linkedinUrl ?? '',
+    },
+    seed: {
+      nameHint: state.hints?.nameHint ?? null,
+      headlineHint: state.hints?.headlineHint ?? null,
+      locationHint: state.hints?.locationHint ?? null,
+      companyHint: state.hints?.companyHint ?? null,
+      roleType: state.roleType ?? null,
+    },
+    platformResults,
+    final: {
+      totalQueriesExecuted,
+      platformsQueried,
+      platformsWithHits,
+      identitiesFoundTotal: persistStats.identitiesFoundTotal,
+      identitiesAboveMinConfidence: persistStats.identitiesAboveMinConfidence,
+      identitiesPassingPersistGuard: persistStats.identitiesPassingPersistGuard,
+      identitiesPersisted: persistStats.identitiesPersisted,
+      persistErrors: persistStats.persistErrors || undefined,
+      bestConfidence,
+      durationMs,
+      providersUsed: Object.keys(providersUsed).length > 0 ? providersUsed : undefined,
+      rateLimitedProviders: rateLimitedProviders.size > 0 ? [...rateLimitedProviders] : undefined,
+      variantStats,
+      // Summary metadata for draft/verified tracking
+      summaryMeta: state.summaryMeta ? {
+        mode: (state.summaryMeta as { mode?: string }).mode as 'draft' | 'verified' || 'draft',
+        confirmedCount: (state.summaryMeta as { confirmedCount?: number }).confirmedCount || 0,
+        identityKey: (state.summaryMeta as { identityKey?: string }).identityKey || '',
+        identityIds: (state.summaryMeta as { identityIds?: string[] }).identityIds || [],
+      } : undefined,
+    },
+    failureReason: state.status === 'failed' ? state.errors?.[0]?.message : undefined,
+  };
+}
 
 /**
  * Load candidate data and prepare enrichment hints
@@ -98,6 +221,18 @@ export async function loadCandidateNode(
       };
     }
 
+    // Extract company from headline if available
+    // Pattern matches "at Company", "@ Company", ", Company" followed by separator or end
+    let companyHint: string | null = null;
+    if (candidate.headlineHint) {
+      const companyMatch = candidate.headlineHint.match(
+        /(?:at|@|,)\s*([A-Z][A-Za-z0-9\s&]+?)(?:\s*[-|·]|$)/
+      );
+      if (companyMatch) {
+        companyHint = companyMatch[1].trim();
+      }
+    }
+
     // Build hints from candidate data (using Prisma schema field names)
     const hints: EnrichmentHints = {
       linkedinId: candidate.linkedinId || candidate.id,
@@ -105,7 +240,7 @@ export async function loadCandidateNode(
       nameHint: candidate.nameHint || null,
       headlineHint: candidate.headlineHint || null,
       locationHint: candidate.locationHint || null,
-      companyHint: null, // Extract from headline if needed
+      companyHint,
       roleType: (candidate.roleType as RoleType) || state.roleType || null,
     };
 
@@ -195,9 +330,12 @@ export async function githubBridgeNode(
       companyHint: state.hints.companyHint,
     };
 
+    // Respect ENABLE_COMMIT_EMAIL_EVIDENCE env var (reduces API calls and compliance risk)
+    const includeCommitEvidence = process.env.ENABLE_COMMIT_EMAIL_EVIDENCE === 'true';
+
     const result = await discoverGitHubIdentities(state.candidateId, candidateHints, {
       maxGitHubResults: state.budget?.maxIdentitiesPerPlatform || 5,
-      includeCommitEvidence: true,
+      includeCommitEvidence,
     });
 
     // Convert to DiscoveredIdentity format expected by state
@@ -210,7 +348,8 @@ export async function githubBridgeNode(
       confidenceBucket: i.confidenceBucket as 'auto_merge' | 'suggest' | 'low' | 'rejected',
       scoreBreakdown: {
         ...i.scoreBreakdown,
-        activityScore: i.scoreBreakdown.profileCompleteness || 0, // Map missing field
+        handleMatch: i.scoreBreakdown.handleMatch ?? 0, // May not exist in GitHub API results
+        activityScore: i.scoreBreakdown.activityScore ?? i.scoreBreakdown.profileCompleteness ?? 0,
       },
       evidence: i.evidence?.map((e) => ({
         type: 'commit_email' as const,
@@ -238,6 +377,19 @@ export async function githubBridgeNode(
       queriesExecuted: result.queriesExecuted,
       searchQueries: [], // GitHub uses API, not search queries
       durationMs: 0, // TODO: track duration
+      // GitHub uses direct API, not search - minimal diagnostics
+      diagnostics: {
+        queriesAttempted: result.queriesExecuted,
+        queriesRejected: 0,
+        rejectionReasons: [],
+        variantsExecuted: [], // GitHub API doesn't use search variants
+        variantsRejected: [],
+        rawResultCount: identities.length, // API returns exact matches
+        matchedResultCount: identities.length,
+        identitiesAboveThreshold: identities.length,
+        rateLimited: false,
+        provider: 'github_api',
+      },
     };
 
     const completeEvent: EnrichmentProgressEvent = {
@@ -343,6 +495,8 @@ export async function searchPlatformNode(
       searchQueries: result.searchQueries,
       durationMs: result.durationMs,
       error: result.error,
+      // Phase A.5: Include per-platform diagnostics for runTrace
+      diagnostics: result.diagnostics,
     };
 
     const completeEvent: EnrichmentProgressEvent = {
@@ -394,6 +548,203 @@ export async function searchPlatformNode(
 }
 
 /**
+ * Execute search-based discovery across all configured platforms (Phase B hardening).
+ *
+ * We run this as a single node to ensure:
+ * - global budget is respected (no accidental re-dispatch loops)
+ * - provider concurrency limiters can smooth outbound traffic
+ *
+ * NOTE: This reduces per-platform streaming granularity, but is much more robust
+ * under rate limits.
+ */
+export async function searchPlatformsBatchNode(
+  state: EnrichmentState
+): Promise<PartialEnrichmentState> {
+  const progressEvent: EnrichmentProgressEvent = {
+    type: 'node_start',
+    node: 'searchPlatformsBatch',
+    timestamp: new Date().toISOString(),
+  };
+
+  if (!state.hints) {
+    const errorEntry: EnrichmentError = {
+      platform: 'system',
+      message: 'No hints available for platform discovery',
+      timestamp: new Date().toISOString(),
+      recoverable: false,
+    };
+    return {
+      errors: [errorEntry],
+      progressEvents: [progressEvent],
+      lastCompletedNode: 'searchPlatformsBatch',
+      progressPct: NODE_PROGRESS.searchPlatform,
+      errorsBySource: { system: [errorEntry.message] },
+    };
+  }
+
+  const budgetMaxQueries = state.budget?.maxQueries || DEFAULT_BUDGET.maxQueries;
+  const perPlatformMaxQueries = 3; // keep consistent with previous behavior
+  const maxPlatforms = state.budget?.maxPlatforms || DEFAULT_BUDGET.maxPlatforms;
+
+  const platforms = (state.platformsToQuery || [])
+    .filter((p) => p !== 'github')
+    .slice(0, maxPlatforms);
+
+  const executedSet = new Set(state.sourcesExecuted);
+  const platformsToRun = platforms.filter((p) => !executedSet.has(p));
+
+  // Convert hints to source format
+  const sourceHints = {
+    linkedinId: state.hints.linkedinId,
+    linkedinUrl: state.hints.linkedinUrl,
+    nameHint: state.hints.nameHint,
+    headlineHint: state.hints.headlineHint,
+    locationHint: state.hints.locationHint,
+    companyHint: state.hints.companyHint,
+    roleType: state.hints.roleType,
+  };
+
+  const platformResults: PlatformQueryResult[] = [];
+  const identitiesFound: SourceDiscoveredIdentity[] = [];
+  const sourcesExecuted: EnrichmentPlatform[] = [];
+  const errors: EnrichmentError[] = [];
+
+  let totalQueriesExecuted = 0;
+  let earlyStopReason: string | null = null;
+  const minConfidenceForEarlyStop =
+    state.budget?.minConfidenceForEarlyStop || DEFAULT_BUDGET.minConfidenceForEarlyStop;
+  const minConfidenceForPersist = getMinConfidence();
+  let persistableCount = 0;
+  let bestConfidenceSoFar = state.bestConfidence ?? null;
+
+  for (const platform of platformsToRun) {
+    const remainingBudget = budgetMaxQueries - (state.queriesExecuted + totalQueriesExecuted);
+    if (remainingBudget <= 0) {
+      break;
+    }
+
+    const source = getSource(platform);
+    if (!source) {
+      errors.push({
+        platform,
+        message: `No source registered for platform: ${platform}`,
+        timestamp: new Date().toISOString(),
+        recoverable: true,
+      });
+      continue;
+    }
+
+    const maxQueriesForThisPlatform = Math.max(
+      1,
+      Math.min(perPlatformMaxQueries, remainingBudget)
+    );
+
+    try {
+      const result = await source.discover(sourceHints, {
+        maxResults: state.budget?.maxIdentitiesPerPlatform || 5,
+        maxQueries: maxQueriesForThisPlatform,
+        minConfidence: getMinConfidence(),
+      });
+
+      platformResults.push({
+        platform,
+        identities: result.identities,
+        queriesExecuted: result.queriesExecuted,
+        searchQueries: result.searchQueries,
+        durationMs: result.durationMs,
+        error: result.error,
+        diagnostics: result.diagnostics,
+      });
+
+      identitiesFound.push(...result.identities);
+      sourcesExecuted.push(platform);
+      totalQueriesExecuted += result.queriesExecuted;
+
+      // Track "persistable" identities (approximation of identitiesPersisted)
+      for (const identity of result.identities) {
+        if (identity.scoreBreakdown) {
+          if (shouldPersistIdentity(identity.scoreBreakdown as ScoreBreakdown)) {
+            persistableCount++;
+          }
+        } else if (identity.confidence >= minConfidenceForPersist) {
+          persistableCount++;
+        }
+      }
+
+      const platformBest =
+        result.identities.length > 0
+          ? Math.max(...result.identities.map((i) => i.confidence))
+          : null;
+      if (platformBest !== null) {
+        bestConfidenceSoFar =
+          bestConfidenceSoFar === null ? platformBest : Math.max(bestConfidenceSoFar, platformBest);
+      }
+
+      // Early stop: once we have at least one persistable identity at high confidence,
+      // stop querying more platforms to reduce cost and noise.
+      if (bestConfidenceSoFar !== null && bestConfidenceSoFar >= minConfidenceForEarlyStop && persistableCount >= 1) {
+        earlyStopReason = 'high_confidence_persistable_found';
+        break;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `${platform} discovery failed`;
+      errors.push({
+        platform,
+        message,
+        timestamp: new Date().toISOString(),
+        recoverable: true,
+      });
+
+      platformResults.push({
+        platform,
+        identities: [],
+        queriesExecuted: 0,
+        searchQueries: [],
+        durationMs: 0,
+        error: message,
+        diagnostics: {
+          queriesAttempted: 0,
+          queriesRejected: 0,
+          rejectionReasons: [],
+          variantsExecuted: [],
+          variantsRejected: [],
+          rawResultCount: 0,
+          matchedResultCount: 0,
+          identitiesAboveThreshold: 0,
+          rateLimited: /rate.?limit|429|too many requests/i.test(message),
+          provider: 'unknown',
+        },
+      });
+    }
+  }
+
+  const completeEvent: EnrichmentProgressEvent = {
+    type: 'node_complete',
+    node: 'searchPlatformsBatch',
+    data: {
+      identitiesFound: identitiesFound.length,
+      queriesExecuted: totalQueriesExecuted,
+      confidence: identitiesFound[0]?.confidence,
+    },
+    timestamp: new Date().toISOString(),
+  };
+
+  return {
+    identitiesFound,
+    platformResults,
+    queriesExecuted: totalQueriesExecuted,
+    sourcesExecuted,
+    errors,
+    earlyStopReason,
+    bestConfidence: bestConfidenceSoFar ?? undefined,
+    progressEvents: [progressEvent, completeEvent],
+    lastCompletedNode: 'searchPlatformsBatch',
+    progressPct: NODE_PROGRESS.searchPlatform,
+    platformsRemaining: [], // exhausted in this batch node
+  };
+}
+
+/**
  * Aggregate results and determine completion status
  */
 export async function aggregateResultsNode(
@@ -429,12 +780,14 @@ export async function aggregateResultsNode(
     timestamp: new Date().toISOString(),
   };
 
+  // NOTE: Do NOT return identitiesFound here. The reducer appends, so returning
+  // sortedIdentities would duplicate all identities. Sorting happens in persistResultsNode
+  // when reading state.identitiesFound.
   return {
     status,
     bestConfidence,
     earlyStopReason,
     completedAt: new Date().toISOString(),
-    identitiesFound: sortedIdentities,
     progressEvents: [progressEvent, completeEvent],
     lastCompletedNode: 'aggregateResults',
     progressPct: NODE_PROGRESS.aggregateResults,
@@ -454,17 +807,94 @@ export async function persistResultsNode(
   };
 
   try {
-    // Filter identities using the guard function (requires name match + secondary signal)
-    const identitiesToPersist = state.identitiesFound
-      .filter((i) => {
-        if (!i.scoreBreakdown) {
-          // Fallback to simple threshold if no breakdown
-          return i.confidence >= getMinConfidence();
-        }
-        return shouldPersistIdentity(i.scoreBreakdown as ScoreBreakdown);
-      });
+    const minConfidence = getMinConfidence();
+    const allIdentities = state.identitiesFound;
 
-    // Upsert identity candidates using Prisma
+    // Stage 1: Count identities above minConfidence
+    const aboveMinConfidence = allIdentities.filter((i) => i.confidence >= minConfidence);
+
+    // Stage 2: Count identities passing shouldPersistIdentity (before platform guards)
+    const passingPersistGuard = aboveMinConfidence.filter((i) => {
+      if (!i.scoreBreakdown) return true; // No breakdown = use minConfidence only
+      return shouldPersistIdentity(i.scoreBreakdown as ScoreBreakdown);
+    });
+
+    // Stage 3: Apply platform-specific guards and get final list
+    const identitiesToPersist = passingPersistGuard.filter((i) => {
+      if (!i.scoreBreakdown) return true;
+
+      // Platform-specific guard: GitHub name-only matches need company/location context
+      // Prevents false positives like "Michael Johnson" → "CodeNonprofit"
+      const breakdown = i.scoreBreakdown as ScoreBreakdown;
+      if (
+        i.platform === 'github' &&
+        (breakdown.bridgeWeight ?? 0) === 0 &&
+        (breakdown.handleMatch ?? 0) === 0
+      ) {
+        // Require company or location match for name-only GitHub matches
+        const hasContextSignal =
+          (breakdown.companyMatch ?? 0) > 0 || (breakdown.locationMatch ?? 0) > 0;
+        if (!hasContextSignal) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+
+    // Build persist stats for runTrace
+    const persistStats: {
+      identitiesFoundTotal: number;
+      identitiesAboveMinConfidence: number;
+      identitiesPassingPersistGuard: number;
+      identitiesPersisted: number;
+      persistErrors: number;
+      perPlatform: Record<string, {
+        found: number;
+        aboveMinConfidence: number;
+        passingPersistGuard: number;
+        persisted: number;
+      }>;
+    } = {
+      identitiesFoundTotal: allIdentities.length,
+      identitiesAboveMinConfidence: aboveMinConfidence.length,
+      identitiesPassingPersistGuard: identitiesToPersist.length,
+      identitiesPersisted: 0,
+      persistErrors: 0,
+      perPlatform: {},
+    };
+
+    // Helper to ensure platform entry exists
+    const ensurePlatform = (platform: string) => {
+      if (!persistStats.perPlatform[platform]) {
+        persistStats.perPlatform[platform] = {
+          found: 0,
+          aboveMinConfidence: 0,
+          passingPersistGuard: 0,
+          persisted: 0,
+        };
+      }
+    };
+
+    // Calculate per-platform found counts
+    for (const identity of allIdentities) {
+      ensurePlatform(identity.platform);
+      persistStats.perPlatform[identity.platform].found++;
+    }
+
+    // Calculate per-platform aboveMinConfidence counts
+    for (const identity of aboveMinConfidence) {
+      ensurePlatform(identity.platform);
+      persistStats.perPlatform[identity.platform].aboveMinConfidence++;
+    }
+
+    // Calculate per-platform passingPersistGuard counts
+    for (const identity of identitiesToPersist) {
+      ensurePlatform(identity.platform);
+      persistStats.perPlatform[identity.platform].passingPersistGuard++;
+    }
+
+    // Upsert identity candidates using Prisma, tracking successes and errors
     for (const identity of identitiesToPersist) {
       const scoreBreakdown = identity.scoreBreakdown
         ? (JSON.parse(JSON.stringify(identity.scoreBreakdown)) as Prisma.InputJsonValue)
@@ -473,38 +903,54 @@ export async function persistResultsNode(
         ? (JSON.parse(JSON.stringify(identity.evidence)) as Prisma.InputJsonValue)
         : undefined;
 
-      await prisma.identityCandidate.upsert({
-        where: {
-          candidateId_platform_platformId: {
+      try {
+        await prisma.identityCandidate.upsert({
+          where: {
+            tenantId_candidateId_platform_platformId: {
+              tenantId: state.tenantId,
+              candidateId: state.candidateId,
+              platform: identity.platform,
+              platformId: identity.platformId,
+            },
+          },
+          update: {
+            confidence: identity.confidence,
+            confidenceBucket: identity.confidenceBucket,
+            scoreBreakdown,
+            evidence,
+            hasContradiction: identity.hasContradiction,
+            contradictionNote: identity.contradictionNote,
+            discoveredBy: state.sessionId || undefined,
+          },
+          create: {
+            tenantId: state.tenantId,
             candidateId: state.candidateId,
             platform: identity.platform,
             platformId: identity.platformId,
+            profileUrl: identity.profileUrl,
+            confidence: identity.confidence,
+            confidenceBucket: identity.confidenceBucket,
+            scoreBreakdown,
+            evidence,
+            hasContradiction: identity.hasContradiction,
+            contradictionNote: identity.contradictionNote,
+            status: 'unconfirmed',
+            discoveredBy: state.sessionId || undefined,
           },
-        },
-        update: {
-          confidence: identity.confidence,
-          confidenceBucket: identity.confidenceBucket,
-          scoreBreakdown,
-          evidence,
-          hasContradiction: identity.hasContradiction,
-          contradictionNote: identity.contradictionNote,
-          discoveredBy: state.sessionId || undefined,
-        },
-        create: {
-          candidateId: state.candidateId,
-          platform: identity.platform,
-          platformId: identity.platformId,
-          profileUrl: identity.profileUrl,
-          confidence: identity.confidence,
-          confidenceBucket: identity.confidenceBucket,
-          scoreBreakdown,
-          evidence,
-          hasContradiction: identity.hasContradiction,
-          contradictionNote: identity.contradictionNote,
-          status: 'unconfirmed',
-          discoveredBy: state.sessionId || undefined,
-        },
-      });
+        });
+
+        // Track successful persist per platform
+        persistStats.identitiesPersisted++;
+        ensurePlatform(identity.platform);
+        persistStats.perPlatform[identity.platform].persisted++;
+      } catch (dbError) {
+        // Track DB error but continue with other identities
+        persistStats.persistErrors++;
+        console.error(
+          `[PersistResults] DB error for ${identity.platform}/${identity.platformId}:`,
+          dbError instanceof Error ? dbError.message : dbError
+        );
+      }
     }
 
     // Update candidate's last enriched timestamp
@@ -516,7 +962,9 @@ export async function persistResultsNode(
     const completeEvent: EnrichmentProgressEvent = {
       type: 'node_complete',
       node: 'persistIdentities',
-      data: { identitiesFound: identitiesToPersist.length },
+      data: {
+        identitiesFound: persistStats.identitiesPersisted, // Use persisted count for progress events
+      },
       timestamp: new Date().toISOString(),
     };
 
@@ -524,6 +972,7 @@ export async function persistResultsNode(
       progressEvents: [progressEvent, completeEvent],
       lastCompletedNode: 'persistIdentities',
       progressPct: NODE_PROGRESS.persistIdentities,
+      persistStats,
     };
   } catch (error) {
     const errorEntry: EnrichmentError = {
@@ -727,6 +1176,11 @@ export async function fetchPlatformDataNode(
 
 /**
  * Generate recruiter-facing summary (stored)
+ *
+ * Draft + Verified Summary Strategy:
+ * - During initial enrichment: Always generate a DRAFT summary from top identities
+ * - Draft summaries include caveats about unverified sources
+ * - Verified summaries are generated separately after user confirms identities
  */
 export async function generateSummaryNode(
   state: EnrichmentState
@@ -742,6 +1196,33 @@ export async function generateSummaryNode(
       throw new Error('Missing candidate hints for summary');
     }
 
+    // Skip summary generation only if no identities were found at all
+    if (state.identitiesFound.length === 0) {
+      console.log(
+        `[generateSummary] Skipping summary generation - no identities found`
+      );
+
+      const skipEvent: EnrichmentProgressEvent = {
+        type: 'node_complete',
+        node: 'generateSummary',
+        data: { identitiesFound: 0, confidence: 0 },
+        timestamp: new Date().toISOString(),
+      };
+
+      return {
+        summaryText: null,
+        summaryStructured: null,
+        summaryEvidence: null,
+        summaryModel: null,
+        summaryTokens: null,
+        summaryGeneratedAt: null,
+        summaryMeta: null,
+        progressEvents: [progressStart, skipEvent],
+        lastCompletedNode: 'generateSummary',
+        progressPct: NODE_PROGRESS.generateSummary,
+      };
+    }
+
     const sessionId = state.sessionId;
     let platformData = sessionId ? getEphemeralPlatformData(sessionId) : null;
     if (!platformData) {
@@ -750,7 +1231,8 @@ export async function generateSummaryNode(
 
     const identities = [...state.identitiesFound].sort((a, b) => b.confidence - a.confidence).slice(0, 10);
 
-    const { summary, evidence, model, tokens } = await generateCandidateSummary({
+    // Generate as DRAFT mode (no confirmed identities during initial enrichment)
+    const { summary, evidence, model, tokens, meta } = await generateCandidateSummary({
       candidate: {
         linkedinId: state.hints.linkedinId,
         linkedinUrl: state.hints.linkedinUrl,
@@ -762,11 +1244,17 @@ export async function generateSummaryNode(
       },
       identities,
       platformData,
+      mode: 'draft',
+      confirmedCount: 0,
     });
 
     if (sessionId) {
       clearEphemeralPlatformData(sessionId);
     }
+
+    console.log(
+      `[generateSummary] Generated draft summary from ${identities.length} identities (mode: ${meta.mode})`
+    );
 
     const progressComplete: EnrichmentProgressEvent = {
       type: 'node_complete',
@@ -782,6 +1270,7 @@ export async function generateSummaryNode(
       summaryModel: model,
       summaryTokens: tokens,
       summaryGeneratedAt: new Date().toISOString(),
+      summaryMeta: meta as unknown as Record<string, unknown>,
       progressEvents: [progressStart, progressComplete],
       lastCompletedNode: 'generateSummary',
       progressPct: NODE_PROGRESS.generateSummary,
@@ -834,6 +1323,9 @@ export async function persistSummaryNode(
           ? Math.max(...state.identitiesFound.map((i) => i.confidence))
           : null;
 
+    // Build run trace for observability (Phase A.5)
+    const runTrace = buildRunTrace(state);
+
     // Prisma client types may be stale until `prisma generate` runs in the target environment.
     // Use a narrow `any` cast to allow compilation while keeping runtime behavior correct.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -847,13 +1339,29 @@ export async function persistSummaryNode(
         : undefined,
       summaryModel: state.summaryModel || null,
       summaryTokens: state.summaryTokens ?? null,
-      summaryGeneratedAt: state.summaryGeneratedAt ? new Date(state.summaryGeneratedAt) : new Date(),
+      // Only set summaryGeneratedAt if a summary was actually generated
+      summaryGeneratedAt: state.summaryText && state.summaryGeneratedAt
+        ? new Date(state.summaryGeneratedAt)
+        : undefined,
+      // Phase A.5: Store run trace for debugging and optimization
+      runTrace: JSON.parse(JSON.stringify(runTrace)) as Prisma.InputJsonValue,
     };
 
     await prisma.enrichmentSession.update({
       where: { id: sessionId },
       data: updateData,
     });
+
+    // Log key metrics for quick debugging
+    // Format: found→aboveMin→passGuard→persisted (errors if any)
+    const f = runTrace.final;
+    const errorSuffix = f.persistErrors ? ` persistErrors=${f.persistErrors}` : '';
+    console.log(`[EnrichmentRunTrace] candidateId=${state.candidateId} ` +
+      `queries=${f.totalQueriesExecuted} ` +
+      `platformsQueried=${f.platformsQueried} platformsWithHits=${f.platformsWithHits} ` +
+      `identities=${f.identitiesFoundTotal}→${f.identitiesAboveMinConfidence}→${f.identitiesPassingPersistGuard}→${f.identitiesPersisted} ` +
+      `bestConfidence=${f.bestConfidence?.toFixed(2) ?? 'N/A'} ` +
+      `duration=${f.durationMs}ms${errorSuffix}`);
 
     await prisma.candidate
       .update({

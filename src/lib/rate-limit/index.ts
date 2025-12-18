@@ -12,6 +12,7 @@
  */
 
 import { headers } from 'next/headers';
+import redis from '@/lib/redis/client';
 
 /**
  * Rate limit configuration
@@ -44,6 +45,26 @@ interface RateLimitEntry {
   resetAt: number; // Unix timestamp ms
 }
 
+type RateLimitBackend = 'memory' | 'redis';
+
+function isRedisConfigured(): boolean {
+  return !!process.env.REDIS_URL || (!!process.env.REDIS_HOST && !!process.env.REDIS_PORT);
+}
+
+function getBackend(): RateLimitBackend {
+  const requested = (process.env.RATE_LIMIT_BACKEND || 'memory').toLowerCase();
+  if (requested === 'redis' && isRedisConfigured()) return 'redis';
+  return 'memory';
+}
+
+function buildStoreKey(key: string, config: RateLimitConfig): string {
+  const globalPrefix = process.env.RATE_LIMIT_PREFIX || 'ratelimit';
+  const parts = [globalPrefix];
+  if (config.prefix) parts.push(config.prefix);
+  parts.push(key);
+  return parts.join(':');
+}
+
 /**
  * In-memory rate limit store
  * In production, this should be backed by Redis for distributed rate limiting
@@ -70,21 +91,52 @@ if (typeof setInterval !== 'undefined') {
 /**
  * Check and consume rate limit
  */
-export function checkRateLimit(
+export async function checkRateLimit(
   key: string,
   config: RateLimitConfig
-): RateLimitResult {
+): Promise<RateLimitResult> {
   const now = Date.now();
-  const fullKey = config.prefix ? `${config.prefix}:${key}` : key;
+  const backend = getBackend();
+  const fullKey = buildStoreKey(key, config);
   const windowMs = config.windowSeconds * 1000;
 
+  if (backend === 'redis') {
+    const count = await redis.incr(fullKey);
+    if (count === 1) {
+      await redis.expire(fullKey, config.windowSeconds);
+    }
+
+    const ttlSeconds = await redis.ttl(fullKey);
+    const safeTtl = ttlSeconds > 0 ? ttlSeconds : config.windowSeconds;
+    const resetAt = new Date(now + safeTtl * 1000);
+
+    if (count > config.limit) {
+      return {
+        allowed: false,
+        remaining: 0,
+        limit: config.limit,
+        resetAt,
+        retryAfterSeconds: safeTtl,
+      };
+    }
+
+    return {
+      allowed: true,
+      remaining: Math.max(0, config.limit - count),
+      limit: config.limit,
+      resetAt,
+    };
+  }
+
+  // memory backend
+  const windowMsLocal = windowMs;
   let entry = store.get(fullKey);
 
   // Reset if window expired
   if (!entry || entry.resetAt < now) {
     entry = {
       count: 0,
-      resetAt: now + windowMs,
+      resetAt: now + windowMsLocal,
     };
   }
 
@@ -115,12 +167,30 @@ export function checkRateLimit(
 /**
  * Get current rate limit status without consuming
  */
-export function getRateLimitStatus(
+export async function getRateLimitStatus(
   key: string,
   config: RateLimitConfig
-): RateLimitResult {
+): Promise<RateLimitResult> {
   const now = Date.now();
-  const fullKey = config.prefix ? `${config.prefix}:${key}` : key;
+  const backend = getBackend();
+  const fullKey = buildStoreKey(key, config);
+
+  if (backend === 'redis') {
+    const countStr = await redis.get(fullKey);
+    const count = countStr ? parseInt(countStr, 10) : 0;
+    const ttlSeconds = await redis.ttl(fullKey);
+    const safeTtl =
+      ttlSeconds > 0 ? ttlSeconds : countStr ? config.windowSeconds : config.windowSeconds;
+    const resetAt = new Date(now + safeTtl * 1000);
+
+    return {
+      allowed: count < config.limit,
+      remaining: Math.max(0, config.limit - count),
+      limit: config.limit,
+      resetAt,
+      retryAfterSeconds: count >= config.limit ? safeTtl : undefined,
+    };
+  }
 
   const entry = store.get(fullKey);
 
@@ -148,8 +218,14 @@ export function getRateLimitStatus(
 /**
  * Reset rate limit for a key
  */
-export function resetRateLimit(key: string, prefix?: string): void {
-  const fullKey = prefix ? `${prefix}:${key}` : key;
+export async function resetRateLimit(key: string, prefix?: string): Promise<void> {
+  const globalPrefix = process.env.RATE_LIMIT_PREFIX || 'ratelimit';
+  const fullKey = [globalPrefix, ...(prefix ? [prefix] : []), key].join(':');
+  const backend = getBackend();
+  if (backend === 'redis') {
+    await redis.del(fullKey);
+    return;
+  }
   store.delete(fullKey);
 }
 
@@ -255,7 +331,7 @@ export async function withRateLimit(
   customKey?: string
 ): Promise<{ allowed: true; result: RateLimitResult } | { allowed: false; response: Response }> {
   const ip = customKey || (await getClientIP());
-  const result = checkRateLimit(ip, config);
+  const result = await checkRateLimit(ip, config);
 
   if (!result.allowed) {
     return {

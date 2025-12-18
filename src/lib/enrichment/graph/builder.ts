@@ -7,7 +7,7 @@
  * @see docs/ARCHITECTURE_V2.1.md
  */
 
-import { StateGraph, END, Send } from '@langchain/langgraph';
+import { StateGraph, END } from '@langchain/langgraph';
 import { v4 as uuidv4 } from 'uuid';
 import {
   EnrichmentStateAnnotation,
@@ -19,14 +19,13 @@ import {
 import {
   loadCandidateNode,
   githubBridgeNode,
-  searchPlatformNode,
+  searchPlatformsBatchNode,
   aggregateResultsNode,
   persistResultsNode,
   fetchPlatformDataNode,
   generateSummaryNode,
   persistSummaryNode,
   shouldContinueSearching,
-  getNextPlatformBatch,
 } from './nodes';
 
 /**
@@ -35,7 +34,7 @@ import {
 const NODES = {
   LOAD_CANDIDATE: 'loadCandidate',
   GITHUB_BRIDGE: 'githubBridge',
-  SEARCH_PLATFORMS: 'searchPlatforms',
+  SEARCH_PLATFORMS: 'searchPlatformsBatch',
   AGGREGATE: 'aggregate',
   PERSIST_IDENTITIES: 'persistIdentities',
   FETCH_PLATFORM_DATA: 'fetchPlatformData',
@@ -44,58 +43,18 @@ const NODES = {
 } as const;
 
 /**
- * Route from GitHub bridge to either search platforms or aggregate
+ * Route from GitHub bridge to either search platforms or aggregate.
+ *
+ * NOTE: We run search-based discovery in a single batch node to avoid
+ * duplicate dispatch/race conditions from parallel Send() fan-out.
  */
-function routeAfterGitHub(state: EnrichmentState): string | Send[] {
+function routeAfterGitHub(state: EnrichmentState): string {
   // If we found a high-confidence GitHub match, skip to aggregate
   if (state.earlyStopReason || !shouldContinueSearching(state)) {
     return NODES.AGGREGATE;
   }
 
-  // Use budget-controlled parallelism (default: 3, configurable via env)
-  const maxParallel = state.budget?.maxParallelPlatforms || DEFAULT_BUDGET.maxParallelPlatforms;
-  const platforms = getNextPlatformBatch(state, maxParallel);
-  if (platforms.length === 0) {
-    return NODES.AGGREGATE;
-  }
-
-  // Create Send messages for parallel execution
-  return platforms.map(
-    (platform) =>
-      new Send(NODES.SEARCH_PLATFORMS, {
-        ...state,
-        currentPlatform: platform,
-      })
-  );
-}
-
-/**
- * Route from search platforms to either more searches or aggregate
- */
-function routeAfterSearch(state: EnrichmentState): string | Send[] {
-  // Update remaining platforms
-  const executed = new Set(state.sourcesExecuted);
-  const remaining = (state.platformsToQuery || []).filter((p) => !executed.has(p));
-
-  if (!shouldContinueSearching({ ...state, platformsRemaining: remaining })) {
-    return NODES.AGGREGATE;
-  }
-
-  // Use budget-controlled parallelism
-  const maxParallel = state.budget?.maxParallelPlatforms || DEFAULT_BUDGET.maxParallelPlatforms;
-  const nextBatch = remaining.slice(0, maxParallel);
-  if (nextBatch.length === 0) {
-    return NODES.AGGREGATE;
-  }
-
-  return nextBatch.map(
-    (platform) =>
-      new Send(NODES.SEARCH_PLATFORMS, {
-        ...state,
-        currentPlatform: platform,
-        platformsRemaining: remaining.filter((p) => p !== platform),
-      })
-  );
+  return NODES.SEARCH_PLATFORMS;
 }
 
 /**
@@ -106,7 +65,7 @@ export function buildEnrichmentGraph() {
     // Add nodes
     .addNode(NODES.LOAD_CANDIDATE, loadCandidateNode)
     .addNode(NODES.GITHUB_BRIDGE, githubBridgeNode)
-    .addNode(NODES.SEARCH_PLATFORMS, searchPlatformNode)
+    .addNode(NODES.SEARCH_PLATFORMS, searchPlatformsBatchNode)
     .addNode(NODES.AGGREGATE, aggregateResultsNode)
     .addNode(NODES.PERSIST_IDENTITIES, persistResultsNode)
     .addNode(NODES.FETCH_PLATFORM_DATA, fetchPlatformDataNode)
@@ -122,7 +81,7 @@ export function buildEnrichmentGraph() {
       return NODES.GITHUB_BRIDGE;
     })
     .addConditionalEdges(NODES.GITHUB_BRIDGE, routeAfterGitHub)
-    .addConditionalEdges(NODES.SEARCH_PLATFORMS, routeAfterSearch)
+    .addEdge(NODES.SEARCH_PLATFORMS, NODES.AGGREGATE)
     .addEdge(NODES.AGGREGATE, NODES.PERSIST_IDENTITIES)
     .addEdge(NODES.PERSIST_IDENTITIES, NODES.FETCH_PLATFORM_DATA)
     .addEdge(NODES.FETCH_PLATFORM_DATA, NODES.GENERATE_SUMMARY)
@@ -277,7 +236,7 @@ export async function buildEnrichmentGraphWithCheckpointer(
   const graph = new StateGraph(EnrichmentStateAnnotation)
     .addNode(NODES.LOAD_CANDIDATE, loadCandidateNode)
     .addNode(NODES.GITHUB_BRIDGE, githubBridgeNode)
-    .addNode(NODES.SEARCH_PLATFORMS, searchPlatformNode)
+    .addNode(NODES.SEARCH_PLATFORMS, searchPlatformsBatchNode)
     .addNode(NODES.AGGREGATE, aggregateResultsNode)
     .addNode(NODES.PERSIST_IDENTITIES, persistResultsNode)
     .addNode(NODES.FETCH_PLATFORM_DATA, fetchPlatformDataNode)
@@ -291,7 +250,7 @@ export async function buildEnrichmentGraphWithCheckpointer(
       return NODES.GITHUB_BRIDGE;
     })
     .addConditionalEdges(NODES.GITHUB_BRIDGE, routeAfterGitHub)
-    .addConditionalEdges(NODES.SEARCH_PLATFORMS, routeAfterSearch)
+    .addEdge(NODES.SEARCH_PLATFORMS, NODES.AGGREGATE)
     .addEdge(NODES.AGGREGATE, NODES.PERSIST_IDENTITIES)
     .addEdge(NODES.PERSIST_IDENTITIES, NODES.FETCH_PLATFORM_DATA)
     .addEdge(NODES.FETCH_PLATFORM_DATA, NODES.GENERATE_SUMMARY)

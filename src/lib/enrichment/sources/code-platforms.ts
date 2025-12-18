@@ -10,9 +10,10 @@
  */
 
 import type { RoleType } from '@/types/linkedin';
-import type { EnrichmentPlatform, CandidateHints } from './types';
+import type { EnrichmentPlatform, CandidateHints, QueryCandidate } from './types';
 import { BaseEnrichmentSource } from './base-source';
 import type { EnrichmentSearchResult } from './search-executor';
+import { generateHandleVariants } from './handle-variants';
 
 /**
  * LeetCode profile extraction
@@ -153,19 +154,44 @@ export class LeetCodeSource extends BaseEnrichmentSource {
   }
 
   buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
-    const queries: string[] = [];
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
 
-    // Primary: User profile search
-    if (hints.nameHint) {
-      queries.push(`site:leetcode.com/u "${hints.nameHint}"`);
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+    const variants = generateHandleVariants(hints.linkedinId, hints.nameHint, 3);
+
+    // HANDLE_MODE: LeetCode URLs are handle-based: leetcode.com/u/username
+    for (const variant of variants) {
+      if (candidates.length >= maxQueries) break;
+
+      // Map variant source to variantId
+      let variantId = 'handle:clean';
+      if (variant.source === 'derived') {
+        if (!variant.handle.includes('-') && !variant.handle.includes('_')) {
+          variantId = 'handle:collapsed';
+        } else if (variant.handle.includes('_')) {
+          variantId = 'handle:underscore';
+        }
+      }
+
+      candidates.push({
+        query: `site:leetcode.com/u/${variant.handle}`,
+        mode: 'handle',
+        variantId,
+      });
     }
 
-    // Secondary: General search
-    if (hints.nameHint && queries.length < maxQueries) {
-      queries.push(`site:leetcode.com "${hints.nameHint}"`);
+    // NAME_MODE: General search (lower recall for LeetCode)
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:leetcode.com "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full',
+      });
     }
 
-    return queries.slice(0, maxQueries);
+    return candidates.slice(0, maxQueries);
   }
 }
 
@@ -185,19 +211,53 @@ export class GitLabSource extends BaseEnrichmentSource {
   }
 
   buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
-    const queries: string[] = [];
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
 
-    // Primary: User profile search
-    if (hints.nameHint) {
-      queries.push(`site:gitlab.com "${hints.nameHint}"`);
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+    const variants = generateHandleVariants(hints.linkedinId, hints.nameHint, 3);
+
+    // HANDLE_MODE: GitLab supports both direct path and /users/ path
+    for (const variant of variants) {
+      if (candidates.length >= maxQueries) break;
+
+      // Direct path: gitlab.com/username
+      candidates.push({
+        query: `site:gitlab.com/${variant.handle}`,
+        mode: 'handle',
+        variantId: variant.source === 'derived' ? 'handle:collapsed_direct' : 'handle:clean_direct',
+      });
+
+      // Users path: gitlab.com/users/username
+      if (candidates.length < maxQueries) {
+        candidates.push({
+          query: `site:gitlab.com/users/${variant.handle}`,
+          mode: 'handle',
+          variantId: variant.source === 'derived' ? 'handle:collapsed_users' : 'handle:clean_users',
+        });
+      }
     }
 
-    // Secondary: With company
-    if (hints.nameHint && hints.companyHint && queries.length < maxQueries) {
-      queries.push(`site:gitlab.com "${hints.nameHint}" "${hints.companyHint}"`);
+    // NAME_MODE: Fallback to name search
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:gitlab.com "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full',
+      });
     }
 
-    return queries.slice(0, maxQueries);
+    // NAME + COMPANY: Better precision
+    if (hints.nameHint && hints.companyHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:gitlab.com "${hints.nameHint}" "${hints.companyHint}"`,
+        mode: 'name',
+        variantId: 'name+company',
+      });
+    }
+
+    return candidates.slice(0, maxQueries);
   }
 }
 
@@ -220,14 +280,42 @@ export class DockerHubSource extends BaseEnrichmentSource {
   }
 
   buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
-    const queries: string[] = [];
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
 
-    // Primary: User profile search
-    if (hints.nameHint) {
-      queries.push(`site:hub.docker.com/u "${hints.nameHint}"`);
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+    const variants = generateHandleVariants(hints.linkedinId, hints.nameHint, 2);
+
+    // HANDLE_MODE: DockerHub URLs are handle-based: hub.docker.com/u/username
+    for (const variant of variants) {
+      if (candidates.length >= maxQueries) break;
+      candidates.push({
+        query: `site:hub.docker.com/u/${variant.handle}`,
+        mode: 'handle',
+        variantId: variant.source === 'linkedinId' ? 'handle:clean' : 'handle:derived',
+      });
     }
 
-    return queries.slice(0, maxQueries);
+    // NAME_MODE: Name search scoped to user path
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:hub.docker.com/u "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full_scoped',
+      });
+    }
+
+    // NAME_MODE: General Docker Hub search with name
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:hub.docker.com "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full',
+      });
+    }
+
+    return candidates.slice(0, maxQueries);
   }
 }
 

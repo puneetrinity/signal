@@ -315,6 +315,16 @@ export interface EnrichmentSessionSummary {
   summaryStructured?: AISummaryStructured | null;
   summaryModel?: string | null;
   summaryGeneratedAt?: string | null;
+  // Run trace for summary metadata
+  runTrace?: {
+    final?: {
+      summaryMeta?: {
+        mode?: 'draft' | 'verified';
+        confirmedCount?: number;
+        identityKey?: string;
+      };
+    };
+  } | null;
 }
 
 /**

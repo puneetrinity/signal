@@ -13,7 +13,7 @@ import type { ProfileSummary } from '@/types/linkedin';
 /**
  * Supported search providers
  */
-export type SearchProviderType = 'brightdata' | 'searxng' | 'brave';
+export type SearchProviderType = 'brightdata' | 'searxng' | 'brave' | 'serper';
 
 /**
  * Raw search result from any provider (normalized)

@@ -5,7 +5,7 @@
  * fallback logic when primary provider fails or returns no results.
  *
  * Environment Variables:
- * - SEARCH_PROVIDER: 'brightdata' | 'searxng' | 'brave' (default: 'brightdata')
+ * - SEARCH_PROVIDER: 'brightdata' | 'searxng' | 'brave' | 'serper' (default: 'brightdata')
  * - SEARCH_FALLBACK_PROVIDER: Optional fallback provider
  *
  * @see docs/ARCHITECTURE_V2.1.md Section 4
@@ -20,6 +20,7 @@ import type {
 import { brightdataProvider } from './brightdata';
 import { searxngProvider } from './searxng';
 import { braveProvider } from './brave';
+import { serperProvider } from './serper';
 
 // Re-export types
 export * from './types';
@@ -31,6 +32,7 @@ const providers: Record<SearchProviderType, SearchProvider> = {
   brightdata: brightdataProvider,
   searxng: searxngProvider,
   brave: braveProvider,
+  serper: serperProvider,
 };
 
 /**

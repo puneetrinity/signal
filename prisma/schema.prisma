@@ -116,9 +116,12 @@ model Research {
 model Candidate {
   id String @id @default(cuid())
 
+  // Multi-tenancy: Clerk organization ID
+  tenantId String
+
   // LinkedIn anchor (URL only - no scraped data)
-  linkedinUrl String @unique
-  linkedinId  String @unique // Username from URL (e.g., "johnsmith")
+  linkedinUrl String // Unique per tenant (see @@unique below)
+  linkedinId  String // Username from URL (e.g., "johnsmith")
 
   // Data from search snippets (public SERP data, not scraped)
   searchTitle   String? @db.Text // Title from Google result
@@ -151,7 +154,12 @@ model Candidate {
   confirmedIdentities ConfirmedIdentity[]
   enrichmentSessions  EnrichmentSession[]
 
-  @@index([linkedinId])
+  // Tenant-scoped unique constraints
+  @@unique([tenantId, linkedinUrl])
+  @@unique([tenantId, linkedinId])
+
+  @@index([tenantId])
+  @@index([tenantId, linkedinId])
   @@index([roleType])
   @@index([enrichmentStatus])
   @@index([confidenceScore])
@@ -162,7 +170,9 @@ model Candidate {
 /// IdentityCandidate: Unconfirmed identity signals
 /// Stores evidence pointers, NOT the actual PII (e.g., commit URL, not email)
 model IdentityCandidate {
-  id          String    @id @default(cuid())
+  id       String @id @default(cuid())
+  tenantId String
+
   candidateId String
   candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
 
@@ -196,7 +206,10 @@ model IdentityCandidate {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([candidateId, platform, platformId])
+  // Tenant-scoped unique constraint
+  @@unique([tenantId, candidateId, platform, platformId])
+
+  @@index([tenantId])
   @@index([candidateId])
   @@index([platform])
   @@index([status])
@@ -208,7 +221,9 @@ model IdentityCandidate {
 /// ConfirmedIdentity: Verified identity links (can store PII after confirmation)
 /// Only populated after human or subject confirmation
 model ConfirmedIdentity {
-  id          String    @id @default(cuid())
+  id       String @id @default(cuid())
+  tenantId String
+
   candidateId String
   candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
 
@@ -230,13 +245,17 @@ model ConfirmedIdentity {
   confirmationNote String?  @db.Text
 
   // Original identity candidate reference
-  identityCandidateId String? @unique
+  identityCandidateId String?
 
   // Timestamps
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([candidateId, platform, platformId])
+  // Tenant-scoped unique constraints
+  @@unique([tenantId, candidateId, platform, platformId])
+  @@unique([tenantId, identityCandidateId])
+
+  @@index([tenantId])
   @@index([candidateId])
   @@index([platform])
   @@index([confirmedBy])
@@ -246,7 +265,9 @@ model ConfirmedIdentity {
 
 /// EnrichmentSession: Tracks enrichment runs for audit and debugging
 model EnrichmentSession {
-  id          String    @id @default(cuid())
+  id       String @id @default(cuid())
+  tenantId String
+
   candidateId String
   candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
 
@@ -285,10 +306,15 @@ model EnrichmentSession {
   summaryTokens      Int?
   summaryGeneratedAt DateTime?
 
+  // Run trace for observability (Phase A.5)
+  // Contains per-platform diagnostics, seed hints, and final metrics
+  runTrace Json?
+
   // Timestamps
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@index([tenantId])
   @@index([candidateId])
   @@index([status])
   @@index([createdAt])
@@ -298,6 +324,9 @@ model EnrichmentSession {
 /// AuditLog: General audit trail for compliance
 model AuditLog {
   id String @id @default(cuid())
+
+  // Multi-tenancy: Clerk organization ID (optional for system-level logs)
+  tenantId String?
 
   // What happened
   action       String // 'candidate.created' | 'identity.confirmed' | 'email.revealed' | etc.
@@ -316,6 +345,7 @@ model AuditLog {
   // Timestamp
   createdAt DateTime @default(now())
 
+  @@index([tenantId])
   @@index([action])
   @@index([resourceType, resourceId])
   @@index([actorType, actorId])
@@ -323,12 +353,48 @@ model AuditLog {
   @@map("audit_logs")
 }
 
-/// SearchCacheV2: DB-based search cache (alternative to Redis)
-model SearchCacheV2 {
+/// TenantSettings: Per-tenant configuration and policy knobs
+/// Stores settings that customize behavior for each organization
+model TenantSettings {
   id String @id @default(cuid())
 
+  // Tenant identifier (Clerk org ID) - must be unique
+  tenantId String @unique
+
+  // Rate limit configuration (multiplier applied to base limits)
+  rateLimitMultiplier Float @default(1.0) // 1.0 = standard, 2.0 = double limits
+
+  // Enrichment budget configuration
+  maxEnrichmentsPerDay   Int @default(100) // Daily enrichment limit
+  maxQueriesPerEnrichment Int @default(30) // Max queries per enrichment session
+  maxParallelPlatforms   Int @default(3) // Max platforms to query in parallel
+
+  // Feature flags (JSON for flexibility)
+  features Json? // { summaryEnabled: true, autoConfirmHighConfidence: false, ... }
+
+  // Contact/PII storage settings
+  allowContactStorage Boolean @default(true) // Whether tenant can store confirmed contact info
+
+  // Plan/tier tracking (for future billing integration)
+  plan      String   @default("free") // 'free' | 'pro' | 'enterprise'
+  planSince DateTime @default(now())
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([plan])
+  @@map("tenant_settings")
+}
+
+/// SearchCacheV2: DB-based search cache (alternative to Redis)
+model SearchCacheV2 {
+  id       String @id @default(cuid())
+  tenantId String
+
   // Cache key (normalized query hash)
-  queryHash String @unique
+  queryHash String // Unique per tenant (see @@unique below)
   queryText String @db.Text
 
   // Cached data
@@ -343,7 +409,11 @@ model SearchCacheV2 {
   expiresAt DateTime
   createdAt DateTime @default(now())
 
-  @@index([queryHash])
+  // Tenant-scoped unique constraint
+  @@unique([tenantId, queryHash])
+
+  @@index([tenantId])
+  @@index([tenantId, queryHash])
   @@index([expiresAt])
   @@map("search_cache_v2")
 }

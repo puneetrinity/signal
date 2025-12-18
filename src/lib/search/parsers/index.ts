@@ -54,10 +54,24 @@ export function getCurrentParser(): ParserProvider {
 }
 
 /**
- * Parse a search query using the configured parser
+ * Get the fallback parser type
+ */
+function getFallbackParserType(): ParserProviderType | null {
+  const primary = getParserType();
+  // If primary is Groq, fallback to Gemini; if primary is Gemini, no fallback
+  return primary === 'groq' ? 'gemini' : null;
+}
+
+/**
+ * Parse a search query using the configured parser with retry and fallback
  *
  * This is the main entry point for query parsing.
  * It uses the parser specified by PARSER_PROVIDER env var.
+ *
+ * Fallback strategy:
+ * 1. Try primary parser
+ * 2. If it fails, retry once
+ * 3. If it still fails, try fallback parser (Groq → Gemini)
  *
  * @param query - Natural language query
  * @returns Structured search query
@@ -65,10 +79,40 @@ export function getCurrentParser(): ParserProvider {
 export async function parseSearchQuery(query: string): Promise<ParsedSearchQuery> {
   const parserType = getParserType();
   const parser = getParser(parserType);
+  const fallbackType = getFallbackParserType();
 
-  console.log(`[Parsers] Using parser: ${parserType}`);
+  console.log(`[Parsers] Using parser: ${parserType}${fallbackType ? `, fallback: ${fallbackType}` : ''}`);
 
-  return parser.parseSearchQuery(query);
+  // Try primary parser
+  try {
+    return await parser.parseSearchQuery(query);
+  } catch (primaryError) {
+    console.warn(`[Parsers] Primary parser (${parserType}) failed:`, primaryError instanceof Error ? primaryError.message : primaryError);
+
+    // Retry once with primary
+    try {
+      console.log(`[Parsers] Retrying primary parser (${parserType})...`);
+      return await parser.parseSearchQuery(query);
+    } catch (retryError) {
+      console.warn(`[Parsers] Primary parser retry failed:`, retryError instanceof Error ? retryError.message : retryError);
+
+      // Try fallback if available
+      if (fallbackType) {
+        try {
+          console.log(`[Parsers] Trying fallback parser (${fallbackType})...`);
+          const fallbackParser = getParser(fallbackType);
+          return await fallbackParser.parseSearchQuery(query);
+        } catch (fallbackError) {
+          console.error(`[Parsers] Fallback parser (${fallbackType}) also failed:`, fallbackError instanceof Error ? fallbackError.message : fallbackError);
+          // Throw the original error since all attempts failed
+          throw primaryError;
+        }
+      }
+
+      // No fallback available, throw original error
+      throw primaryError;
+    }
+  }
 }
 
 /**

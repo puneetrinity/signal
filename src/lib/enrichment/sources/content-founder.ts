@@ -14,9 +14,10 @@
  */
 
 import type { RoleType } from '@/types/linkedin';
-import type { EnrichmentPlatform, CandidateHints } from './types';
+import type { EnrichmentPlatform, CandidateHints, QueryCandidate } from './types';
 import { BaseEnrichmentSource } from './base-source';
 import type { EnrichmentSearchResult } from './search-executor';
+import { generateHandleVariants } from './handle-variants';
 
 /**
  * Medium profile extraction
@@ -238,16 +239,60 @@ function extractSECProfile(result: EnrichmentSearchResult) {
 
 /**
  * Medium enrichment source
+ *
+ * Medium uses @username handles but discovery is often name/content-based.
+ * Uses both HANDLE_MODE and NAME_MODE for maximum recall.
  */
 export class MediumSource extends BaseEnrichmentSource {
   readonly platform: EnrichmentPlatform = 'medium';
   readonly displayName = 'Medium';
   readonly supportedRoles: RoleType[] = ['founder', 'general'];
   readonly baseWeight = 0.15;
-  readonly queryPattern = 'site:medium.com "@{name}"';
+  readonly queryPattern = 'site:medium.com "{name}"';
 
   protected extractProfileInfo(result: EnrichmentSearchResult) {
     return extractMediumProfile(result);
+  }
+
+  buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
+
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+    const variants = generateHandleVariants(hints.linkedinId, hints.nameHint, 2);
+
+    // HANDLE_MODE: Try linkedinId variants as handle hypothesis
+    // Many people's Medium handle ≠ LinkedIn slug, so this is low-confidence
+    for (const variant of variants) {
+      if (candidates.length >= maxQueries) break;
+      candidates.push({
+        query: `site:medium.com/@${variant.handle}`,
+        mode: 'handle',
+        variantId: variant.source === 'linkedinId' ? 'handle:clean' : 'handle:collapsed',
+      });
+    }
+
+    // NAME_MODE: This is the dominant discovery path for Medium
+    // Content authors are found by name, not handle
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:medium.com "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full',
+      });
+    }
+
+    // NAME + COMPANY: Better precision for common names
+    if (hints.nameHint && hints.companyHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:medium.com "${hints.nameHint}" "${hints.companyHint}"`,
+        mode: 'name',
+        variantId: 'name+company',
+      });
+    }
+
+    return candidates.slice(0, maxQueries);
   }
 }
 
@@ -263,6 +308,36 @@ export class DevtoSource extends BaseEnrichmentSource {
 
   protected extractProfileInfo(result: EnrichmentSearchResult) {
     return extractDevtoProfile(result);
+  }
+
+  buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
+
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+    const variants = generateHandleVariants(hints.linkedinId, hints.nameHint, 2);
+
+    // HANDLE_MODE: Dev.to URLs are handle-based: dev.to/username
+    for (const variant of variants) {
+      if (candidates.length >= maxQueries) break;
+      candidates.push({
+        query: `site:dev.to/${variant.handle}`,
+        mode: 'handle',
+        variantId: variant.source === 'linkedinId' ? 'handle:clean' : 'handle:derived',
+      });
+    }
+
+    // NAME_MODE: Name-based search
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:dev.to "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full',
+      });
+    }
+
+    return candidates.slice(0, maxQueries);
   }
 }
 
@@ -282,27 +357,43 @@ export class TwitterSource extends BaseEnrichmentSource {
   }
 
   buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
-    const queries: string[] = [];
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
 
-    // Twitter search is noisy, be more specific
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+
+    // NAME + COMPANY: Twitter search is noisy, be more specific
     if (hints.nameHint && hints.companyHint) {
-      queries.push(`site:twitter.com "${hints.nameHint}" "${hints.companyHint}"`);
+      candidates.push({
+        query: `site:twitter.com "${hints.nameHint}" "${hints.companyHint}"`,
+        mode: 'name',
+        variantId: 'name+company',
+      });
     }
 
-    if (hints.nameHint && hints.headlineHint && queries.length < maxQueries) {
-      // Extract job title from headline
+    // NAME + TITLE: Extract job title from headline
+    if (hints.nameHint && hints.headlineHint && candidates.length < maxQueries) {
       const titleMatch = hints.headlineHint.match(/^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/);
       if (titleMatch) {
-        queries.push(`site:twitter.com "${hints.nameHint}" "${titleMatch[1]}"`);
+        candidates.push({
+          query: `site:twitter.com "${hints.nameHint}" "${titleMatch[1]}"`,
+          mode: 'name',
+          variantId: 'name+headline_title',
+        });
       }
     }
 
-    // Fallback: name only (less reliable)
-    if (hints.nameHint && queries.length < maxQueries) {
-      queries.push(`site:twitter.com "${hints.nameHint}"`);
+    // NAME_MODE: Fallback (less reliable)
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:twitter.com "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full',
+      });
     }
 
-    return queries.slice(0, maxQueries);
+    return candidates.slice(0, maxQueries);
   }
 }
 
@@ -321,19 +412,31 @@ export class YouTubeSource extends BaseEnrichmentSource {
   }
 
   buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
-    const queries: string[] = [];
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
 
-    // Search for channel or talks
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+
+    // NAME_MODE: Search for channel with @ handle pattern
     if (hints.nameHint) {
-      queries.push(`site:youtube.com/@ "${hints.nameHint}"`);
+      candidates.push({
+        query: `site:youtube.com/@ "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full_at_handle_guess',
+      });
     }
 
-    // Search for talks/interviews
-    if (hints.nameHint && queries.length < maxQueries) {
-      queries.push(`site:youtube.com "${hints.nameHint}" talk interview`);
+    // NAME_MODE: Search for talks/interviews
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:youtube.com "${hints.nameHint}" talk interview`,
+        mode: 'name',
+        variantId: 'name:talks',
+      });
     }
 
-    return queries.slice(0, maxQueries);
+    return candidates.slice(0, maxQueries);
   }
 }
 
@@ -370,6 +473,34 @@ export class SubstackSource extends BaseEnrichmentSource {
       publications: undefined,
     };
   }
+
+  buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
+
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+
+    // NAME_MODE: Full name search
+    if (hints.nameHint) {
+      candidates.push({
+        query: `site:substack.com "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full',
+      });
+    }
+
+    // NAME + COMPANY
+    if (hints.nameHint && hints.companyHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:substack.com "${hints.nameHint}" "${hints.companyHint}"`,
+        mode: 'name',
+        variantId: 'name+company',
+      });
+    }
+
+    return candidates.slice(0, maxQueries);
+  }
 }
 
 /**
@@ -389,6 +520,34 @@ export class CrunchbaseSource extends BaseEnrichmentSource {
   protected extractProfileInfo(result: EnrichmentSearchResult) {
     return extractCrunchbaseProfile(result);
   }
+
+  buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
+
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+
+    // NAME_MODE: Full name search on person profiles
+    if (hints.nameHint) {
+      candidates.push({
+        query: `site:crunchbase.com/person "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full',
+      });
+    }
+
+    // NAME + COMPANY: Better precision for founders
+    if (hints.nameHint && hints.companyHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:crunchbase.com "${hints.nameHint}" "${hints.companyHint}"`,
+        mode: 'name',
+        variantId: 'name+company',
+      });
+    }
+
+    return candidates.slice(0, maxQueries);
+  }
 }
 
 /**
@@ -406,19 +565,31 @@ export class SECSource extends BaseEnrichmentSource {
   }
 
   buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
-    const queries: string[] = [];
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
 
-    // SEC search with company context
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+
+    // NAME + COMPANY: SEC search with company context
     if (hints.nameHint && hints.companyHint) {
-      queries.push(`site:sec.gov "${hints.nameHint}" "${hints.companyHint}"`);
+      candidates.push({
+        query: `site:sec.gov "${hints.nameHint}" "${hints.companyHint}"`,
+        mode: 'name',
+        variantId: 'name+company',
+      });
     }
 
-    // SEC search with just name
-    if (hints.nameHint && queries.length < maxQueries) {
-      queries.push(`site:sec.gov "${hints.nameHint}" officer director`);
+    // NAME_MODE: SEC search with just name
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:sec.gov "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full',
+      });
     }
 
-    return queries.slice(0, maxQueries);
+    return candidates.slice(0, maxQueries);
   }
 }
 

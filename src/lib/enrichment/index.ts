@@ -30,6 +30,7 @@ export * from './bridge-discovery';
  * Enrichment options
  */
 export interface EnrichmentOptions extends BridgeDiscoveryOptions {
+  tenantId: string; // Required for multi-tenancy
   platforms?: string[];
   maxIdentitiesPerPlatform?: number;
   enableMultiPlatform?: boolean;
@@ -67,9 +68,10 @@ function candidateToHints(candidate: Candidate): CandidateHints {
 }
 
 /**
- * Store discovered identity in database
+ * Store discovered identity in database (tenant-scoped)
  */
 async function storeIdentityCandidate(
+  tenantId: string,
   candidateId: string,
   identity: DiscoveredIdentity,
   sessionId: string,
@@ -77,7 +79,8 @@ async function storeIdentityCandidate(
 ): Promise<IdentityCandidate> {
   return prisma.identityCandidate.upsert({
     where: {
-      candidateId_platform_platformId: {
+      tenantId_candidateId_platform_platformId: {
+        tenantId,
         candidateId,
         platform: identity.platform,
         platformId: identity.platformId,
@@ -94,6 +97,7 @@ async function storeIdentityCandidate(
       updatedAt: new Date(),
     },
     create: {
+      tenantId,
       candidateId,
       platform: identity.platform,
       platformId: identity.platformId,
@@ -111,15 +115,17 @@ async function storeIdentityCandidate(
 }
 
 /**
- * Create enrichment session
+ * Create enrichment session (tenant-scoped)
  */
 async function createSession(
+  tenantId: string,
   candidateId: string,
   roleType: string | null,
   platforms: string[]
 ): Promise<EnrichmentSession> {
   return prisma.enrichmentSession.create({
     data: {
+      tenantId,
       candidateId,
       status: 'running',
       roleType,
@@ -205,13 +211,14 @@ async function logEnrichmentAction(
  */
 export async function enrichCandidate(
   candidateId: string,
-  options: EnrichmentOptions = {}
+  options: EnrichmentOptions
 ): Promise<EnrichmentResult> {
   const startTime = Date.now();
+  const { tenantId } = options;
 
-  // Fetch candidate
-  const candidate = await prisma.candidate.findUnique({
-    where: { id: candidateId },
+  // Fetch candidate - must belong to tenant
+  const candidate = await prisma.candidate.findFirst({
+    where: { id: candidateId, tenantId },
   });
 
   if (!candidate) {
@@ -236,8 +243,8 @@ export async function enrichCandidate(
     };
   }
 
-  // Create session
-  const session = await createSession(candidateId, candidate.roleType, platforms);
+  // Create session (tenant-scoped)
+  const session = await createSession(tenantId, candidateId, candidate.roleType, platforms);
 
   // Update candidate status
   await updateCandidateStatus(candidateId, 'in_progress', null);
@@ -294,11 +301,12 @@ export async function enrichCandidate(
       }
     }
 
-    // Store identities in database
+    // Store identities in database (tenant-scoped)
     let identitiesStored = 0;
     for (const identity of allIdentities) {
       try {
         await storeIdentityCandidate(
+          tenantId,
           candidateId,
           identity,
           session.id,
@@ -398,7 +406,7 @@ export async function enrichCandidate(
  */
 export async function enrichCandidates(
   candidateIds: string[],
-  options: EnrichmentOptions = {}
+  options: EnrichmentOptions
 ): Promise<EnrichmentResult[]> {
   const results: EnrichmentResult[] = [];
 

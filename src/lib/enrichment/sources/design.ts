@@ -10,9 +10,10 @@
  */
 
 import type { RoleType } from '@/types/linkedin';
-import type { EnrichmentPlatform, CandidateHints } from './types';
+import type { EnrichmentPlatform, CandidateHints, QueryCandidate } from './types';
 import { BaseEnrichmentSource } from './base-source';
 import type { EnrichmentSearchResult } from './search-executor';
+import { generateHandleVariants } from './handle-variants';
 
 /**
  * Dribbble profile extraction
@@ -157,6 +158,45 @@ export class DribbbleSource extends BaseEnrichmentSource {
   protected extractProfileInfo(result: EnrichmentSearchResult) {
     return extractDribbbleProfile(result);
   }
+
+  buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
+
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+    const variants = generateHandleVariants(hints.linkedinId, hints.nameHint, 2);
+
+    // HANDLE_MODE: Dribbble URLs are handle-based: dribbble.com/username
+    for (const variant of variants) {
+      if (candidates.length >= maxQueries) break;
+      candidates.push({
+        query: `site:dribbble.com/${variant.handle}`,
+        mode: 'handle',
+        variantId: variant.source === 'linkedinId' ? 'handle:clean' : 'handle:derived',
+      });
+    }
+
+    // NAME_MODE: Name-based search
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:dribbble.com "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full',
+      });
+    }
+
+    // NAME + LOCATION: Common for design portfolios
+    if (hints.nameHint && hints.locationHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:dribbble.com "${hints.nameHint}" "${hints.locationHint}"`,
+        mode: 'name',
+        variantId: 'name+location',
+      });
+    }
+
+    return candidates.slice(0, maxQueries);
+  }
 }
 
 /**
@@ -172,6 +212,36 @@ export class BehanceSource extends BaseEnrichmentSource {
   protected extractProfileInfo(result: EnrichmentSearchResult) {
     return extractBehanceProfile(result);
   }
+
+  buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
+
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+    const variants = generateHandleVariants(hints.linkedinId, hints.nameHint, 2);
+
+    // HANDLE_MODE: Behance URLs are handle-based: behance.net/username
+    for (const variant of variants) {
+      if (candidates.length >= maxQueries) break;
+      candidates.push({
+        query: `site:behance.net/${variant.handle}`,
+        mode: 'handle',
+        variantId: variant.source === 'linkedinId' ? 'handle:clean' : 'handle:derived',
+      });
+    }
+
+    // NAME_MODE: Name-based search
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:behance.net "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full',
+      });
+    }
+
+    return candidates.slice(0, maxQueries);
+  }
 }
 
 /**
@@ -186,6 +256,36 @@ export class CodePenSource extends BaseEnrichmentSource {
 
   protected extractProfileInfo(result: EnrichmentSearchResult) {
     return extractCodePenProfile(result);
+  }
+
+  buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
+
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+    const variants = generateHandleVariants(hints.linkedinId, hints.nameHint, 2);
+
+    // HANDLE_MODE: CodePen URLs are handle-based: codepen.io/username
+    for (const variant of variants) {
+      if (candidates.length >= maxQueries) break;
+      candidates.push({
+        query: `site:codepen.io/${variant.handle}`,
+        mode: 'handle',
+        variantId: variant.source === 'linkedinId' ? 'handle:clean' : 'handle:derived',
+      });
+    }
+
+    // NAME_MODE: Name-based search
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:codepen.io "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full',
+      });
+    }
+
+    return candidates.slice(0, maxQueries);
   }
 }
 

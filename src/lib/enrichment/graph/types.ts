@@ -8,7 +8,10 @@
 
 import { Annotation } from '@langchain/langgraph';
 import type { RoleType } from '@/types/linkedin';
-import type { EnrichmentPlatform, DiscoveredIdentity, ScoreBreakdown } from '../sources/types';
+import type { EnrichmentPlatform, DiscoveredIdentity, ScoreBreakdown, PlatformDiagnostics } from '../sources/types';
+
+// Re-export for convenience
+export type { PlatformDiagnostics };
 
 /**
  * Candidate hints for enrichment
@@ -33,6 +36,96 @@ export interface PlatformQueryResult {
   searchQueries: string[];
   durationMs: number;
   error?: string;
+
+  // Phase A.5: Per-platform diagnostics
+  diagnostics?: PlatformDiagnostics;
+}
+
+/**
+ * Run trace for observability - stored in EnrichmentSession.runTrace
+ */
+export interface EnrichmentRunTrace {
+  /** Input context */
+  input: {
+    candidateId: string;
+    linkedinId: string;
+    linkedinUrl: string;
+  };
+  /** Seed hints used */
+  seed: {
+    nameHint: string | null;
+    headlineHint: string | null;
+    locationHint: string | null;
+    companyHint: string | null;
+    roleType: string | null;
+  };
+  /** Per-platform results */
+  platformResults: Record<string, {
+    queriesExecuted: number;
+    rawResultCount: number;
+    identitiesFound: number;
+    /** Identities above minConfidence threshold (platform-local, added in persistResultsNode) */
+    identitiesAboveMinConfidence?: number;
+    /** Identities passing persist guard (platform-local, added in persistResultsNode) */
+    identitiesPassingPersistGuard?: number;
+    /** Identities successfully persisted to DB (added in persistResultsNode) */
+    identitiesPersisted?: number;
+    bestConfidence: number | null;
+    durationMs: number;
+    error?: string;
+    rateLimited?: boolean;
+  }>;
+  /** Final aggregated results */
+  final: {
+    totalQueriesExecuted: number;
+    platformsQueried: number;
+    platformsWithHits: number;
+    /** Total identities found across all platforms (before any filtering) */
+    identitiesFoundTotal: number;
+    /** Identities above minConfidence threshold */
+    identitiesAboveMinConfidence: number;
+    /** Identities passing persist guard (shouldPersistIdentity + platform guards) */
+    identitiesPassingPersistGuard: number;
+    /** Actual DB upserts attempted */
+    identitiesPersisted: number;
+    /** DB errors during persist (should be 0 in healthy system) */
+    persistErrors?: number;
+    bestConfidence: number | null;
+    durationMs: number;
+    /**
+     * Provider usage summary across platforms in this run.
+     * Counts are per-platform (not per-query).
+     */
+    providersUsed?: Record<string, number>;
+    /** Providers that were rate limited during this run (best-effort). */
+    rateLimitedProviders?: string[];
+    /**
+     * Variant stats aggregated across all platforms.
+     * Includes both raw variantIds and canonical aggregations.
+     */
+    variantStats?: {
+      executed: {
+        raw: string[];
+        canonical: Record<string, number>;
+      };
+      rejected: {
+        raw: string[];
+        canonical: Record<string, number>;
+      };
+    };
+    /**
+     * Summary metadata for draft/verified tracking.
+     * Used to determine if summary needs regeneration after confirmation.
+     */
+    summaryMeta?: {
+      mode: 'draft' | 'verified';
+      confirmedCount: number;
+      identityKey: string;
+      identityIds: string[];
+    };
+  };
+  /** Failure reason if any */
+  failureReason?: string;
 }
 
 /**
@@ -98,8 +191,8 @@ function parseEnvInt(envVar: string | undefined, defaultValue: number): number {
  */
 export const DEFAULT_BUDGET: EnrichmentBudget = {
   maxQueries: parseEnvInt(process.env.ENRICHMENT_MAX_QUERIES, 30),
-  maxPlatforms: parseEnvInt(process.env.ENRICHMENT_MAX_PLATFORMS, 5),
-  maxIdentitiesPerPlatform: 5,
+  maxPlatforms: parseEnvInt(process.env.ENRICHMENT_MAX_PLATFORMS, 8),
+  maxIdentitiesPerPlatform: parseEnvInt(process.env.ENRICHMENT_MAX_IDENTITIES_PER_PLATFORM, 3),
   timeoutMs: 60000,
   minConfidenceForEarlyStop: 0.9,
   maxParallelPlatforms: parseEnvInt(process.env.ENRICHMENT_MAX_PARALLEL_PLATFORMS, 3),
@@ -113,6 +206,7 @@ export const DEFAULT_BUDGET: EnrichmentBudget = {
  */
 export const EnrichmentStateAnnotation = Annotation.Root({
   // Input state
+  tenantId: Annotation<string>, // Required for multi-tenancy
   candidateId: Annotation<string>,
   sessionId: Annotation<string>,
   roleType: Annotation<RoleType>,
@@ -160,9 +254,15 @@ export const EnrichmentStateAnnotation = Annotation.Root({
   startedAt: Annotation<string>,
   completedAt: Annotation<string | null>,
 
-  // Observability
-  lastCompletedNode: Annotation<string | null>,
-  progressPct: Annotation<number>,
+  // Observability (reducers needed for parallel Send() updates)
+  lastCompletedNode: Annotation<string | null>({
+    reducer: (_, update) => update, // Last writer wins for parallel nodes
+    default: () => null,
+  }),
+  progressPct: Annotation<number>({
+    reducer: (current, update) => Math.max(current, update), // Keep highest progress
+    default: () => 0,
+  }),
   errorsBySource: Annotation<Record<string, string[]>>({
     reducer: (current, update) => {
       const merged = { ...current };
@@ -181,6 +281,23 @@ export const EnrichmentStateAnnotation = Annotation.Root({
   summaryModel: Annotation<string | null>,
   summaryTokens: Annotation<number | null>,
   summaryGeneratedAt: Annotation<string | null>,
+  /** Summary metadata: mode (draft/verified), confirmedCount, identityKey */
+  summaryMeta: Annotation<Record<string, unknown> | null>,
+
+  // Persist filter stats (set by persistResultsNode)
+  persistStats: Annotation<{
+    identitiesFoundTotal: number;
+    identitiesAboveMinConfidence: number;
+    identitiesPassingPersistGuard: number;
+    identitiesPersisted: number;
+    persistErrors: number;
+    perPlatform: Record<string, {
+      found: number;
+      aboveMinConfidence: number;
+      passingPersistGuard: number;
+      persisted: number;
+    }>;
+  } | null>,
 });
 
 /**
@@ -197,6 +314,7 @@ export type PartialEnrichmentState = Partial<EnrichmentState>;
  * Input for starting enrichment
  */
 export interface EnrichmentGraphInput {
+  tenantId: string; // Required for multi-tenancy
   candidateId: string;
   /**
    * Optional session ID to use for this run (recommended for async jobs).

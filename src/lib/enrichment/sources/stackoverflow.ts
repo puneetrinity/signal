@@ -8,7 +8,7 @@
  */
 
 import type { RoleType } from '@/types/linkedin';
-import type { EnrichmentPlatform, CandidateHints } from './types';
+import type { EnrichmentPlatform, CandidateHints, QueryCandidate } from './types';
 import { BaseEnrichmentSource } from './base-source';
 import type { EnrichmentSearchResult } from './search-executor';
 
@@ -74,24 +74,40 @@ export class StackOverflowSource extends BaseEnrichmentSource {
   }
 
   buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
-    const queries: string[] = [];
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
 
-    // Primary: Name search
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+
+    // Primary: Full name search (name-based platform)
     if (hints.nameHint) {
-      queries.push(`site:stackoverflow.com/users "${hints.nameHint}"`);
+      candidates.push({
+        query: `site:stackoverflow.com/users "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full',
+      });
     }
 
     // Secondary: Name + company
-    if (hints.nameHint && hints.companyHint && queries.length < maxQueries) {
-      queries.push(`site:stackoverflow.com/users "${hints.nameHint}" "${hints.companyHint}"`);
+    if (hints.nameHint && hints.companyHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:stackoverflow.com/users "${hints.nameHint}" "${hints.companyHint}"`,
+        mode: 'name',
+        variantId: 'name+company',
+      });
     }
 
     // Tertiary: Name + location
-    if (hints.nameHint && hints.locationHint && queries.length < maxQueries) {
-      queries.push(`site:stackoverflow.com/users "${hints.nameHint}" "${hints.locationHint}"`);
+    if (hints.nameHint && hints.locationHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:stackoverflow.com/users "${hints.nameHint}" "${hints.locationHint}"`,
+        mode: 'name',
+        variantId: 'name+location',
+      });
     }
 
-    return queries.slice(0, maxQueries);
+    return candidates.slice(0, maxQueries);
   }
 }
 

@@ -81,6 +81,8 @@ export interface EvidencePointer {
 export interface ScoreBreakdown {
   bridgeWeight: number;
   nameMatch: number;
+  /** Handle/ID match weight (linkedinId vs platformId) - strong signal for handle platforms */
+  handleMatch: number;
   companyMatch: number;
   locationMatch: number;
   profileCompleteness: number;
@@ -115,6 +117,32 @@ export interface DiscoveredIdentity {
 }
 
 /**
+ * Per-platform diagnostics for debugging enrichment runs
+ */
+export interface PlatformDiagnostics {
+  /** Queries attempted (before validation) */
+  queriesAttempted: number;
+  /** Queries rejected by quality gate */
+  queriesRejected: number;
+  /** Rejection reasons */
+  rejectionReasons: string[];
+  /** Raw variantIds of executed queries (for canonical aggregation) */
+  variantsExecuted: string[];
+  /** Raw variantIds of rejected queries (for canonical aggregation) */
+  variantsRejected: string[];
+  /** Raw results from search (before URL filtering) */
+  rawResultCount: number;
+  /** Results after URL pattern matching */
+  matchedResultCount: number;
+  /** Identities that passed scoring threshold */
+  identitiesAboveThreshold: number;
+  /** Was rate limited or blocked? */
+  rateLimited: boolean;
+  /** Provider used */
+  provider: string;
+}
+
+/**
  * Result from bridge discovery
  */
 export interface BridgeDiscoveryResult {
@@ -124,6 +152,8 @@ export interface BridgeDiscoveryResult {
   searchQueries: string[];
   durationMs: number;
   error?: string;
+  /** Per-platform diagnostics for observability */
+  diagnostics?: PlatformDiagnostics;
 }
 
 /**
@@ -148,6 +178,55 @@ export interface SourceHealthCheck {
     resetAt?: string;
   };
   error?: string;
+}
+
+/**
+ * Query mode for validation and execution
+ * - 'handle': Query targets a handle-based URL pattern (e.g., site:leetcode.com/u/johndoe)
+ * - 'name': Query targets name-based search (e.g., site:medium.com "John Doe")
+ */
+export type QueryMode = 'handle' | 'name';
+
+/**
+ * Query candidate with mode metadata for validation
+ * Produced by platform sources, validated by executor
+ */
+export interface QueryCandidate {
+  /** The search query string */
+  query: string;
+  /** Query mode for validation rules */
+  mode: QueryMode;
+  /** Optional variant identifier for debugging (e.g., 'collapsed', 'underscore', 'name+company') */
+  variantId?: string;
+}
+
+/**
+ * Infer query mode from query string pattern
+ * Used for backward compatibility with legacy buildQueries() that return string[]
+ */
+export function inferQueryMode(query: string): QueryMode {
+  // Handle-pattern indicators in URLs
+  const handlePatterns = [
+    '/u/',      // leetcode.com/u/, hub.docker.com/u/
+    '/~',       // npmjs.com/~
+    '/@',       // medium.com/@, hackerearth.com/@
+    '/users/',  // gitlab.com/users/, pypi.org/user/
+  ];
+
+  for (const pattern of handlePatterns) {
+    if (query.includes(pattern)) {
+      return 'handle';
+    }
+  }
+
+  // Also check for direct handle patterns like site:gitlab.com/username (no /users/)
+  // These are handle-mode if they're site: + domain + single path segment
+  const directHandleMatch = query.match(/site:([a-z.]+)\/([a-z0-9_-]+)$/i);
+  if (directHandleMatch) {
+    return 'handle';
+  }
+
+  return 'name';
 }
 
 /**
@@ -180,9 +259,16 @@ export interface EnrichmentSource {
   healthCheck(): Promise<SourceHealthCheck>;
 
   /**
-   * Build search queries for this platform
+   * Build search queries for this platform (legacy interface)
+   * @deprecated Use buildQueryCandidates() for new implementations
    */
   buildQueries(hints: CandidateHints, maxQueries?: number): string[];
+
+  /**
+   * Build query candidates with mode metadata for validation
+   * Optional - if not implemented, buildQueries() is used with inferred modes
+   */
+  buildQueryCandidates?(hints: CandidateHints, maxQueries?: number): QueryCandidate[];
 }
 
 /**

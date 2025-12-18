@@ -30,7 +30,7 @@ export default function PreviousSearchesPage() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || 'Failed to fetch profiles');
+        throw new Error(data.error || 'Failed to fetch candidates');
       }
 
       setProfiles(data.profiles || []);
@@ -58,7 +58,7 @@ export default function PreviousSearchesPage() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || 'Failed to load more profiles');
+        throw new Error(data.error || 'Failed to load more candidates');
       }
 
       if (data.profiles.length > 0) {
@@ -88,7 +88,7 @@ export default function PreviousSearchesPage() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || 'Failed to refresh profiles');
+        throw new Error(data.error || 'Failed to refresh candidates');
       }
 
       if (data.profiles.length > 0) {
@@ -129,7 +129,7 @@ export default function PreviousSearchesPage() {
               Previous Searches
             </h1>
             <p className="mt-2 text-muted-foreground">
-              {totalCount > 0 ? `${totalCount} cached profiles` : 'No cached profiles yet'}
+              {totalCount > 0 ? `${totalCount} cached candidates` : 'No cached candidates yet'}
             </p>
           </div>
           {profiles.length > 0 && (
@@ -201,7 +201,7 @@ export default function PreviousSearchesPage() {
             {/* End of list indicator */}
             {!hasMore && profiles.length > 0 && (
               <p className="mt-8 text-center text-sm text-muted-foreground">
-                No more profiles to load
+                No more candidates to load
               </p>
             )}
           </>

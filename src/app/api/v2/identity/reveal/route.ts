@@ -22,7 +22,7 @@ import {
   rateLimitHeaders,
 } from '@/lib/rate-limit';
 import { logIdentityAction } from '@/lib/audit';
-import { withAuth } from '@/lib/auth';
+import { withAuth, requireTenantId } from '@/lib/auth';
 
 /**
  * Audit log entry for email reveal (uses centralized audit module)
@@ -100,6 +100,7 @@ export async function POST(request: NextRequest) {
   if (!authCheck.authorized) {
     return authCheck.response;
   }
+  const tenantId = requireTenantId(authCheck.context);
 
   // Rate limit by API key if authenticated, otherwise by IP
   const rateLimitKey = authCheck.context.apiKeyId || undefined;
@@ -120,9 +121,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Fetch identity candidate
-    const identityCandidate = await prisma.identityCandidate.findUnique({
-      where: { id: identityCandidateId },
+    // Fetch identity candidate - must belong to tenant
+    const identityCandidate = await prisma.identityCandidate.findFirst({
+      where: { id: identityCandidateId, tenantId },
       include: {
         candidate: {
           select: {

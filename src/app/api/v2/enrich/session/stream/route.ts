@@ -9,6 +9,8 @@
 
 import { NextRequest } from 'next/server';
 import { getQueueEvents, getEnrichmentSession } from '@/lib/enrichment/queue';
+import { withAuth, requireTenantId } from '@/lib/auth';
+import { prisma } from '@/lib/prisma';
 
 /**
  * GET /api/v2/enrich/session/stream
@@ -23,10 +25,12 @@ import { getQueueEvents, getEnrichmentSession } from '@/lib/enrichment/queue';
  * - timeout: Long-running job timed out
  */
 export async function GET(request: NextRequest) {
-  // SSE streams don't support custom auth headers, so we rely on:
-  // 1. Session ID being a UUID that's hard to guess
-  // 2. Only returning progress data, no PII
-  // 3. The POST endpoint that creates sessions is still authenticated
+  // SSE streams can use cookie-based auth (Clerk session cookies are sent automatically)
+  const authCheck = await withAuth('authenticated');
+  if (!authCheck.authorized) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+  const tenantId = requireTenantId(authCheck.context);
 
   const { searchParams } = new URL(request.url);
   const sessionId = searchParams.get('sessionId');
@@ -35,26 +39,30 @@ export async function GET(request: NextRequest) {
     return new Response('sessionId is required', { status: 400 });
   }
 
-  // Check if session exists
-  const session = await getEnrichmentSession(sessionId);
-  if (!session) {
+  // Verify session exists and belongs to tenant
+  const sessionRecord = await prisma.enrichmentSession.findFirst({
+    where: { id: sessionId, tenantId },
+    select: { id: true, status: true, identitiesFound: true, finalConfidence: true },
+  });
+
+  if (!sessionRecord) {
     return new Response('Session not found', { status: 404 });
   }
 
-  // If already completed, return immediately
-  if (session.status === 'completed' || session.status === 'failed') {
+  // If already completed, return immediately (use sessionRecord for status check)
+  if (sessionRecord.status === 'completed' || sessionRecord.status === 'failed') {
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       start(controller) {
         const eventData = JSON.stringify({
-          type: session.status,
+          type: sessionRecord.status,
           sessionId,
-          status: session.status,
-          identitiesFound: session.identitiesFound,
-          finalConfidence: session.finalConfidence,
+          status: sessionRecord.status,
+          identitiesFound: sessionRecord.identitiesFound,
+          finalConfidence: sessionRecord.finalConfidence,
           timestamp: new Date().toISOString(),
         });
-        controller.enqueue(encoder.encode(`event: ${session.status}\ndata: ${eventData}\n\n`));
+        controller.enqueue(encoder.encode(`event: ${sessionRecord.status}\ndata: ${eventData}\n\n`));
         controller.close();
       },
     });
@@ -78,7 +86,7 @@ export async function GET(request: NextRequest) {
       const connectedData = JSON.stringify({
         type: 'connected',
         sessionId,
-        status: session.status,
+        status: sessionRecord.status,
         timestamp: new Date().toISOString(),
       });
       controller.enqueue(encoder.encode(`event: connected\ndata: ${connectedData}\n\n`));

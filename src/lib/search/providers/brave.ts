@@ -12,6 +12,7 @@
 
 import type { ProfileSummary } from '@/types/linkedin';
 import type { SearchProvider, RawSearchResult, SearchProviderType } from './types';
+import { getProviderLimiter } from './limit';
 
 interface BraveWebResult {
   url: string;
@@ -40,12 +41,14 @@ interface BraveResponse {
 
 const DEFAULT_TIMEOUT = 8000;
 const DEFAULT_MAX_RESULTS = 20;
+const BRAVE_MAX_PER_PAGE = 20; // Brave API max per request
 const BRAVE_API_URL = 'https://api.search.brave.com/res/v1/web/search';
 
 function getConfig() {
   return {
     apiKey: process.env.BRAVE_API_KEY,
     timeout: parseInt(process.env.BRAVE_TIMEOUT || String(DEFAULT_TIMEOUT), 10),
+    maxPages: parseInt(process.env.BRAVE_MAX_PAGES || '3', 10),
   };
 }
 
@@ -58,45 +61,72 @@ function isConfigured(): boolean {
 
 /**
  * Execute a raw search via Brave API
+ *
+ * @param query - Search query string
+ * @param count - Number of results to fetch (max 20 per request)
+ * @param offset - Starting offset for pagination (0-based)
  */
 async function executeSearch(
   query: string,
-  maxResults: number = DEFAULT_MAX_RESULTS
+  count: number = DEFAULT_MAX_RESULTS,
+  offset: number = 0
 ): Promise<BraveResponse> {
   const config = getConfig();
 
   if (!config.apiKey) {
     throw new Error('BRAVE_API_KEY is not configured');
   }
+  const apiKey = config.apiKey;
 
   const url = new URL(BRAVE_API_URL);
   url.searchParams.set('q', query);
-  url.searchParams.set('count', String(Math.min(maxResults, 20))); // Brave max is 20
+  url.searchParams.set('count', String(Math.min(count, BRAVE_MAX_PER_PAGE)));
+  if (offset > 0) {
+    url.searchParams.set('offset', String(offset));
+  }
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), config.timeout);
+  const limiter = getProviderLimiter('brave');
 
   try {
-    const response = await fetch(url.toString(), {
-      headers: {
-        Accept: 'application/json',
-        'X-Subscription-Token': config.apiKey,
-      },
-      signal: controller.signal,
+    const response = await limiter.run(async () => {
+      return await fetch(url.toString(), {
+        headers: {
+          Accept: 'application/json',
+          'X-Subscription-Token': apiKey,
+        },
+        signal: controller.signal,
+      });
     });
 
     clearTimeout(timeoutId);
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => '');
-      throw new Error(
+      const error = new Error(
         `Brave API error: ${response.status} ${response.statusText}${errorText ? ` - ${errorText}` : ''}`
       );
+      (error as Error & { status?: number; retryAfter?: string | null }).status = response.status;
+      (error as Error & { status?: number; retryAfter?: string | null }).retryAfter =
+        response.headers.get('Retry-After');
+      throw error;
     }
 
     return await response.json();
   } catch (error) {
     clearTimeout(timeoutId);
+    const status = (error as { status?: number }).status;
+    const retryAfterHeader = (error as { retryAfter?: string | null }).retryAfter;
+    // Bounded retry once on 429/503.
+    if (status === 429 || status === 503) {
+      const retryAfterSeconds = retryAfterHeader ? parseInt(retryAfterHeader, 10) : NaN;
+      const delayMs = Number.isFinite(retryAfterSeconds)
+        ? Math.max(250, retryAfterSeconds * 1000)
+        : 1000 + Math.floor(Math.random() * 250);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return await executeSearch(query, count, offset);
+    }
     if (error instanceof Error && error.name === 'AbortError') {
       throw new Error('Brave API request timed out');
     }
@@ -223,27 +253,47 @@ export const braveProvider: SearchProvider = {
         ? query
         : `site:linkedin.com/in ${query}`;
 
-      const response = await executeSearch(scopedQuery, maxResults * 2);
-
-      if (!response.web?.results?.length) {
-        console.log('[Brave] No results found');
-        return [];
-      }
-
       // Filter to valid LinkedIn profile URLs and deduplicate
       const summaries: ProfileSummary[] = [];
       const seenIds = new Set<string>();
+      const config = getConfig();
+      const maxPages = Number.isFinite(config.maxPages) && config.maxPages > 0 ? config.maxPages : 3;
+      let offset = 0;
 
-      for (const result of response.web.results) {
-        if (!isValidLinkedInProfileUrl(result.url)) continue;
+      // Paginate when needed (Brave max is 20 per request)
+      for (let page = 0; page < maxPages && summaries.length < maxResults; page++) {
+        const count = BRAVE_MAX_PER_PAGE;
+        if (page > 0) {
+          console.log(`[Brave] Fetching LinkedIn page ${page + 1} (offset=${offset}, count=${count})`);
+        }
 
-        const summary = extractProfileSummary(result);
-        if (seenIds.has(summary.linkedinId)) continue;
+        const response = await executeSearch(scopedQuery, count, offset);
+        const results = response.web?.results ?? [];
+        if (results.length === 0) break;
 
-        seenIds.add(summary.linkedinId);
-        summaries.push(summary);
+        let newProfilesThisPage = 0;
+        for (const result of results) {
+          if (!isValidLinkedInProfileUrl(result.url)) continue;
 
-        if (summaries.length >= maxResults) break;
+          const summary = extractProfileSummary(result);
+          if (seenIds.has(summary.linkedinId)) continue;
+
+          seenIds.add(summary.linkedinId);
+          summaries.push(summary);
+          newProfilesThisPage++;
+
+          if (summaries.length >= maxResults) break;
+        }
+
+        // Stop if this page added no new unique profiles (noisy tail)
+        if (newProfilesThisPage === 0) {
+          console.log(`[Brave] LinkedIn page ${page + 1} yielded 0 new profiles, stopping pagination`);
+          break;
+        }
+
+        // If we got fewer results than requested, no more pages are available
+        if (results.length < count) break;
+        offset += BRAVE_MAX_PER_PAGE;
       }
 
       console.log(`[Brave] Found ${summaries.length} LinkedIn profiles`);
@@ -256,10 +306,10 @@ export const braveProvider: SearchProvider = {
     }
   },
 
-  async searchRaw(
-    query: string,
-    maxResults: number = DEFAULT_MAX_RESULTS
-  ): Promise<RawSearchResult[]> {
+	  async searchRaw(
+	    query: string,
+	    maxResults: number = DEFAULT_MAX_RESULTS
+	  ): Promise<RawSearchResult[]> {
     console.log('[Brave] Raw search:', { query, maxResults });
 
     if (!isConfigured()) {
@@ -268,19 +318,66 @@ export const braveProvider: SearchProvider = {
     }
 
     try {
-      const response = await executeSearch(query, maxResults);
+      const allResults: RawSearchResult[] = [];
+      const seenUrls = new Set<string>(); // Dedupe URLs across pages
+      let offset = 0;
+      const maxPages = Math.ceil(maxResults / BRAVE_MAX_PER_PAGE);
+      const config = getConfig();
+      const maxPagesLimit = Number.isFinite(config.maxPages) && config.maxPages > 0 ? config.maxPages : 3;
 
-      if (!response.web?.results?.length) {
-        return [];
+      // Paginate if maxResults > 20
+      for (let page = 0; page < Math.min(maxPages, maxPagesLimit); page++) {
+        const remaining = maxResults - allResults.length;
+        if (remaining <= 0) break;
+
+        const count = Math.min(remaining, BRAVE_MAX_PER_PAGE);
+
+        if (page > 0) {
+          console.log(`[Brave] Fetching page ${page + 1} (offset=${offset}, count=${count})`);
+        }
+
+        const response = await executeSearch(query, count, offset);
+
+        if (!response.web?.results?.length) {
+          // No more results available
+          break;
+        }
+
+        let newResultsThisPage = 0;
+        for (const r of response.web.results) {
+          if (allResults.length >= maxResults) break;
+
+          // Dedupe by URL (normalized to lowercase)
+          const normalizedUrl = r.url.toLowerCase();
+          if (seenUrls.has(normalizedUrl)) continue;
+          seenUrls.add(normalizedUrl);
+
+          allResults.push({
+            url: r.url,
+            title: r.title || '',
+            snippet: r.description || '',
+            position: allResults.length + 1,
+            score: 1 / (allResults.length + 1), // Position-based score
+          });
+          newResultsThisPage++;
+        }
+
+        // Stop if this page added no new unique results (noisy tail)
+        if (newResultsThisPage === 0) {
+          console.log(`[Brave] Page ${page + 1} yielded 0 new unique URLs, stopping pagination`);
+          break;
+        }
+
+        // If we got fewer results than requested, no more pages available
+        if (response.web.results.length < count) {
+          break;
+        }
+
+        offset += BRAVE_MAX_PER_PAGE;
       }
 
-      return response.web.results.map((r, idx) => ({
-        url: r.url,
-        title: r.title || '',
-        snippet: r.description || '',
-        position: idx + 1,
-        score: 10 - idx, // Simple position-based score
-      }));
+      console.log(`[Brave] Raw search completed: ${allResults.length} results`);
+      return allResults;
     } catch (error) {
       console.error('[Brave] Error in raw search:', error);
       throw error;

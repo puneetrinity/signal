@@ -22,6 +22,8 @@ import type { EnrichmentPlatform, CandidateHints } from './types';
 /**
  * Get enrichment-specific search provider configuration
  * Separate from main search to allow different strategies
+ *
+ * To disable fallback, set ENRICHMENT_SEARCH_FALLBACK_PROVIDER to 'none' or ''
  */
 export function getEnrichmentProviderConfig(): {
   primary: SearchProviderType;
@@ -29,30 +31,53 @@ export function getEnrichmentProviderConfig(): {
   minResultsBeforeFallback: number;
 } {
   const primary = (process.env.ENRICHMENT_SEARCH_PROVIDER?.toLowerCase() || 'brave') as SearchProviderType;
-  const fallback = (process.env.ENRICHMENT_SEARCH_FALLBACK_PROVIDER?.toLowerCase() || 'searxng') as SearchProviderType | null;
+  const fallbackEnv = process.env.ENRICHMENT_SEARCH_FALLBACK_PROVIDER?.toLowerCase();
   const minResults = parseInt(process.env.MIN_RESULTS_BEFORE_FALLBACK || '2', 10);
 
+  // Support 'none' or empty string to disable fallback
+  // This is useful when SearXNG is blocked/rate-limited
+  let fallback: SearchProviderType | null = null;
+  if (fallbackEnv && fallbackEnv !== 'none' && fallbackEnv !== '') {
+    fallback = ['brave', 'searxng', 'brightdata', 'serper'].includes(fallbackEnv)
+      ? (fallbackEnv as SearchProviderType)
+      : null;
+  } else if (fallbackEnv === undefined) {
+    // Default to searxng only if not explicitly set
+    fallback = 'searxng';
+  }
+
   return {
-    primary: ['brave', 'searxng', 'brightdata'].includes(primary) ? primary : 'brave',
-    fallback: fallback && ['brave', 'searxng', 'brightdata'].includes(fallback) ? fallback : 'searxng',
+    primary: ['brave', 'searxng', 'brightdata', 'serper'].includes(primary) ? primary : 'brave',
+    fallback,
     minResultsBeforeFallback: minResults,
   };
 }
 
 /**
+ * Raw search result with provider attribution
+ */
+interface RawSearchWithProvider {
+  results: RawSearchResult[];
+  providerUsed: string;
+  rateLimited: boolean;
+}
+
+/**
  * Execute raw search with enrichment-specific fallback logic
  * IMPORTANT: Preserves partial primary results when fallback fails/returns fewer
+ * Returns provider attribution for diagnostics
  */
 async function searchRawWithFallback(
   query: string,
   maxResults: number = 20
-): Promise<RawSearchResult[]> {
+): Promise<RawSearchWithProvider> {
   const config = getEnrichmentProviderConfig();
   const primary = getProvider(config.primary);
 
   console.log(`[EnrichmentSearch] Primary: ${config.primary}, Fallback: ${config.fallback || 'none'}`);
 
   let primaryResults: RawSearchResult[] = [];
+  let primaryRateLimited = false;
 
   // Try primary provider (Brave)
   try {
@@ -60,15 +85,17 @@ async function searchRawWithFallback(
 
     if (primaryResults.length >= config.minResultsBeforeFallback) {
       console.log(`[EnrichmentSearch] Primary (${config.primary}) returned ${primaryResults.length} results`);
-      return primaryResults;
+      return { results: primaryResults, providerUsed: config.primary, rateLimited: false };
     }
 
     console.log(`[EnrichmentSearch] Primary (${config.primary}) returned only ${primaryResults.length} results (min: ${config.minResultsBeforeFallback})`);
   } catch (error) {
-    console.error(
-      `[EnrichmentSearch] Primary (${config.primary}) failed:`,
-      error instanceof Error ? error.message : error
-    );
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error(`[EnrichmentSearch] Primary (${config.primary}) failed:`, errorMsg);
+    // Detect rate limiting
+    if (/rate.?limit|429|too many requests/i.test(errorMsg)) {
+      primaryRateLimited = true;
+    }
   }
 
   // Try fallback provider (SearXNG) if configured
@@ -81,26 +108,24 @@ async function searchRawWithFallback(
 
       if (fallbackResults.length > primaryResults.length) {
         console.log(`[EnrichmentSearch] Fallback (${config.fallback}) returned ${fallbackResults.length} results (better than primary's ${primaryResults.length})`);
-        return fallbackResults;
+        return { results: fallbackResults, providerUsed: config.fallback, rateLimited: false };
       }
 
       console.log(`[EnrichmentSearch] Fallback (${config.fallback}) returned ${fallbackResults.length} results (not better than primary's ${primaryResults.length})`);
     } catch (error) {
-      console.error(
-        `[EnrichmentSearch] Fallback (${config.fallback}) failed:`,
-        error instanceof Error ? error.message : error
-      );
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error(`[EnrichmentSearch] Fallback (${config.fallback}) failed:`, errorMsg);
     }
   }
 
   // Return whatever we have from primary (even if partial)
   if (primaryResults.length > 0) {
     console.log(`[EnrichmentSearch] Using partial primary results: ${primaryResults.length}`);
-    return primaryResults;
+    return { results: primaryResults, providerUsed: config.primary, rateLimited: primaryRateLimited };
   }
 
   console.log('[EnrichmentSearch] No results from any provider');
-  return [];
+  return { results: [], providerUsed: config.primary, rateLimited: primaryRateLimited };
 }
 
 /**
@@ -110,6 +135,17 @@ export interface EnrichmentSearchResult extends RawSearchResult {
   platform: EnrichmentPlatform;
   platformId: string | null;
   platformProfileUrl: string | null;
+}
+
+/**
+ * Extended search result with metadata for diagnostics
+ */
+export interface EnrichmentSearchResultWithMeta {
+  results: EnrichmentSearchResult[];
+  rawResultCount: number;
+  matchedResultCount: number;
+  rateLimited: boolean;
+  provider: string;
 }
 
 /**
@@ -426,35 +462,45 @@ const PLATFORM_PATTERNS: Record<
 };
 
 /**
- * Execute search for a specific platform
+ * Execute search for a specific platform with metadata for diagnostics
  * Uses Brave as primary, SearXNG as fallback (configurable via env)
  */
-export async function searchForPlatform(
+export async function searchForPlatformWithMeta(
   platform: EnrichmentPlatform,
   query: string,
   maxResults: number = 10
-): Promise<EnrichmentSearchResult[]> {
+): Promise<EnrichmentSearchResultWithMeta> {
   console.log(`[SearchExecutor] Searching ${platform}: "${query}"`);
+  const config = getEnrichmentProviderConfig();
 
   try {
-    const results = await searchRawWithFallback(query, maxResults * 2); // Get extra for filtering
+    const searchResponse = await searchRawWithFallback(query, maxResults * 2); // Get extra for filtering
+    const { results: rawResults, providerUsed, rateLimited } = searchResponse;
     const pattern = PLATFORM_PATTERNS[platform];
 
     if (!pattern) {
       console.warn(`[SearchExecutor] No pattern defined for platform: ${platform}`);
-      return [];
+      return {
+        results: [],
+        rawResultCount: rawResults.length,
+        matchedResultCount: 0,
+        rateLimited,
+        provider: providerUsed,
+      };
     }
 
     // Filter and enhance results
     const enrichedResults: EnrichmentSearchResult[] = [];
     const seenIds = new Set<string>();
+    let matchedCount = 0;
 
-    for (const result of results) {
+    for (const result of rawResults) {
       // Check if URL matches the platform pattern
       if (!pattern.urlPattern.test(result.url)) {
         continue;
       }
 
+      matchedCount++;
       const platformId = pattern.idExtractor(result.url);
       if (!platformId) continue;
 
@@ -473,14 +519,42 @@ export async function searchForPlatform(
     }
 
     console.log(
-      `[SearchExecutor] Found ${enrichedResults.length} ${platform} results from ${results.length} total`
+      `[SearchExecutor] Found ${enrichedResults.length} ${platform} results from ${rawResults.length} total (${matchedCount} matched pattern) via ${providerUsed}`
     );
 
-    return enrichedResults;
+    return {
+      results: enrichedResults,
+      rawResultCount: rawResults.length,
+      matchedResultCount: matchedCount,
+      rateLimited,
+      provider: providerUsed,
+    };
   } catch (error) {
     console.error(`[SearchExecutor] Search failed for ${platform}:`, error);
-    return [];
+    // Detect rate limiting from error messages
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    const isRateLimited = /rate.?limit|429|too many requests/i.test(errorMsg);
+    return {
+      results: [],
+      rawResultCount: 0,
+      matchedResultCount: 0,
+      rateLimited: isRateLimited,
+      provider: config.primary, // Best guess on error
+    };
   }
+}
+
+/**
+ * Execute search for a specific platform
+ * Uses Brave as primary, SearXNG as fallback (configurable via env)
+ */
+export async function searchForPlatform(
+  platform: EnrichmentPlatform,
+  query: string,
+  maxResults: number = 10
+): Promise<EnrichmentSearchResult[]> {
+  const result = await searchForPlatformWithMeta(platform, query, maxResults);
+  return result.results;
 }
 
 /**

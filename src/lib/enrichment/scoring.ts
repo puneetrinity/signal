@@ -28,10 +28,13 @@
  */
 export interface ScoreBreakdown {
   bridgeWeight: number; // 0-0.4 based on evidence type
-  nameMatch: number; // 0-0.30 based on name similarity
-  companyMatch: number; // 0-0.15 based on company match
-  locationMatch: number; // 0-0.1 based on location match
-  profileCompleteness: number; // 0-0.05 based on profile data
+  nameMatch: number; // 0-0.25 based on name similarity
+  /** Handle/ID match weight (linkedinId vs platformId) - strong signal for handle platforms */
+  handleMatch: number; // 0-0.30 based on handle match
+  companyMatch: number; // 0-0.10 based on company match
+  locationMatch: number; // 0-0.05 based on location match
+  profileCompleteness: number; // 0-1 based on profile data completeness
+  activityScore: number; // 0-1 based on platform activity metrics
   total: number; // Sum of all weights
 }
 
@@ -266,6 +269,12 @@ export function calculateConfidenceScore(input: ScoringInput): ScoreBreakdown {
   const completenessRaw = calculateProfileCompleteness(input);
   const profileCompleteness = completenessRaw * 0.05;
 
+  // handleMatch not used in GitHub API scoring (direct lookup, not search)
+  const handleMatch = 0;
+
+  // activityScore from profile completeness context
+  const activityScore = completenessRaw;
+
   // Total score
   const total =
     bridgeWeight + nameMatch + companyMatch + locationMatch + profileCompleteness;
@@ -273,9 +282,11 @@ export function calculateConfidenceScore(input: ScoringInput): ScoreBreakdown {
   return {
     bridgeWeight,
     nameMatch,
+    handleMatch,
     companyMatch,
     locationMatch,
     profileCompleteness,
+    activityScore,
     total: Math.min(1, total),
   };
 }
@@ -315,7 +326,7 @@ export function meetsStorageThreshold(score: number): boolean {
 
 /**
  * Check if an identity should be persisted based on score breakdown
- * Requires: total >= threshold AND (bridge evidence OR name match + secondary signal)
+ * Requires: total >= threshold AND (bridge evidence OR name match + secondary OR handle match)
  * This prevents storing random matches without meaningful evidence
  */
 export function shouldPersistIdentity(breakdown: ScoreBreakdown): boolean {
@@ -328,6 +339,14 @@ export function shouldPersistIdentity(breakdown: ScoreBreakdown): boolean {
 
   // If we have bridge evidence (LinkedIn link), always persist
   if (breakdown.bridgeWeight > 0) {
+    return true;
+  }
+
+  // Handle match: strong signal for handle-based platforms (github, npm, pypi, etc.)
+  // Exact match gives handleMatch=1.0, variant match gives 0.4-0.9
+  // Allow persistence if handleMatch >= 0.25 (covers derived variants)
+  const hasHandleMatch = (breakdown.handleMatch ?? 0) >= 0.25;
+  if (hasHandleMatch) {
     return true;
   }
 

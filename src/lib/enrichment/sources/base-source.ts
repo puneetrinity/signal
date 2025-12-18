@@ -21,13 +21,59 @@ import type {
   SourceHealthCheck,
   ScoreBreakdown,
   EvidencePointer,
+  PlatformDiagnostics,
+  QueryCandidate,
 } from './types';
+import { inferQueryMode } from './types';
 import {
-  searchForPlatform,
+  searchForPlatformWithMeta,
   buildQueryFromPattern,
   type EnrichmentSearchResult,
+  getEnrichmentProviderConfig,
 } from './search-executor';
 import { checkProvidersHealth } from '@/lib/search/providers';
+import { validateQuery, generateHandleVariants } from './handle-variants';
+
+/** Maximum rejection reasons to store in diagnostics */
+const MAX_REJECTION_REASONS = 10;
+
+/**
+ * Query normalization (Phase B3)
+ * Best-effort recall boost for names with diacritics/punctuation.
+ *
+ * Controlled via ENRICHMENT_ENABLE_QUERY_NORMALIZATION (default: true).
+ * Only applied to name-mode queries and only when the initial query returns 0 matched results.
+ */
+function isQueryNormalizationEnabled(): boolean {
+  return process.env.ENRICHMENT_ENABLE_QUERY_NORMALIZATION !== 'false';
+}
+
+function shouldTryNormalizeQuery(query: string): boolean {
+  // Any non-ASCII characters (e.g., Löf) or common curly punctuation.
+  return /[^\u0000-\u007F]/.test(query) || /[“”‘’–—]/.test(query);
+}
+
+function foldDiacritics(text: string): string {
+  // NFKD splits diacritics into combining marks; strip those marks.
+  return text.normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
+}
+
+function normalizeQuotedPunctuation(text: string): string {
+  // Only normalize within quoted phrases to avoid breaking URL/site: syntax.
+  return text.replace(/"([^"]+)"/g, (_match, inner: string) => {
+    const normalized = inner
+      .replace(/[“”]/g, '"')
+      .replace(/[‘’]/g, "'")
+      .replace(/[-–—_.]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return `"${normalized}"`;
+  });
+}
+
+function normalizeNameModeQuery(query: string): string {
+  return normalizeQuotedPunctuation(foldDiacritics(query));
+}
 
 /**
  * Default discovery options
@@ -118,7 +164,14 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
   abstract readonly queryPattern: string;
 
   /**
-   * Build search queries for this platform
+   * Build query candidates with mode metadata (Phase B)
+   * Override this in subclasses to provide typed candidates.
+   * If not implemented, discover() will fall back to buildQueries() with mode inference.
+   */
+  buildQueryCandidates?(hints: CandidateHints, maxQueries?: number): QueryCandidate[];
+
+  /**
+   * Build search queries for this platform (legacy)
    * Can be overridden for platform-specific query construction
    */
   buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
@@ -238,6 +291,40 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
     const companyMatch = calculateCompanyMatch(companyHint, profileInfo.company);
     const locationMatch = calculateLocationMatch(hints.locationHint, profileInfo.location);
 
+    // Handle match: compare platformId against linkedinId and variants
+    // Strong signal for handle-based platforms (github, npm, pypi, gitlab, etc.)
+    let handleMatch = 0;
+    if (result.platformId && hints.linkedinId) {
+      const platformIdLower = result.platformId.toLowerCase();
+      const linkedinIdLower = hints.linkedinId.toLowerCase();
+
+      // Exact match is strongest signal
+      if (platformIdLower === linkedinIdLower) {
+        handleMatch = 1.0;
+      } else {
+        // Check against generated handle variants
+        const variants = generateHandleVariants(hints.linkedinId, hints.nameHint, 5);
+        for (const variant of variants) {
+          if (variant.handle === platformIdLower) {
+            // Use variant confidence (0.4-0.9 range)
+            handleMatch = variant.confidence;
+            break;
+          }
+        }
+      }
+
+      // Reduce weight for non-profile URLs (repos, groups, orgs)
+      // GitLab groups: gitlab.com/groups/xxx, repos: gitlab.com/user/repo
+      const url = result.platformProfileUrl || result.url || '';
+      if (
+        url.includes('/groups/') ||
+        url.includes('/projects/') ||
+        (url.includes('/') && url.split('/').filter(Boolean).length > 4)
+      ) {
+        handleMatch *= 0.5; // Reduce for non-profile URLs
+      }
+    }
+
     // Profile completeness (0-1)
     const completenessFactors = [
       profileInfo.name ? 1 : 0,
@@ -259,13 +346,15 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
     // Bridge weight (profile link to LinkedIn is strongest signal)
     const bridgeWeight = hasBridgeEvidence ? 0.4 : 0;
 
-    // Calculate base score from signals (not multiplied by baseWeight)
-    // Weights sum to 1.0: bridge(0.4) + name(0.3) + company(0.15) + location(0.1) + profile(0.05)
+    // Calculate base score from signals
+    // handleMatch provides strong signal for handle-based platforms when name matching fails
+    // Exact handle match (0.35) reliably clears 0.35 threshold
     const baseScore =
       bridgeWeight +
-      nameMatch * 0.3 +
-      companyMatch * 0.15 +
-      locationMatch * 0.1 +
+      nameMatch * 0.25 +
+      handleMatch * 0.35 +
+      companyMatch * 0.10 +
+      locationMatch * 0.05 +
       (profileCompleteness * 0.5 + activityScore * 0.5) * 0.05;
 
     // Platform weight is used as a small bonus for more reliable platforms, not a multiplier
@@ -277,6 +366,7 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
     return {
       bridgeWeight,
       nameMatch,
+      handleMatch,
       companyMatch,
       locationMatch,
       profileCompleteness,
@@ -363,6 +453,7 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
 
   /**
    * Main discovery method - discovers identities from search results
+   * Phase B: Now uses QueryCandidate with validation gate
    */
   async discover(
     hints: CandidateHints,
@@ -374,10 +465,28 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
     const searchQueries: string[] = [];
     let queriesExecuted = 0;
 
-    // Build queries
-    const queries = this.buildQueries(hints, opts.maxQueries);
+    // Diagnostics tracking
+    const config = getEnrichmentProviderConfig();
+    let totalRawResults = 0;
+    let totalMatchedResults = 0;
+    let wasRateLimited = false;
+    let identitiesAboveThreshold = 0;
+    let queriesRejected = 0;
+    const rejectionReasons: string[] = [];
+    const variantsExecuted: string[] = [];
+    const variantsRejected: string[] = [];
+    let lastProvider: string = config.primary;
 
-    if (queries.length === 0) {
+    // Get query candidates - use new interface if available, else convert legacy
+    const candidates: QueryCandidate[] = this.buildQueryCandidates
+      ? this.buildQueryCandidates(hints, opts.maxQueries)
+      : this.buildQueries(hints, opts.maxQueries).map(query => ({
+          query,
+          mode: inferQueryMode(query),
+          variantId: 'legacy',
+        }));
+
+    if (candidates.length === 0) {
       console.log(`[${this.displayName}] No queries to execute for ${hints.linkedinId}`);
       return {
         platform: this.platform,
@@ -386,22 +495,105 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
         searchQueries: [],
         durationMs: Date.now() - startTime,
         error: 'no_queries',
+        diagnostics: {
+          queriesAttempted: 0,
+          queriesRejected: 0,
+          rejectionReasons: [],
+          variantsExecuted: [],
+          variantsRejected: [],
+          rawResultCount: 0,
+          matchedResultCount: 0,
+          identitiesAboveThreshold: 0,
+          rateLimited: false,
+          provider: config.primary,
+        },
       };
     }
 
     const seenIds = new Set<string>();
 
-    // Execute queries
-    for (const query of queries) {
+    // Execute validated queries
+    for (const candidate of candidates) {
+      // Enforce max query budget per platform (normalization may add an extra query)
+      if (queriesExecuted >= opts.maxQueries) {
+        console.log(
+          `[${this.displayName}] Budget reached (${opts.maxQueries} queries), stopping for ${hints.linkedinId}`
+        );
+        break;
+      }
+
+      // Validation gate - reject bad queries before wasting budget
+      const validation = validateQuery(this.platform, candidate.query, hints, candidate.mode);
+      if (!validation.valid) {
+        queriesRejected++;
+        if (rejectionReasons.length < MAX_REJECTION_REASONS) {
+          const reason = `${candidate.mode}:${validation.reason || 'unknown'}`;
+          rejectionReasons.push(reason);
+        }
+        // Track rejected variant for canonical aggregation
+        if (candidate.variantId) {
+          variantsRejected.push(candidate.variantId);
+        }
+        console.log(
+          `[${this.displayName}] Query rejected (${candidate.mode}): "${candidate.query}" - ${validation.reason}`
+        );
+        continue;
+      }
+
       try {
-        queriesExecuted++;
-        searchQueries.push(query);
+        const runSearch = async (
+          query: string,
+          variantId: string | undefined,
+          mode: typeof candidate.mode
+        ) => {
+          queriesExecuted++;
+          searchQueries.push(query);
+          if (variantId) variantsExecuted.push(variantId);
 
-        console.log(`[${this.displayName}] Query ${queriesExecuted}/${queries.length}: "${query}"`);
+          console.log(
+            `[${this.displayName}] Query ${queriesExecuted}/${opts.maxQueries}: "${query}" [${mode}]${variantId ? ` (${variantId})` : ''}`
+          );
 
-        const results = await searchForPlatform(this.platform, query, opts.maxResults);
+          const searchResult = await searchForPlatformWithMeta(this.platform, query, opts.maxResults);
+          totalRawResults += searchResult.rawResultCount;
+          totalMatchedResults += searchResult.matchedResultCount;
+          lastProvider = searchResult.provider;
+          if (searchResult.rateLimited) wasRateLimited = true;
 
-        for (const result of results) {
+          return searchResult;
+        };
+
+        // Execute primary query
+        let searchResult = await runSearch(candidate.query, candidate.variantId, candidate.mode);
+
+        // Phase B3: If name-mode query returns 0 matched results and looks non-ASCII/punctuated,
+        // try a normalized variant (diacritics folded + punctuation normalized in quoted phrases).
+        if (
+          isQueryNormalizationEnabled() &&
+          candidate.mode === 'name' &&
+          searchResult.matchedResultCount === 0 &&
+          shouldTryNormalizeQuery(candidate.query) &&
+          queriesExecuted < opts.maxQueries
+        ) {
+          const normalizedQuery = normalizeNameModeQuery(candidate.query);
+          if (normalizedQuery !== candidate.query) {
+            const normalizedVariantId = candidate.variantId
+              ? `${candidate.variantId}_folded`
+              : 'name:full_folded';
+            const normalizedResult = await runSearch(normalizedQuery, normalizedVariantId, candidate.mode);
+
+            // Prefer the result set that produces more platform-matched URLs.
+            if (
+              normalizedResult.matchedResultCount > searchResult.matchedResultCount ||
+              (normalizedResult.matchedResultCount === searchResult.matchedResultCount &&
+                normalizedResult.rawResultCount > searchResult.rawResultCount)
+            ) {
+              searchResult = normalizedResult;
+            }
+          }
+        }
+
+        for (const result of searchResult.results) {
           if (!result.platformId) continue;
 
           // Skip duplicates
@@ -421,6 +613,8 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
             );
             continue;
           }
+
+          identitiesAboveThreshold++;
 
           // Detect contradictions
           const contradictions = this.detectContradictions(hints, profileInfo);
@@ -459,14 +653,33 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
         }
       } catch (error) {
         console.error(
-          `[${this.displayName}] Query failed: "${query}"`,
+          `[${this.displayName}] Query failed: "${candidate.query}"`,
           error instanceof Error ? error.message : error
         );
+        // Check for rate limiting in error
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        if (/rate.?limit|429|too many requests/i.test(errorMsg)) {
+          wasRateLimited = true;
+        }
       }
     }
 
     // Sort by confidence
     identities.sort((a, b) => b.confidence - a.confidence);
+
+    // Build diagnostics with accurate rejection tracking and variant info
+    const diagnostics: PlatformDiagnostics = {
+      queriesAttempted: candidates.length,
+      queriesRejected,
+      rejectionReasons,
+      variantsExecuted,
+      variantsRejected,
+      rawResultCount: totalRawResults,
+      matchedResultCount: totalMatchedResults,
+      identitiesAboveThreshold,
+      rateLimited: wasRateLimited,
+      provider: lastProvider,
+    };
 
     const result: BridgeDiscoveryResult = {
       platform: this.platform,
@@ -474,10 +687,11 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
       queriesExecuted,
       searchQueries,
       durationMs: Date.now() - startTime,
+      diagnostics,
     };
 
     console.log(
-      `[${this.displayName}] Completed for ${hints.linkedinId}: ${identities.length} identities, ${queriesExecuted} queries, ${result.durationMs}ms`
+      `[${this.displayName}] Completed for ${hints.linkedinId}: ${identities.length} identities, ${queriesExecuted} queries (${queriesRejected} rejected), ${result.durationMs}ms (raw: ${totalRawResults}, matched: ${totalMatchedResults})`
     );
 
     return result;

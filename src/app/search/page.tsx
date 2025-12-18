@@ -7,6 +7,7 @@ import { SearchBar } from '@/components/SearchBar';
 import { LoadingState } from '@/components/LoadingState';
 import ProfileSummaryCard from '@/components/ProfileSummaryCard';
 import { ApiKeySettings } from '@/components/ApiKeySettings';
+import { Header } from '@/components/Header';
 import type { ProfileSummary } from '@/types/linkedin';
 
 interface SearchMetadata {
@@ -90,14 +91,16 @@ function SearchContent() {
   }, [query]);
 
   return (
-    <div className="min-h-screen px-4 py-8 pt-24">
-      <div className="mx-auto max-w-7xl">
+    <>
+      <Header />
+      <div className="min-h-screen px-4 py-8 pt-24">
+        <div className="mx-auto max-w-7xl">
         <div className="mb-8 flex flex-col gap-4">
           <div className="flex items-center justify-between">
             <h1 className="text-3xl font-bold">Search Results</h1>
             <ApiKeySettings />
           </div>
-          <SearchBar onSearch={handleSearch} isLoading={isLoading} />
+          <SearchBar onSearch={handleSearch} isLoading={isLoading} value={query} />
         </div>
 
         {isLoading && (
@@ -129,7 +132,7 @@ function SearchContent() {
         {!isLoading && !error && summaries.length === 0 && query && (
           <div className="rounded-lg border border-muted bg-muted/30 p-12 text-center">
             <p className="text-lg text-muted-foreground">
-              No profiles found for &quot;{query}&quot;
+              No candidates found for &quot;{query}&quot;
             </p>
           </div>
         )}
@@ -139,7 +142,7 @@ function SearchContent() {
             <div className="mb-4 flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground">
               <span>
                 Showing {summaries.length}{' '}
-                {summaries.length === 1 ? 'profile summary' : 'profile summaries'}
+                {summaries.length === 1 ? 'candidate' : 'candidates'}
               </span>
               <span>
                 {metadata.cached ? 'Served from cache' : 'Fresh search'}{' '}
@@ -155,8 +158,9 @@ function SearchContent() {
             </div>
           </>
         )}
+        </div>
       </div>
-    </div>
+    </>
   );
 }
 

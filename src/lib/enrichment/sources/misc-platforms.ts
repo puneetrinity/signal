@@ -13,9 +13,10 @@
  */
 
 import type { RoleType } from '@/types/linkedin';
-import type { EnrichmentPlatform, CandidateHints } from './types';
+import type { EnrichmentPlatform, CandidateHints, QueryCandidate } from './types';
 import { BaseEnrichmentSource } from './base-source';
 import type { EnrichmentSearchResult } from './search-executor';
+import { generateHandleVariants } from './handle-variants';
 
 /**
  * HackerEarth Source
@@ -30,6 +31,45 @@ class HackerEarthSource extends BaseEnrichmentSource {
 
   protected getSiteDomain(): string {
     return 'hackerearth.com';
+  }
+
+  buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
+
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+    const variants = generateHandleVariants(hints.linkedinId, hints.nameHint, 2);
+
+    // HANDLE_MODE: HackerEarth URLs are handle-based: hackerearth.com/@username
+    for (const variant of variants) {
+      if (candidates.length >= maxQueries) break;
+      candidates.push({
+        query: `site:hackerearth.com/@${variant.handle}`,
+        mode: 'handle',
+        variantId: variant.source === 'linkedinId' ? 'handle:clean' : 'handle:derived',
+      });
+    }
+
+    // NAME_MODE: Name search
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:hackerearth.com "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full',
+      });
+    }
+
+    // NAME + COMPANY
+    if (hints.nameHint && hints.companyHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:hackerearth.com "${hints.nameHint}" "${hints.companyHint}"`,
+        mode: 'name',
+        variantId: 'name+company',
+      });
+    }
+
+    return candidates.slice(0, maxQueries);
   }
 
   protected extractProfileInfo(result: EnrichmentSearchResult) {
@@ -70,19 +110,42 @@ class GistSource extends BaseEnrichmentSource {
   }
 
   buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
-    const queries: string[] = [];
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
 
-    // Search for gists by name
-    if (hints.nameHint) {
-      queries.push(`site:gist.github.com "${hints.nameHint}"`);
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+    const variants = generateHandleVariants(hints.linkedinId, hints.nameHint, 2);
+
+    // HANDLE_MODE: Gist URLs are handle-based: gist.github.com/username
+    for (const variant of variants) {
+      if (candidates.length >= maxQueries) break;
+      candidates.push({
+        query: `site:gist.github.com/${variant.handle}`,
+        mode: 'handle',
+        variantId: variant.source === 'linkedinId' ? 'handle:clean' : 'handle:derived',
+      });
     }
 
-    // Search for gists mentioning company
-    if (hints.nameHint && hints.companyHint && queries.length < maxQueries) {
-      queries.push(`site:gist.github.com "${hints.nameHint}" "${hints.companyHint}"`);
+    // NAME_MODE: Search for gists by name
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:gist.github.com "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full',
+      });
     }
 
-    return queries.slice(0, maxQueries);
+    // NAME + COMPANY
+    if (hints.nameHint && hints.companyHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:gist.github.com "${hints.nameHint}" "${hints.companyHint}"`,
+        mode: 'name',
+        variantId: 'name+company',
+      });
+    }
+
+    return candidates.slice(0, maxQueries);
   }
 
   protected extractProfileInfo(result: EnrichmentSearchResult) {
@@ -119,24 +182,40 @@ class OpenReviewSource extends BaseEnrichmentSource {
   }
 
   buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
-    const queries: string[] = [];
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
 
-    // Author profile search
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+
+    // NAME_MODE: Author profile search
     if (hints.nameHint) {
-      queries.push(`site:openreview.net/profile "${hints.nameHint}"`);
+      candidates.push({
+        query: `site:openreview.net/profile "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:profile',
+      });
     }
 
-    // Paper author search
-    if (hints.nameHint && queries.length < maxQueries) {
-      queries.push(`site:openreview.net "${hints.nameHint}" author`);
+    // NAME_MODE: Paper author search
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:openreview.net "${hints.nameHint}" author`,
+        mode: 'name',
+        variantId: 'name:author',
+      });
     }
 
-    // Name + institution
-    if (hints.nameHint && hints.companyHint && queries.length < maxQueries) {
-      queries.push(`site:openreview.net "${hints.nameHint}" "${hints.companyHint}"`);
+    // NAME + INSTITUTION
+    if (hints.nameHint && hints.companyHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:openreview.net "${hints.nameHint}" "${hints.companyHint}"`,
+        mode: 'name',
+        variantId: 'name+company',
+      });
     }
 
-    return queries.slice(0, maxQueries);
+    return candidates.slice(0, maxQueries);
   }
 
   protected extractProfileInfo(result: EnrichmentSearchResult) {
@@ -189,34 +268,40 @@ class UniversitySource extends BaseEnrichmentSource {
   }
 
   buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
-    const queries: string[] = [];
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
 
-    // Faculty search across .edu and .ac.uk domains
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+
+    // NAME_MODE: Faculty search across .edu and .ac.uk domains
     if (hints.nameHint) {
-      queries.push(`"${hints.nameHint}" (site:edu OR site:ac.uk) (professor OR faculty OR researcher)`);
+      candidates.push({
+        query: `"${hints.nameHint}" (site:edu OR site:ac.uk)`,
+        mode: 'name',
+        variantId: 'name:edu',
+      });
     }
 
-    // Name + institution (if we know it)
-    if (hints.nameHint && hints.companyHint && queries.length < maxQueries) {
-      // Check if company looks like a university
-      const isUni = /university|college|institute|school/i.test(hints.companyHint);
-      if (isUni) {
-        queries.push(`"${hints.nameHint}" site:${hints.companyHint.toLowerCase().replace(/\s+/g, '')}.edu`);
-      } else {
-        queries.push(`"${hints.nameHint}" (site:edu OR site:ac.uk) "${hints.companyHint}"`);
-      }
+    // NAME + INSTITUTION
+    if (hints.nameHint && hints.companyHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `"${hints.nameHint}" (site:edu OR site:ac.uk) "${hints.companyHint}"`,
+        mode: 'name',
+        variantId: 'name:edu+company',
+      });
     }
 
-    // Research area search
-    if (hints.nameHint && hints.headlineHint && queries.length < maxQueries) {
-      // Extract potential research area from headline
-      const areaMatch = hints.headlineHint.match(/(?:professor|researcher|scientist)\s+(?:of|in)?\s*([A-Za-z\s]+)/i);
-      if (areaMatch) {
-        queries.push(`"${hints.nameHint}" (site:edu OR site:ac.uk) ${areaMatch[1].trim()}`);
-      }
+    // NAME + LOCATION
+    if (hints.nameHint && hints.locationHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `"${hints.nameHint}" (site:edu OR site:ac.uk) "${hints.locationHint}"`,
+        mode: 'name',
+        variantId: 'name:edu+location',
+      });
     }
 
-    return queries.slice(0, maxQueries);
+    return candidates.slice(0, maxQueries);
   }
 
   protected extractProfileInfo(result: EnrichmentSearchResult) {
@@ -265,30 +350,45 @@ class CompanyTeamSource extends BaseEnrichmentSource {
   }
 
   buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
-    const queries: string[] = [];
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
 
-    // Team page search with company
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+
+    // NAME + COMPANY: Team page search with company domain guess
     if (hints.nameHint && hints.companyHint) {
-      // Clean company name for domain guessing
       const companyDomain = hints.companyHint
         .toLowerCase()
         .replace(/[^a-z0-9]/g, '')
         .substring(0, 20);
 
-      queries.push(`"${hints.nameHint}" site:${companyDomain}.com (team OR about OR leadership)`);
+      candidates.push({
+        query: `"${hints.nameHint}" site:${companyDomain}.com (team OR about OR leadership)`,
+        mode: 'name',
+        variantId: 'name:company_domain_guess',
+      });
     }
 
-    // General team page search
-    if (hints.nameHint && hints.companyHint && queries.length < maxQueries) {
-      queries.push(`"${hints.nameHint}" "${hints.companyHint}" (team page OR about us OR leadership)`);
+    // NAME + COMPANY: General team page search
+    if (hints.nameHint && hints.companyHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `"${hints.nameHint}" "${hints.companyHint}" (team page OR about us OR leadership)`,
+        mode: 'name',
+        variantId: 'name+company_team',
+      });
     }
 
-    // CTO/CEO specific search for founders
-    if (hints.nameHint && hints.companyHint && hints.roleType === 'founder' && queries.length < maxQueries) {
-      queries.push(`"${hints.nameHint}" "${hints.companyHint}" (CEO OR CTO OR founder OR co-founder)`);
+    // NAME + COMPANY (founder-specific): Executive search
+    if (hints.nameHint && hints.companyHint && hints.roleType === 'founder' && candidates.length < maxQueries) {
+      candidates.push({
+        query: `"${hints.nameHint}" "${hints.companyHint}" (CEO OR CTO OR founder OR co-founder)`,
+        mode: 'name',
+        variantId: 'name+company_exec',
+      });
     }
 
-    return queries.slice(0, maxQueries);
+    return candidates.slice(0, maxQueries);
   }
 
   protected extractProfileInfo(result: EnrichmentSearchResult) {
@@ -335,24 +435,42 @@ class AngelListSource extends BaseEnrichmentSource {
   }
 
   buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
-    const queries: string[] = [];
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
 
-    // Profile search
-    if (hints.nameHint) {
-      queries.push(`site:angel.co/u "${hints.nameHint}"`);
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+    const variants = generateHandleVariants(hints.linkedinId, hints.nameHint, 2);
+
+    // HANDLE_MODE: AngelList is handle-heavy: angel.co/u/username
+    for (const variant of variants) {
+      if (candidates.length >= maxQueries) break;
+      candidates.push({
+        query: `site:angel.co/u/${variant.handle}`,
+        mode: 'handle',
+        variantId: variant.source === 'linkedinId' ? 'handle:clean_user_path' : 'handle:derived',
+      });
     }
 
-    // Name + company (startup)
-    if (hints.nameHint && hints.companyHint && queries.length < maxQueries) {
-      queries.push(`site:angel.co "${hints.nameHint}" "${hints.companyHint}"`);
+    // NAME_MODE: Name-based search
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:angel.co "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full',
+      });
     }
 
-    // General AngelList search
-    if (hints.nameHint && queries.length < maxQueries) {
-      queries.push(`site:angel.co "${hints.nameHint}" founder`);
+    // NAME + COMPANY
+    if (hints.nameHint && hints.companyHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:angel.co "${hints.nameHint}" "${hints.companyHint}"`,
+        mode: 'name',
+        variantId: 'name+company',
+      });
     }
 
-    return queries.slice(0, maxQueries);
+    return candidates.slice(0, maxQueries);
   }
 
   protected extractProfileInfo(result: EnrichmentSearchResult) {

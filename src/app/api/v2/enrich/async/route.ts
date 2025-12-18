@@ -11,7 +11,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createEnrichmentSession } from '@/lib/enrichment/queue';
 import { withRateLimit, ENRICH_RATE_LIMIT, rateLimitHeaders } from '@/lib/rate-limit';
-import { withAuth } from '@/lib/auth';
+import { withAuth, requireTenantId } from '@/lib/auth';
 import type { RoleType } from '@/types/linkedin';
 import type { EnrichmentBudget } from '@/lib/enrichment/graph/types';
 
@@ -54,6 +54,7 @@ export async function POST(request: NextRequest) {
   if (!authCheck.authorized) {
     return authCheck.response;
   }
+  const tenantId = requireTenantId(authCheck.context);
 
   // Rate limit
   const rateLimitKey = authCheck.context.apiKeyId || undefined;
@@ -78,8 +79,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Create session and enqueue job
-    const { sessionId, jobId } = await createEnrichmentSession(candidateId, {
+    // Create session and enqueue job (tenant-scoped)
+    const { sessionId, jobId } = await createEnrichmentSession(tenantId, candidateId, {
       roleType,
       budget,
       priority,

@@ -7,9 +7,10 @@
  */
 
 import type { RoleType } from '@/types/linkedin';
-import type { EnrichmentPlatform, CandidateHints } from './types';
+import type { EnrichmentPlatform, CandidateHints, QueryCandidate } from './types';
 import { BaseEnrichmentSource } from './base-source';
 import type { EnrichmentSearchResult } from './search-executor';
+import { generateHandleVariants } from './handle-variants';
 
 /**
  * npm profile extraction
@@ -89,19 +90,52 @@ export class NpmSource extends BaseEnrichmentSource {
   }
 
   buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
-    const queries: string[] = [];
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
 
-    // Primary: Author profile search
-    if (hints.nameHint) {
-      queries.push(`site:npmjs.com/~ "${hints.nameHint}"`);
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+    const variants = generateHandleVariants(hints.linkedinId, hints.nameHint, 2);
+
+    // HANDLE_MODE: npm profile URLs are npmjs.com/~username
+    for (const variant of variants) {
+      if (candidates.length >= maxQueries) break;
+      candidates.push({
+        query: `site:npmjs.com/~${variant.handle}`,
+        mode: 'handle',
+        variantId: variant.source === 'linkedinId' ? 'handle:clean' : 'handle:derived',
+      });
     }
 
-    // Secondary: Package author search
-    if (hints.nameHint && queries.length < maxQueries) {
-      queries.push(`site:npmjs.com "${hints.nameHint}" author maintainer`);
+    // NAME_MODE: Package page search (surfaces packages by author)
+    if (hints.linkedinId && candidates.length < maxQueries) {
+      const cleanHandle = hints.linkedinId.replace(/-?\d+$/, '');
+      candidates.push({
+        query: `site:npmjs.com "${cleanHandle}"`,
+        mode: 'name',
+        variantId: 'handle:package_search',
+      });
     }
 
-    return queries.slice(0, maxQueries);
+    // NAME_MODE: Author search by name
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:npmjs.com "${hints.nameHint}" author`,
+        mode: 'name',
+        variantId: 'name:full_author',
+      });
+    }
+
+    // NAME + COMPANY: Better precision
+    if (hints.nameHint && hints.companyHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:npmjs.com "${hints.nameHint}" "${hints.companyHint}"`,
+        mode: 'name',
+        variantId: 'name+company',
+      });
+    }
+
+    return candidates.slice(0, maxQueries);
   }
 }
 
@@ -124,19 +158,42 @@ export class PyPISource extends BaseEnrichmentSource {
   }
 
   buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
-    const queries: string[] = [];
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
 
-    // Primary: User profile search
-    if (hints.nameHint) {
-      queries.push(`site:pypi.org/user "${hints.nameHint}"`);
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+    const variants = generateHandleVariants(hints.linkedinId, hints.nameHint, 2);
+
+    // HANDLE_MODE: PyPI profile URLs are handle-based: pypi.org/user/username
+    for (const variant of variants) {
+      if (candidates.length >= maxQueries) break;
+      candidates.push({
+        query: `site:pypi.org/user/${variant.handle}`,
+        mode: 'handle',
+        variantId: variant.source === 'linkedinId' ? 'handle:clean' : 'handle:derived',
+      });
     }
 
-    // Secondary: Package maintainer search
-    if (hints.nameHint && queries.length < maxQueries) {
-      queries.push(`site:pypi.org "${hints.nameHint}" maintainer author`);
+    // NAME_MODE: User profile search by name
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:pypi.org/user "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full_user_search',
+      });
     }
 
-    return queries.slice(0, maxQueries);
+    // NAME_MODE: Package maintainer search
+    if (hints.nameHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:pypi.org "${hints.nameHint}" maintainer author`,
+        mode: 'name',
+        variantId: 'name:full_maintainer',
+      });
+    }
+
+    return candidates.slice(0, maxQueries);
   }
 }
 

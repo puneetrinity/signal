@@ -12,7 +12,7 @@
  */
 
 import type { RoleType } from '@/types/linkedin';
-import type { EnrichmentPlatform, CandidateHints } from './types';
+import type { EnrichmentPlatform, CandidateHints, QueryCandidate } from './types';
 import { BaseEnrichmentSource } from './base-source';
 import type { EnrichmentSearchResult } from './search-executor';
 
@@ -200,6 +200,34 @@ export class OrcidSource extends BaseEnrichmentSource {
   protected extractProfileInfo(result: EnrichmentSearchResult) {
     return extractOrcidProfile(result);
   }
+
+  buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
+
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+
+    // NAME_MODE: Full name search (name-based platform)
+    if (hints.nameHint) {
+      candidates.push({
+        query: `site:orcid.org "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:full',
+      });
+    }
+
+    // NAME + COMPANY: Affiliation-based search
+    if (hints.nameHint && hints.companyHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:orcid.org "${hints.nameHint}" "${hints.companyHint}"`,
+        mode: 'name',
+        variantId: 'name+company',
+      });
+    }
+
+    return candidates.slice(0, maxQueries);
+  }
 }
 
 /**
@@ -221,19 +249,31 @@ export class ScholarSource extends BaseEnrichmentSource {
   }
 
   buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
-    const queries: string[] = [];
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
 
-    // Primary: Citation profile search
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+
+    // NAME_MODE: Citation profile search
     if (hints.nameHint) {
-      queries.push(`site:scholar.google.com/citations "${hints.nameHint}"`);
+      candidates.push({
+        query: `site:scholar.google.com/citations "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:citations',
+      });
     }
 
-    // Secondary: With affiliation
-    if (hints.nameHint && hints.companyHint && queries.length < maxQueries) {
-      queries.push(`site:scholar.google.com "${hints.nameHint}" "${hints.companyHint}"`);
+    // NAME + COMPANY: With affiliation
+    if (hints.nameHint && hints.companyHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:scholar.google.com "${hints.nameHint}" "${hints.companyHint}"`,
+        mode: 'name',
+        variantId: 'name+company',
+      });
     }
 
-    return queries.slice(0, maxQueries);
+    return candidates.slice(0, maxQueries);
   }
 }
 
@@ -254,6 +294,25 @@ export class SemanticScholarSource extends BaseEnrichmentSource {
   protected extractProfileInfo(result: EnrichmentSearchResult) {
     return extractSemanticScholarProfile(result);
   }
+
+  buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
+
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+
+    // NAME_MODE: Author profile search
+    if (hints.nameHint) {
+      candidates.push({
+        query: `site:semanticscholar.org/author "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:author',
+      });
+    }
+
+    return candidates.slice(0, maxQueries);
+  }
 }
 
 /**
@@ -272,6 +331,25 @@ export class ResearchGateSource extends BaseEnrichmentSource {
 
   protected extractProfileInfo(result: EnrichmentSearchResult) {
     return extractResearchGateProfile(result);
+  }
+
+  buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
+
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+
+    // NAME_MODE: Profile search
+    if (hints.nameHint) {
+      candidates.push({
+        query: `site:researchgate.net/profile "${hints.nameHint}"`,
+        mode: 'name',
+        variantId: 'name:profile',
+      });
+    }
+
+    return candidates.slice(0, maxQueries);
   }
 }
 
@@ -307,14 +385,22 @@ export class ArxivSource extends BaseEnrichmentSource {
   }
 
   buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
-    const queries: string[] = [];
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
 
-    // Primary: Author search
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+
+    // NAME_MODE: Author search
     if (hints.nameHint) {
-      queries.push(`site:arxiv.org "${hints.nameHint}" author`);
+      candidates.push({
+        query: `site:arxiv.org "${hints.nameHint}" author`,
+        mode: 'name',
+        variantId: 'name:author',
+      });
     }
 
-    return queries.slice(0, maxQueries);
+    return candidates.slice(0, maxQueries);
   }
 }
 
@@ -352,6 +438,34 @@ export class PatentsSource extends BaseEnrichmentSource {
       publicRepos: undefined,
       publications,
     };
+  }
+
+  buildQueries(hints: CandidateHints, maxQueries: number = 3): string[] {
+    return this.buildQueryCandidates(hints, maxQueries).map(c => c.query);
+  }
+
+  buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
+    const candidates: QueryCandidate[] = [];
+
+    // NAME_MODE: Inventor search
+    if (hints.nameHint) {
+      candidates.push({
+        query: `site:patents.google.com "${hints.nameHint}" inventor`,
+        mode: 'name',
+        variantId: 'name:inventor',
+      });
+    }
+
+    // NAME + COMPANY: Inventor + company
+    if (hints.nameHint && hints.companyHint && candidates.length < maxQueries) {
+      candidates.push({
+        query: `site:patents.google.com "${hints.nameHint}" "${hints.companyHint}" inventor`,
+        mode: 'name',
+        variantId: 'name+company_inventor',
+      });
+    }
+
+    return candidates.slice(0, maxQueries);
   }
 }
 

@@ -24,6 +24,7 @@ import {
   rateLimitHeaders,
 } from '@/lib/rate-limit';
 import { logSearch } from '@/lib/audit';
+import { withAuth, requireTenantId } from '@/lib/auth';
 
 /**
  * Search result with candidate ID for API response
@@ -101,12 +102,12 @@ function parseLocationHint(snippet: string): string | undefined {
 }
 
 /**
- * Check DB cache for search results
+ * Check DB cache for search results (tenant-scoped)
  */
-async function getCachedResults(queryHash: string) {
+async function getCachedResults(tenantId: string, queryHash: string) {
   try {
     const cached = await prisma.searchCacheV2.findUnique({
-      where: { queryHash },
+      where: { tenantId_queryHash: { tenantId, queryHash } },
     });
 
     if (cached && cached.expiresAt > new Date()) {
@@ -115,7 +116,9 @@ async function getCachedResults(queryHash: string) {
 
     // Clean up expired cache entry
     if (cached) {
-      await prisma.searchCacheV2.delete({ where: { queryHash } }).catch(() => {});
+      await prisma.searchCacheV2.delete({
+        where: { tenantId_queryHash: { tenantId, queryHash } },
+      }).catch(() => {});
     }
 
     return null;
@@ -126,9 +129,10 @@ async function getCachedResults(queryHash: string) {
 }
 
 /**
- * Save search results to DB cache
+ * Save search results to DB cache (tenant-scoped)
  */
 async function cacheResults(
+  tenantId: string,
   queryHash: string,
   queryText: string,
   parsedQuery: object,
@@ -139,7 +143,7 @@ async function cacheResults(
     const expiresAt = new Date(Date.now() + CACHE_TTL_SECONDS * 1000);
 
     await prisma.searchCacheV2.upsert({
-      where: { queryHash },
+      where: { tenantId_queryHash: { tenantId, queryHash } },
       update: {
         parsedQuery,
         results,
@@ -148,6 +152,7 @@ async function cacheResults(
         expiresAt,
       },
       create: {
+        tenantId,
         queryHash,
         queryText,
         parsedQuery,
@@ -163,10 +168,11 @@ async function cacheResults(
 }
 
 /**
- * Create or update Candidate records from search results
+ * Create or update Candidate records from search results (tenant-scoped)
  * Returns a map of linkedinId -> candidateId for reliable joining
  */
 async function upsertCandidates(
+  tenantId: string,
   results: ProfileSummary[],
   searchQuery: string,
   roleType: string | null,
@@ -183,7 +189,7 @@ async function upsertCandidates(
 
     try {
       const candidate = await prisma.candidate.upsert({
-        where: { linkedinId },
+        where: { tenantId_linkedinId: { tenantId, linkedinId } },
         update: {
           // Update search metadata if this is a new search
           searchTitle: result.title,
@@ -196,6 +202,7 @@ async function upsertCandidates(
           updatedAt: new Date(),
         },
         create: {
+          tenantId,
           linkedinUrl: result.linkedinUrl,
           linkedinId,
           searchTitle: result.title,
@@ -254,6 +261,13 @@ async function logSearchAction(
 }
 
 export async function POST(request: NextRequest) {
+  // Auth check - requires authenticated user with org
+  const authResult = await withAuth('recruiter');
+  if (!authResult.authorized) {
+    return authResult.response;
+  }
+  const tenantId = requireTenantId(authResult.context);
+
   // Rate limit check
   const rateLimitCheck = await withRateLimit(SEARCH_RATE_LIMIT);
   if (!rateLimitCheck.allowed) {
@@ -279,12 +293,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    console.log('[v2/search] Query:', query);
+    console.log(`[v2/search] Query: ${query} (tenant: ${tenantId})`);
 
     const queryHash = hashQuery(query);
 
-    // Check cache first
-    const cached = await getCachedResults(queryHash);
+    // Check cache first (tenant-scoped)
+    const cached = await getCachedResults(tenantId, queryHash);
     if (cached) {
       console.log('[v2/search] Cache HIT');
 
@@ -327,8 +341,9 @@ export async function POST(request: NextRequest) {
     const { results: summaries, providerUsed, usedFallback } = searchResult;
     console.log(`[v2/search] Found ${summaries.length} results from ${providerUsed}${usedFallback ? ' (fallback)' : ''}`);
 
-    // Save results as Candidate records - returns map for reliable joining
+    // Save results as Candidate records (tenant-scoped) - returns map for reliable joining
     const candidateMap = await upsertCandidates(
+      tenantId,
       summaries,
       query,
       parsedQuery.roleType || null,
@@ -340,8 +355,8 @@ export async function POST(request: NextRequest) {
     // Join results with candidate IDs by linkedinId (not by index)
     const resultsWithIds = joinResultsWithCandidates(summaries, candidateMap);
 
-    // Cache resultsWithIds (not raw summaries) for consistent response shape
-    await cacheResults(queryHash, query, parsedQuery, resultsWithIds, providerUsed);
+    // Cache resultsWithIds (tenant-scoped) for consistent response shape
+    await cacheResults(tenantId, queryHash, query, parsedQuery, resultsWithIds, providerUsed);
 
     // Log search action with actual provider used
     await logSearchAction(query, summaries.length, false, providerUsed);

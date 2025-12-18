@@ -23,7 +23,9 @@ import {
   rateLimitHeaders,
 } from '@/lib/rate-limit';
 import { logIdentityAction } from '@/lib/audit';
-import { withAuth } from '@/lib/auth';
+import { withAuth, requireTenantId } from '@/lib/auth';
+import { createSummaryOnlySession } from '@/lib/enrichment/queue';
+import type { EnrichmentRunTrace } from '@/lib/enrichment/graph/types';
 
 /**
  * Confirmation method types
@@ -48,6 +50,109 @@ async function logConfirmAction(
     candidateId,
     metadata
   );
+}
+
+/**
+ * Check if LangGraph enrichment is enabled
+ */
+function isLangGraphEnabled(): boolean {
+  return process.env.USE_LANGGRAPH_ENRICHMENT === 'true';
+}
+
+/**
+ * Check if summary is stale and trigger regeneration if needed.
+ * Returns regeneration info or null if not needed.
+ */
+async function checkAndTriggerSummaryRegeneration(
+  tenantId: string,
+  candidateId: string
+): Promise<{ sessionId: string; jobId: string; reason: string } | null> {
+  // Only auto-trigger if LangGraph is enabled
+  if (!isLangGraphEnabled()) {
+    return null;
+  }
+
+  try {
+    // Get current confirmed identities
+    const confirmedIdentities = await prisma.confirmedIdentity.findMany({
+      where: { candidateId },
+      select: { platform: true, platformId: true },
+      orderBy: [{ platform: 'asc' }, { platformId: 'asc' }],
+    });
+
+    if (confirmedIdentities.length === 0) {
+      return null;
+    }
+
+    // Compute current identity key (same format as summary generator)
+    const currentIdentityKey = confirmedIdentities
+      .map((ci) => `${ci.platform}:${ci.platformId}`)
+      .join('|');
+
+    // Get the latest completed session for this candidate
+    const latestSession = await prisma.enrichmentSession.findFirst({
+      where: {
+        candidateId,
+        status: 'completed',
+        summary: { not: null },
+      },
+      orderBy: { completedAt: 'desc' },
+      select: { id: true, runTrace: true },
+    });
+
+    // Check if summary exists and if it's stale
+    if (latestSession?.runTrace) {
+      const runTrace = latestSession.runTrace as unknown as EnrichmentRunTrace;
+      const summaryMeta = runTrace.final?.summaryMeta;
+
+      if (summaryMeta?.identityKey === currentIdentityKey && summaryMeta?.mode === 'verified') {
+        // Summary is up-to-date with verified status
+        console.log(
+          `[v2/identity/confirm] Summary already verified with matching identity key`
+        );
+        return null;
+      }
+
+      // Determine staleness reason
+      let reason: string;
+      if (!summaryMeta) {
+        reason = 'no_summary_meta';
+      } else if (summaryMeta.mode !== 'verified') {
+        reason = 'summary_is_draft';
+      } else {
+        reason = 'identity_set_changed';
+      }
+
+      console.log(
+        `[v2/identity/confirm] Summary stale (${reason}), triggering regeneration`
+      );
+
+      // Trigger summary-only regeneration (tenant-scoped)
+      const { sessionId, jobId } = await createSummaryOnlySession(tenantId, candidateId, {
+        priority: 5, // Higher priority for user-triggered actions
+      });
+
+      return { sessionId, jobId, reason };
+    }
+
+    // No existing summary, trigger one if we have confirmed identities
+    console.log(
+      `[v2/identity/confirm] No existing summary, triggering verified summary generation`
+    );
+
+    const { sessionId, jobId } = await createSummaryOnlySession(tenantId, candidateId, {
+      priority: 5,
+    });
+
+    return { sessionId, jobId, reason: 'no_existing_summary' };
+  } catch (error) {
+    console.error(
+      '[v2/identity/confirm] Error checking/triggering summary regeneration:',
+      error
+    );
+    // Don't fail the confirmation if regeneration fails
+    return null;
+  }
 }
 
 /**
@@ -107,6 +212,7 @@ export async function POST(request: NextRequest) {
   if (!authCheck.authorized) {
     return authCheck.response;
   }
+  const tenantId = requireTenantId(authCheck.context);
 
   // Rate limit by API key if authenticated, otherwise by IP
   const rateLimitKey = authCheck.context.apiKeyId || undefined;
@@ -137,9 +243,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Fetch identity candidate
-    const identityCandidate = await prisma.identityCandidate.findUnique({
-      where: { id: identityCandidateId },
+    // Fetch identity candidate - must belong to tenant
+    const identityCandidate = await prisma.identityCandidate.findFirst({
+      where: { id: identityCandidateId, tenantId },
     });
 
     if (!identityCandidate) {
@@ -175,10 +281,12 @@ export async function POST(request: NextRequest) {
     }
 
     // Create confirmed identity
-    const confirmedBy = `recruiter:${method}`; // TODO: Add user ID when auth is implemented
+    const userId = authCheck.context.userId;
+    const confirmedBy = userId ? `recruiter:${userId}:${method}` : `recruiter:${method}`;
 
     const confirmedIdentity = await prisma.confirmedIdentity.create({
       data: {
+        tenantId,
         candidateId: identityCandidate.candidateId,
         platform: identityCandidate.platform,
         platformId: identityCandidate.platformId,
@@ -231,6 +339,12 @@ export async function POST(request: NextRequest) {
       `[v2/identity/confirm] Confirmed ${identityCandidate.platform}:${identityCandidate.platformId} for candidate ${identityCandidate.candidateId}`
     );
 
+    // Check if summary needs regeneration and trigger if needed (tenant-scoped)
+    const summaryRegeneration = await checkAndTriggerSummaryRegeneration(
+      tenantId,
+      identityCandidate.candidateId
+    );
+
     return NextResponse.json(
       {
         success: true,
@@ -246,6 +360,14 @@ export async function POST(request: NextRequest) {
         candidate: {
           id: identityCandidate.candidateId,
         },
+        summaryRegeneration: summaryRegeneration
+          ? {
+              triggered: true,
+              sessionId: summaryRegeneration.sessionId,
+              jobId: summaryRegeneration.jobId,
+              reason: summaryRegeneration.reason,
+            }
+          : { triggered: false },
         timestamp: Date.now(),
       },
       {
@@ -291,6 +413,7 @@ export async function DELETE(request: NextRequest) {
   if (!authCheck.authorized) {
     return authCheck.response;
   }
+  const tenantId = requireTenantId(authCheck.context);
 
   // Rate limit by API key if authenticated, otherwise by IP
   const rateLimitKey = authCheck.context.apiKeyId || undefined;
@@ -314,9 +437,9 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    // Fetch identity candidate
-    const identityCandidate = await prisma.identityCandidate.findUnique({
-      where: { id: identityCandidateId },
+    // Fetch identity candidate - must belong to tenant
+    const identityCandidate = await prisma.identityCandidate.findFirst({
+      where: { id: identityCandidateId, tenantId },
     });
 
     if (!identityCandidate) {

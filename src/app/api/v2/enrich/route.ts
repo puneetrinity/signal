@@ -27,7 +27,7 @@ import {
   ENRICH_RATE_LIMIT,
   rateLimitHeaders,
 } from '@/lib/rate-limit';
-import { withAuth } from '@/lib/auth';
+import { withAuth, requireTenantId } from '@/lib/auth';
 
 /**
  * POST /api/v2/enrich
@@ -45,6 +45,7 @@ export async function POST(request: NextRequest) {
   if (!authCheck.authorized) {
     return authCheck.response;
   }
+  const tenantId = requireTenantId(authCheck.context);
 
   // Rate limit by API key if authenticated, otherwise by IP
   const rateLimitKey = authCheck.context.apiKeyId || undefined;
@@ -58,8 +59,11 @@ export async function POST(request: NextRequest) {
     const { candidateId, candidateIds, options = {} } = body as {
       candidateId?: string;
       candidateIds?: string[];
-      options?: EnrichmentOptions;
+      options?: Omit<EnrichmentOptions, 'tenantId'>;
     };
+
+    // Merge tenantId into options
+    const enrichmentOptions: EnrichmentOptions = { ...options, tenantId };
 
     // Validate input
     if (!candidateId && (!candidateIds || candidateIds.length === 0)) {
@@ -79,9 +83,9 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      console.log(`[v2/enrich] Batch enrichment for ${candidateIds.length} candidates`);
+      console.log(`[v2/enrich] Batch enrichment for ${candidateIds.length} candidates (tenant: ${tenantId})`);
 
-      const results = await enrichCandidates(candidateIds, options);
+      const results = await enrichCandidates(candidateIds, enrichmentOptions);
 
       const summary = {
         total: results.length,
@@ -105,9 +109,9 @@ export async function POST(request: NextRequest) {
     }
 
     // Single candidate mode
-    console.log(`[v2/enrich] Single enrichment for candidate: ${candidateId}`);
+    console.log(`[v2/enrich] Single enrichment for candidate: ${candidateId} (tenant: ${tenantId})`);
 
-    const result = await enrichCandidate(candidateId!, options);
+    const result = await enrichCandidate(candidateId!, enrichmentOptions);
 
     // Fetch the stored identity candidates for the response
     const identityCandidates = await getIdentityCandidates(candidateId!);
@@ -162,19 +166,26 @@ export async function POST(request: NextRequest) {
  * Get existing identity candidates for a candidate, or health check.
  *
  * Query params:
- * - candidateId: Get identities for this candidate
- * - (none): Return health check
+ * - candidateId: Get identities for this candidate (requires auth + tenant)
+ * - (none): Return health check (public)
  */
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const candidateId = searchParams.get('candidateId');
 
-  // If candidateId provided, return identity candidates
+  // If candidateId provided, return identity candidates (requires auth)
   if (candidateId) {
+    // Auth check - authenticated users only
+    const authCheck = await withAuth('authenticated');
+    if (!authCheck.authorized) {
+      return authCheck.response;
+    }
+    const tenantId = requireTenantId(authCheck.context);
+
     try {
-      // Verify candidate exists
-      const candidate = await prisma.candidate.findUnique({
-        where: { id: candidateId },
+      // Verify candidate exists and belongs to tenant
+      const candidate = await prisma.candidate.findFirst({
+        where: { id: candidateId, tenantId },
         select: {
           id: true,
           linkedinId: true,
@@ -193,11 +204,15 @@ export async function GET(request: NextRequest) {
         );
       }
 
-      const identityCandidates = await getIdentityCandidates(candidateId);
+      // Get identity candidates (tenant-scoped)
+      const identityCandidates = await prisma.identityCandidate.findMany({
+        where: { candidateId, tenantId },
+        orderBy: { confidence: 'desc' },
+      });
 
-      // Get recent enrichment sessions (including AI summary)
+      // Get recent enrichment sessions (tenant-scoped, including AI summary)
       const sessions = await prisma.enrichmentSession.findMany({
-        where: { candidateId },
+        where: { candidateId, tenantId },
         orderBy: { createdAt: 'desc' },
         take: 5,
         select: {
@@ -215,6 +230,8 @@ export async function GET(request: NextRequest) {
           summaryStructured: true,
           summaryModel: true,
           summaryGeneratedAt: true,
+          // Run trace for summary metadata (draft/verified status)
+          runTrace: true,
         },
       });
 

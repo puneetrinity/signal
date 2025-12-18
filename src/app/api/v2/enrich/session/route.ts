@@ -9,7 +9,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getEnrichmentSession, getRecentSessions, getQueueStats } from '@/lib/enrichment/queue';
-import { withAuth } from '@/lib/auth';
+import { withAuth, requireTenantId } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 
 /**
@@ -31,6 +31,7 @@ export async function GET(request: NextRequest) {
   if (!authCheck.authorized) {
     return authCheck.response;
   }
+  const tenantId = requireTenantId(authCheck.context);
 
   try {
     // Queue stats (admin only)
@@ -53,22 +54,28 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // Specific session
+    // Specific session - must belong to tenant
     if (sessionId) {
-      const session = await getEnrichmentSession(sessionId);
+      // Verify session belongs to tenant via direct query
+      const sessionRecord = await prisma.enrichmentSession.findFirst({
+        where: { id: sessionId, tenantId },
+      });
 
-      if (!session) {
+      if (!sessionRecord) {
         return NextResponse.json(
           { success: false, error: 'Session not found' },
           { status: 404 }
         );
       }
 
-      // Get identity candidates if completed
+      // Get full session details
+      const session = await getEnrichmentSession(sessionId);
+
+      // Get identity candidates if completed (tenant-scoped)
       let identityCandidates = null;
-      if (session.status === 'completed') {
+      if (sessionRecord.status === 'completed') {
         identityCandidates = await prisma.identityCandidate.findMany({
-          where: { candidateId: session.candidateId },
+          where: { candidateId: sessionRecord.candidateId, tenantId },
           orderBy: { confidence: 'desc' },
           take: 20,
         });
@@ -83,9 +90,27 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // Recent sessions for a candidate
+    // Recent sessions for a candidate - must belong to tenant
     if (candidateId) {
-      const sessions = await getRecentSessions(candidateId, 10);
+      // Verify candidate belongs to tenant
+      const candidate = await prisma.candidate.findFirst({
+        where: { id: candidateId, tenantId },
+        select: { id: true },
+      });
+
+      if (!candidate) {
+        return NextResponse.json(
+          { success: false, error: 'Candidate not found' },
+          { status: 404 }
+        );
+      }
+
+      // Get sessions for this candidate (tenant-scoped via candidateId ownership)
+      const sessions = await prisma.enrichmentSession.findMany({
+        where: { candidateId, tenantId },
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+      });
 
       return NextResponse.json({
         success: true,
