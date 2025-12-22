@@ -35,7 +35,7 @@ function isRedisConfigured(): boolean {
  * - Unauthenticated: returns minimal { healthy, timestamp }
  * - Authenticated: returns detailed breakdown
  */
-export async function GET(request: NextRequest) {
+export async function GET(_request: NextRequest) {
   const enabled = isLangGraphEnabled();
   const redisConfigured = isRedisConfigured();
 

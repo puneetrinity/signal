@@ -1,11 +1,23 @@
 'use client';
 
-// Disable static prerendering - this page requires auth
-export const dynamic = 'force-dynamic';
-
-import { OrganizationList, useAuth } from '@clerk/nextjs';
+import dynamic from 'next/dynamic';
+import { useAuth } from '@clerk/nextjs';
 import { useRouter } from 'next/navigation';
 import { useEffect } from 'react';
+import { Loader2 } from 'lucide-react';
+
+// Dynamically import OrganizationList to prevent SSR issues
+const OrganizationList = dynamic(
+  () => import('@clerk/nextjs').then((mod) => mod.OrganizationList),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex items-center justify-center p-8">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      </div>
+    ),
+  }
+);
 
 export default function OrgSelectorPage() {
   const { orgId } = useAuth();

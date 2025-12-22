@@ -67,7 +67,7 @@ export default function EnrichmentPage({ params }: PageProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isMisconfigured, setIsMisconfigured] = useState(false);
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [, setSessionId] = useState<string | null>(null);
   const [progressEvents, setProgressEvents] = useState<ProgressEvent[]>([]);
   const [candidate, setCandidate] = useState<CandidateData | null>(null);
   const [identityCandidates, setIdentityCandidates] = useState<IdentityCandidateData[]>([]);
