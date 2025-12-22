@@ -73,6 +73,7 @@ function candidateToHints(candidate: Candidate): CandidateHints {
     nameHint: candidate.nameHint,
     headlineHint: candidate.headlineHint,
     locationHint: candidate.locationHint,
+    companyHint: candidate.companyHint,
     roleType: candidate.roleType,
   };
 }

@@ -131,6 +131,7 @@ model Candidate {
   nameHint     String? // Parsed from title, may be wrong
   headlineHint String? @db.Text // Parsed from title/snippet
   locationHint String? // Parsed from snippet
+  companyHint  String? // Parsed from title/snippet
 
   // Classification for enrichment routing
   roleType String? // 'engineer' | 'data_scientist' | 'researcher' | 'founder' | 'designer' | 'general'

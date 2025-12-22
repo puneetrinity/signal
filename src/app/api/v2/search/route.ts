@@ -17,6 +17,7 @@ import { prisma } from '@/lib/prisma';
 import { parseSearchQuery } from '@/lib/search/parsers';
 import { searchLinkedInProfilesWithMeta, getProviderConfig } from '@/lib/search/providers';
 import type { ProfileSummary } from '@/types/linkedin';
+import { extractAllHints, extractCompanyFromHeadline } from '@/lib/enrichment/hint-extraction';
 import crypto from 'crypto';
 import {
   withRateLimit,
@@ -58,47 +59,6 @@ function extractLinkedInId(url: string): string | null {
   } catch {
     return null;
   }
-}
-
-/**
- * Parse name hint from search title
- * Title format: "Name - Headline | LinkedIn"
- */
-function parseNameHint(title: string): string | undefined {
-  const parts = title.split(' - ');
-  const rawName = parts[0]?.replace(' | LinkedIn', '').trim();
-  return rawName || undefined;
-}
-
-/**
- * Parse headline hint from search title
- */
-function parseHeadlineHint(title: string): string | undefined {
-  const parts = title.split(' - ');
-  const headline = parts.slice(1).join(' - ').replace(' | LinkedIn', '').trim();
-  return headline || undefined;
-}
-
-/**
- * Parse location hint from search snippet
- */
-function parseLocationHint(snippet: string): string | undefined {
-  // Try "Location: X" pattern
-  const locationMatch = snippet.match(/Location:\s*([^·]+)/i);
-  if (locationMatch?.[1]) {
-    return locationMatch[1].trim();
-  }
-
-  // Try last segment after " · "
-  const parts = snippet.split(' · ');
-  if (parts.length > 1) {
-    const candidate = parts[parts.length - 1].trim();
-    if (candidate && candidate.length <= 80) {
-      return candidate;
-    }
-  }
-
-  return undefined;
 }
 
 /**
@@ -187,6 +147,15 @@ async function upsertCandidates(
       continue;
     }
 
+    const extractedHints = extractAllHints(linkedinId, result.title, result.snippet);
+    const nameHint = result.name ?? extractedHints.nameHint ?? undefined;
+    const headlineHint = result.headline ?? extractedHints.headlineHint ?? undefined;
+    const locationHint = result.location ?? extractedHints.locationHint ?? undefined;
+    let companyHint = extractedHints.companyHint ?? undefined;
+    if (!companyHint && headlineHint) {
+      companyHint = extractCompanyFromHeadline(headlineHint) ?? undefined;
+    }
+
     try {
       const candidate = await prisma.candidate.upsert({
         where: { tenantId_linkedinId: { tenantId, linkedinId } },
@@ -194,9 +163,10 @@ async function upsertCandidates(
           // Update search metadata if this is a new search
           searchTitle: result.title,
           searchSnippet: result.snippet,
-          nameHint: result.name || parseNameHint(result.title),
-          headlineHint: result.headline || parseHeadlineHint(result.title),
-          locationHint: result.location || parseLocationHint(result.snippet),
+          nameHint,
+          headlineHint,
+          locationHint,
+          companyHint,
           searchProvider: provider, // Track last provider that found this candidate
           // Don't overwrite roleType if already set
           updatedAt: new Date(),
@@ -207,9 +177,10 @@ async function upsertCandidates(
           linkedinId,
           searchTitle: result.title,
           searchSnippet: result.snippet,
-          nameHint: result.name || parseNameHint(result.title),
-          headlineHint: result.headline || parseHeadlineHint(result.title),
-          locationHint: result.location || parseLocationHint(result.snippet),
+          nameHint,
+          headlineHint,
+          locationHint,
+          companyHint,
           roleType: roleType || undefined,
           captureSource: 'search',
           searchQuery,

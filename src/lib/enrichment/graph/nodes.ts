@@ -221,10 +221,10 @@ export async function loadCandidateNode(
       };
     }
 
-    // Extract company from headline if available
+    // Use stored company hint when available, otherwise derive from headline
     // Pattern matches "at Company", "@ Company", ", Company" followed by separator or end
-    let companyHint: string | null = null;
-    if (candidate.headlineHint) {
+    let companyHint: string | null = candidate.companyHint || null;
+    if (!companyHint && candidate.headlineHint) {
       const companyMatch = candidate.headlineHint.match(
         /(?:at|@|,)\s*([A-Z][A-Za-z0-9\s&]+?)(?:\s*[-|·]|$)/
       );

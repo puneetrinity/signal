@@ -499,7 +499,7 @@ async function processSummaryOnlyJob(
         nameHint: candidate.nameHint,
         headlineHint: candidate.headlineHint,
         locationHint: candidate.locationHint,
-        companyHint: null, // Not stored in Candidate model
+        companyHint: candidate.companyHint || null,
         roleType: candidate.roleType,
       },
       identities,
@@ -523,7 +523,7 @@ async function processSummaryOnlyJob(
         nameHint: candidate.nameHint,
         headlineHint: candidate.headlineHint,
         locationHint: candidate.locationHint,
-        companyHint: null, // Not stored in Candidate model
+        companyHint: candidate.companyHint || null,
         roleType: candidate.roleType,
       },
       platformResults: {},

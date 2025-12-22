@@ -133,30 +133,68 @@ function extractLinkedInFromProfile(profile: GitHubUserProfile): string | null {
  * Uses hints from search snippets (NOT scraped data)
  */
 function buildSearchQueries(hints: CandidateHints): string[] {
-  const queries: string[] = [];
+  const queries = new Set<string>();
 
   // Query 1: Full name
   if (hints.nameHint) {
-    queries.push(hints.nameHint);
+    queries.add(hints.nameHint);
   }
 
-  // Query 2: Name + Company (extracted from headline)
-  if (hints.nameHint && hints.headlineHint) {
+  // Query 2: Name + Company (prefer explicit company hint)
+  let companyHint = hints.companyHint || null;
+  if (!companyHint && hints.headlineHint) {
     // Try to extract company from headline
     // Common patterns: "Title at Company", "Title @ Company", "Title, Company"
     const companyMatch = hints.headlineHint.match(
       /(?:at|@|,)\s*([A-Z][A-Za-z0-9\s&]+?)(?:\s*[-|·]|$)/
     );
     if (companyMatch) {
-      queries.push(`${hints.nameHint} ${companyMatch[1].trim()}`);
+      companyHint = companyMatch[1].trim();
     }
+  }
+  if (hints.nameHint && companyHint) {
+    queries.add(`${hints.nameHint} ${companyHint}`);
   }
 
   // Query 3: Name + Location
   if (hints.nameHint && hints.locationHint) {
     // Only add if location is specific (not just country)
     if (hints.locationHint.length < 30) {
-      queries.push(`${hints.nameHint} ${hints.locationHint}`);
+      queries.add(`${hints.nameHint} ${hints.locationHint}`);
+    }
+  }
+
+  if (queries.size === 0) {
+    for (const fallback of buildFallbackQueries(hints)) {
+      queries.add(fallback);
+    }
+  }
+
+  return Array.from(queries);
+}
+
+/**
+ * Build fallback queries when name hints are missing.
+ */
+function buildFallbackQueries(hints: CandidateHints): string[] {
+  const queries: string[] = [];
+  const handle = hints.linkedinId?.trim();
+
+  if (handle) {
+    queries.push(handle);
+
+    const withoutSuffix = handle
+      .replace(/-[a-f0-9]{6,}$/i, '')
+      .replace(/-\d{3,}$/, '');
+    if (withoutSuffix && withoutSuffix !== handle) {
+      queries.push(withoutSuffix);
+    }
+
+    if (handle.includes('-')) {
+      const spaced = handle.replace(/-/g, ' ').trim();
+      if (spaced && spaced !== handle) {
+        queries.push(spaced);
+      }
     }
   }
 
