@@ -4,12 +4,11 @@
 export const dynamic = 'force-dynamic';
 
 import { use, useCallback, useEffect, useRef, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
-import { useAuthHeaders } from '@/contexts/ApiKeyContext';
 import { IdentityCandidateCard } from '@/components/IdentityCandidateCard';
 import {
   Loader2,
@@ -24,6 +23,9 @@ import {
   Lightbulb,
   AlertTriangle,
   Search,
+  Play,
+  RefreshCw,
+  AlertCircle,
 } from 'lucide-react';
 import type {
   CandidateData,
@@ -36,7 +38,14 @@ interface PageProps {
   params: Promise<{ candidateId: string }>;
 }
 
-type EnrichmentStatus = 'pending' | 'running' | 'completed' | 'failed';
+/**
+ * UI state machine for enrichment page
+ * - idle: No session or not started
+ * - running: Session in progress
+ * - completed: Session finished successfully
+ * - failed: Session failed
+ */
+type EnrichmentUIState = 'idle' | 'running' | 'completed' | 'failed';
 
 interface ProgressEvent {
   type: string;
@@ -49,11 +58,15 @@ export default function EnrichmentPage({ params }: PageProps) {
   const resolvedParams = use(params);
   const { candidateId } = resolvedParams;
   const router = useRouter();
-  const getAuthHeaders = useAuthHeaders();
+  const searchParams = useSearchParams();
 
-  const [status, setStatus] = useState<EnrichmentStatus>('pending');
+  // Check for autostart query param (used when opening from search results)
+  const shouldAutostart = searchParams.get('autostart') === '1';
+
+  const [uiState, setUIState] = useState<EnrichmentUIState>('idle');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isMisconfigured, setIsMisconfigured] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [progressEvents, setProgressEvents] = useState<ProgressEvent[]>([]);
   const [candidate, setCandidate] = useState<CandidateData | null>(null);
@@ -61,8 +74,9 @@ export default function EnrichmentPage({ params }: PageProps) {
   const [session, setSession] = useState<EnrichmentSessionSummary | null>(null);
   const [summaryRegenerating, setSummaryRegenerating] = useState(false);
   const summaryCardRef = useRef<HTMLDivElement>(null);
+  const autostartTriggered = useRef(false);
 
-  // Fetch candidate data
+  // Fetch candidate data and determine initial state
   const fetchCandidate = useCallback(async () => {
     try {
       const response = await fetch(`/api/v2/enrich?candidateId=${candidateId}`);
@@ -74,39 +88,67 @@ export default function EnrichmentPage({ params }: PageProps) {
 
       setCandidate(data.candidate);
       setIdentityCandidates(data.identityCandidates || []);
+
+      // Determine UI state from latest session
       if (data.sessions && data.sessions.length > 0) {
-        setSession(data.sessions[0]);
+        const latestSession = data.sessions[0];
+        setSession(latestSession);
+
+        // Map session status to UI state
+        if (latestSession.status === 'running' || latestSession.status === 'queued') {
+          setUIState('running');
+          return { data, shouldSubscribe: true, sessionId: latestSession.id };
+        } else if (latestSession.status === 'completed') {
+          setUIState('completed');
+        } else if (latestSession.status === 'failed') {
+          setUIState('failed');
+        }
+      } else {
+        setUIState('idle');
       }
-      return data;
+
+      return { data, shouldSubscribe: false, sessionId: null };
     } catch (err) {
       throw err;
     }
   }, [candidateId]);
 
-  // Start enrichment via async endpoint (uses LangGraph with AI summary)
+  // Start enrichment via async endpoint
   const startEnrichment = useCallback(async () => {
+    setError(null);
+    setIsMisconfigured(false);
+    setProgressEvents([]);
+
     try {
       const response = await fetch('/api/v2/enrich/async', {
         method: 'POST',
-        headers: getAuthHeaders(),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ candidateId }),
       });
 
       const data = await response.json();
 
       if (!response.ok) {
+        // Detect misconfiguration (LangGraph disabled)
+        if (response.status === 400 && data.error?.includes('not enabled')) {
+          setIsMisconfigured(true);
+          setError('Enrichment is misconfigured. Contact admin to enable LangGraph enrichment.');
+          return null;
+        }
         throw new Error(data.error || 'Failed to start enrichment');
       }
 
       if (data.sessionId) {
         setSessionId(data.sessionId);
+        setUIState('running');
       }
 
       return data;
     } catch (err) {
-      throw err;
+      setError(err instanceof Error ? err.message : 'Failed to start enrichment');
+      return null;
     }
-  }, [candidateId, getAuthHeaders]);
+  }, [candidateId]);
 
   // Subscribe to summary regeneration stream
   const subscribeToSummaryRegeneration = useCallback((regenSessionId: string) => {
@@ -162,7 +204,7 @@ export default function EnrichmentPage({ params }: PageProps) {
     try {
       const response = await fetch('/api/v2/identity/confirm', {
         method: 'POST',
-        headers: getAuthHeaders(),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ identityCandidateId, method: 'recruiter_manual' }),
       });
       if (!response.ok) {
@@ -186,7 +228,7 @@ export default function EnrichmentPage({ params }: PageProps) {
       console.error('Confirm error:', err);
       return false;
     }
-  }, [getAuthHeaders, fetchCandidate, subscribeToSummaryRegeneration]);
+  }, [fetchCandidate, subscribeToSummaryRegeneration]);
 
   // Reject an identity candidate
   const handleReject = useCallback(async (identityCandidateId: string): Promise<boolean> => {
@@ -194,7 +236,7 @@ export default function EnrichmentPage({ params }: PageProps) {
       // Backend uses DELETE method for rejection
       const response = await fetch('/api/v2/identity/confirm', {
         method: 'DELETE',
-        headers: getAuthHeaders(),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ identityCandidateId }),
       });
       if (!response.ok) {
@@ -208,14 +250,14 @@ export default function EnrichmentPage({ params }: PageProps) {
       console.error('Reject error:', err);
       return false;
     }
-  }, [getAuthHeaders, fetchCandidate]);
+  }, [fetchCandidate]);
 
   // Reveal email for an identity candidate
   const handleRevealEmail = useCallback(async (identityCandidateId: string): Promise<string | null> => {
     try {
       const response = await fetch('/api/v2/identity/reveal', {
         method: 'POST',
-        headers: getAuthHeaders(),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ identityCandidateId }),
       });
       if (!response.ok) {
@@ -228,15 +270,15 @@ export default function EnrichmentPage({ params }: PageProps) {
       console.error('Reveal email error:', err);
       return null;
     }
-  }, [getAuthHeaders]);
+  }, []);
 
-  // Subscribe to SSE stream
+  // Subscribe to SSE stream for enrichment progress
   const subscribeToStream = useCallback((sid: string) => {
     const eventSource = new EventSource(`/api/v2/enrich/session/stream?sessionId=${sid}`);
 
     eventSource.addEventListener('connected', (e) => {
       const data = JSON.parse(e.data);
-      setStatus('running');
+      setUIState('running');
       setProgressEvents((prev) => [...prev, { type: 'connected', timestamp: data.timestamp }]);
     });
 
@@ -250,7 +292,7 @@ export default function EnrichmentPage({ params }: PageProps) {
 
     eventSource.addEventListener('completed', (e) => {
       const data = JSON.parse(e.data);
-      setStatus('completed');
+      setUIState('completed');
       setProgressEvents((prev) => [...prev, { type: 'completed', timestamp: data.timestamp }]);
       eventSource.close();
       // Refresh data
@@ -259,14 +301,13 @@ export default function EnrichmentPage({ params }: PageProps) {
 
     eventSource.addEventListener('failed', (e) => {
       const data = JSON.parse(e.data);
-      setStatus('failed');
+      setUIState('failed');
       setError(data.error || 'Enrichment failed');
       setProgressEvents((prev) => [...prev, { type: 'failed', timestamp: data.timestamp }]);
       eventSource.close();
     });
 
-    eventSource.addEventListener('timeout', (e) => {
-      const data = JSON.parse(e.data);
+    eventSource.addEventListener('timeout', () => {
       setError('Stream timeout. Check status below.');
       eventSource.close();
       fetchCandidate();
@@ -281,30 +322,43 @@ export default function EnrichmentPage({ params }: PageProps) {
     return eventSource;
   }, [fetchCandidate]);
 
-  // Initial load - fetch candidate and start enrichment
+  // Handle start enrichment button click
+  const handleStartEnrichment = useCallback(async () => {
+    const result = await startEnrichment();
+    if (result?.sessionId) {
+      subscribeToStream(result.sessionId);
+    }
+  }, [startEnrichment, subscribeToStream]);
+
+  // Initial load - fetch candidate and optionally start enrichment if ?autostart=1
   useEffect(() => {
     let eventSource: EventSource | null = null;
 
     const init = async () => {
       try {
-        // First, fetch existing candidate data
-        await fetchCandidate();
+        const result = await fetchCandidate();
 
-        // Start enrichment via async endpoint
-        setStatus('running');
-        const result = await startEnrichment();
-
-        // Async endpoint returns sessionId directly
-        if (result.sessionId) {
+        // If already running, subscribe to the existing session
+        if (result?.shouldSubscribe && result?.sessionId) {
           eventSource = subscribeToStream(result.sessionId);
-        } else {
-          // No session returned, enrichment may have been instant or already done
-          await fetchCandidate();
-          setStatus('completed');
+          setSessionId(result.sessionId);
+        }
+        // If autostart=1 and not already enriched/running, start enrichment
+        else if (shouldAutostart && !autostartTriggered.current && result?.data) {
+          const hasSession = result.data.sessions && result.data.sessions.length > 0;
+          const latestStatus = hasSession ? result.data.sessions[0].status : null;
+
+          // Only autostart if no session or if last session failed
+          if (!hasSession || latestStatus === 'failed') {
+            autostartTriggered.current = true;
+            const enrichResult = await startEnrichment();
+            if (enrichResult?.sessionId) {
+              eventSource = subscribeToStream(enrichResult.sessionId);
+            }
+          }
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to start enrichment');
-        setStatus('failed');
+        setError(err instanceof Error ? err.message : 'Failed to load candidate');
       } finally {
         setIsLoading(false);
       }
@@ -317,7 +371,41 @@ export default function EnrichmentPage({ params }: PageProps) {
         eventSource.close();
       }
     };
-  }, [candidateId, fetchCandidate, startEnrichment, subscribeToStream]);
+  }, [candidateId, fetchCandidate, shouldAutostart, startEnrichment, subscribeToStream]);
+
+  // Get failure reason from session
+  const getFailureReason = (): string => {
+    if (!session) return 'Unknown error';
+
+    // Try runTrace.failureReason first
+    const runTrace = session.runTrace as { failureReason?: string } | null;
+    if (runTrace?.failureReason) {
+      return runTrace.failureReason;
+    }
+
+    // Fall back to errorMessage on session
+    const sessionAny = session as { errorMessage?: string };
+    if (sessionAny.errorMessage) {
+      return sessionAny.errorMessage;
+    }
+
+    return 'Enrichment failed. Please try again.';
+  };
+
+  // Format relative time
+  const formatRelativeTime = (dateStr: string): string => {
+    const date = new Date(dateStr);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+
+    if (diffMins < 1) return 'just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    return `${diffDays}d ago`;
+  };
 
   const summary = session?.summaryStructured as AISummaryStructured | null;
 
@@ -328,7 +416,7 @@ export default function EnrichmentPage({ params }: PageProps) {
           <div className="flex items-center justify-center min-h-[60vh]">
             <div className="text-center space-y-4">
               <Loader2 className="w-12 h-12 animate-spin mx-auto text-primary" />
-              <p className="text-muted-foreground">Loading enrichment...</p>
+              <p className="text-muted-foreground">Loading candidate...</p>
             </div>
           </div>
         </div>
@@ -361,12 +449,40 @@ export default function EnrichmentPage({ params }: PageProps) {
                 </a>
               )}
             </div>
-            <StatusBadge status={status} />
+            <StatusBadge state={uiState} />
           </div>
+
+          {/* Last enriched time */}
+          {session?.completedAt && uiState !== 'running' && (
+            <p className="text-sm text-muted-foreground mt-2">
+              Last enriched: {formatRelativeTime(session.completedAt)}
+              {session.durationMs && ` (${(session.durationMs / 1000).toFixed(1)}s)`}
+            </p>
+          )}
         </div>
 
-        {/* Error */}
-        {error && (
+        {/* Misconfiguration Error */}
+        {isMisconfigured && (
+          <Card className="mb-6 border-red-300 bg-red-50 dark:bg-red-950/30">
+            <CardContent className="pt-6">
+              <div className="flex items-start gap-3">
+                <AlertCircle className="h-5 w-5 text-red-600 mt-0.5" />
+                <div>
+                  <h3 className="font-semibold text-red-800 dark:text-red-200">
+                    Enrichment Misconfigured
+                  </h3>
+                  <p className="text-sm text-red-700 dark:text-red-300 mt-1">
+                    The enrichment system is not properly configured. Please contact your administrator
+                    to enable LangGraph enrichment (USE_LANGGRAPH_ENRICHMENT=true).
+                  </p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Generic Error (non-misconfig) */}
+        {error && !isMisconfigured && (
           <Card className="mb-6 border-red-200 bg-red-50 dark:bg-red-950/20">
             <CardContent className="pt-6">
               <p className="text-red-600 flex items-center gap-2">
@@ -377,8 +493,27 @@ export default function EnrichmentPage({ params }: PageProps) {
           </Card>
         )}
 
-        {/* Progress */}
-        {status === 'running' && (
+        {/* Idle State - Show start button */}
+        {uiState === 'idle' && !isMisconfigured && (
+          <Card className="mb-6">
+            <CardContent className="pt-6">
+              <div className="text-center py-8">
+                <Search className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
+                <h3 className="text-lg font-semibold mb-2">Not Enriched Yet</h3>
+                <p className="text-muted-foreground mb-6">
+                  Start enrichment to discover platform identities for this candidate.
+                </p>
+                <Button onClick={handleStartEnrichment} size="lg">
+                  <Play className="mr-2 h-4 w-4" />
+                  Start Enrichment
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Running State - Show progress */}
+        {uiState === 'running' && (
           <Card className="mb-6">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -396,13 +531,33 @@ export default function EnrichmentPage({ params }: PageProps) {
                     </span>
                   </div>
                 ))}
+                {progressEvents.length === 0 && (
+                  <p className="text-muted-foreground">Starting enrichment process...</p>
+                )}
               </div>
             </CardContent>
           </Card>
         )}
 
-        {/* Identity Candidates - Primary section for confirmation */}
-        {identityCandidates.length > 0 && (() => {
+        {/* Failed State - Show error and retry */}
+        {uiState === 'failed' && !isMisconfigured && (
+          <Card className="mb-6 border-red-200">
+            <CardContent className="pt-6">
+              <div className="text-center py-4">
+                <XCircle className="h-12 w-12 mx-auto text-red-500 mb-4" />
+                <h3 className="text-lg font-semibold mb-2">Enrichment Failed</h3>
+                <p className="text-muted-foreground mb-6">{getFailureReason()}</p>
+                <Button onClick={handleStartEnrichment} variant="outline">
+                  <RefreshCw className="mr-2 h-4 w-4" />
+                  Retry Enrichment
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Identity Candidates - Show for completed state */}
+        {uiState === 'completed' && identityCandidates.length > 0 && (() => {
           const confirmed = identityCandidates.filter((ic) => ic.status === 'confirmed');
           const unconfirmed = identityCandidates.filter((ic) => ic.status === 'unconfirmed');
           const rejected = identityCandidates.filter((ic) => ic.status === 'rejected');
@@ -410,10 +565,20 @@ export default function EnrichmentPage({ params }: PageProps) {
           return (
             <Card className="mb-6">
               <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Search className="h-5 w-5" />
-                  Discovered Identities ({identityCandidates.length})
-                </CardTitle>
+                <div className="flex items-center justify-between">
+                  <CardTitle className="flex items-center gap-2">
+                    <Search className="h-5 w-5" />
+                    Discovered Identities ({identityCandidates.length})
+                  </CardTitle>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleStartEnrichment}
+                  >
+                    <RefreshCw className="mr-2 h-4 w-4" />
+                    Re-enrich
+                  </Button>
+                </div>
               </CardHeader>
               <CardContent className="space-y-6">
                 {/* Confirmed identities */}
@@ -463,19 +628,27 @@ export default function EnrichmentPage({ params }: PageProps) {
         })()}
 
         {/* No identities found */}
-        {status === 'completed' && identityCandidates.length === 0 && (
+        {uiState === 'completed' && identityCandidates.length === 0 && (
           <Card className="mb-6">
-            <CardContent className="pt-6 text-center text-muted-foreground">
-              <p>No identity candidates discovered.</p>
-              <p className="text-sm mt-1">
+            <CardContent className="pt-6 text-center">
+              <p className="text-muted-foreground">No identity candidates discovered.</p>
+              <p className="text-sm mt-1 text-muted-foreground">
                 Try adding more context to the candidate&apos;s profile.
               </p>
+              <Button
+                variant="outline"
+                className="mt-4"
+                onClick={handleStartEnrichment}
+              >
+                <RefreshCw className="mr-2 h-4 w-4" />
+                Re-enrich
+              </Button>
             </CardContent>
           </Card>
         )}
 
         {/* AI Summary */}
-        {status === 'completed' && session?.summary && (() => {
+        {uiState === 'completed' && session?.summary && (() => {
           // Count identities by status for display
           const confirmedCount = identityCandidates.filter(
             (ic) => ic.status === 'confirmed'
@@ -634,7 +807,7 @@ export default function EnrichmentPage({ params }: PageProps) {
         })()}
 
         {/* Metadata */}
-        {session && (
+        {session && uiState === 'completed' && (
           <div className="text-xs text-muted-foreground text-center space-x-4">
             {session.durationMs && <span>Duration: {(session.durationMs / 1000).toFixed(1)}s</span>}
             {session.sourcesExecuted && (
@@ -648,12 +821,12 @@ export default function EnrichmentPage({ params }: PageProps) {
   );
 }
 
-function StatusBadge({ status }: { status: EnrichmentStatus }) {
+function StatusBadge({ state }: { state: EnrichmentUIState }) {
   const config = {
-    pending: {
-      label: 'Pending',
+    idle: {
+      label: 'Not Started',
       icon: Clock,
-      className: 'bg-yellow-100 text-yellow-800 border-yellow-200',
+      className: 'bg-gray-100 text-gray-800 border-gray-200',
     },
     running: {
       label: 'Running',
@@ -670,13 +843,13 @@ function StatusBadge({ status }: { status: EnrichmentStatus }) {
       icon: XCircle,
       className: 'bg-red-100 text-red-800 border-red-200',
     },
-  }[status];
+  }[state];
 
   const Icon = config.icon;
 
   return (
     <Badge variant="outline" className={config.className}>
-      <Icon className={`mr-1 h-3 w-3 ${status === 'running' ? 'animate-spin' : ''}`} />
+      <Icon className={`mr-1 h-3 w-3 ${state === 'running' ? 'animate-spin' : ''}`} />
       {config.label}
     </Badge>
   );

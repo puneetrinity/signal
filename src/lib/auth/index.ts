@@ -1,30 +1,16 @@
 /**
  * Authentication & Authorization Module
  *
- * Uses Clerk for session-based authentication and supports API key fallback
- * for server-to-server calls.
+ * Uses Clerk for session-based authentication (browser sessions via cookies).
  *
  * Auth flow:
  * 1. Check Clerk session (userId + orgId) → tenantId = orgId
- * 2. If no Clerk session, check API key + X-Tenant-Id header (for server-to-server)
- * 3. Return unified auth context with tenantId for multi-tenant operations
- *
- * API Key Usage (server-to-server):
- * - Set Authorization: Bearer <API_KEY> or X-API-Key: <API_KEY>
- * - Set X-Tenant-Id: <org_id> to specify which tenant the request is for
- * - Without X-Tenant-Id, org-required endpoints will return 403
+ * 2. Return unified auth context with tenantId for multi-tenant operations
  *
  * ⚠️  CRITICAL: Production Security Notes
  *
  * 1. ALL v2 route handlers MUST call withAuth() + requireTenantId()
- *    Middleware bypasses Clerk auth for API-key traffic, so route handlers
- *    are the only enforcement point for API key requests.
- *
- * 2. API keys are currently TENANT-AGNOSTIC
- *    Any valid API key can act on any tenant via X-Tenant-Id header.
- *    For stronger isolation, migrate to:
- *    - DB-stored API keys bound to specific tenantIds, OR
- *    - Clerk JWTs for server-to-server authentication
+ *    These are the enforcement points for authentication.
  *
  * Sensitive endpoints that MUST be protected:
  * - POST /api/v2/identity/reveal (email extraction)
@@ -36,8 +22,6 @@
  */
 
 import { auth } from '@clerk/nextjs/server';
-import { headers } from 'next/headers';
-import crypto from 'crypto';
 
 /**
  * Auth context for request handlers
@@ -49,8 +33,7 @@ export interface AuthContext {
   tenantId?: string; // Clerk orgId - used for multi-tenancy
   orgRole?: string; // Role within the org
   roles?: string[];
-  apiKeyId?: string;
-  authMethod?: 'clerk' | 'api-key' | 'none';
+  authMethod?: 'clerk' | 'none';
 }
 
 /**
@@ -76,85 +59,6 @@ function isAuthEnforced(): boolean {
 
   // In development, auth is optional but can be enabled
   return process.env.ENFORCE_AUTH === 'true';
-}
-
-/**
- * Extract API key from request headers
- */
-async function extractApiKey(): Promise<string | null> {
-  try {
-    const headersList = await headers();
-
-    // Check Authorization header (Bearer token)
-    const authHeader = headersList.get('authorization');
-    if (authHeader?.startsWith('Bearer ')) {
-      return authHeader.slice(7);
-    }
-
-    // Check X-API-Key header
-    const apiKey = headersList.get('x-api-key');
-    if (apiKey) {
-      return apiKey;
-    }
-
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Generate a short, stable identifier for an API key
- * Uses first 8 chars of SHA-256 hash (never stores or logs the raw key)
- */
-function hashApiKeyId(apiKey: string): string {
-  const hash = crypto.createHash('sha256').update(apiKey).digest('hex');
-  return `key_${hash.slice(0, 8)}`;
-}
-
-/**
- * Extract tenant ID from request headers (for API key auth)
- */
-async function extractTenantIdHeader(): Promise<string | null> {
-  try {
-    const headersList = await headers();
-    return headersList.get('x-tenant-id');
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Validate API key
- *
- * For multi-tenancy, API key auth requires X-Tenant-Id header to specify
- * which organization/tenant the request is for. This allows server-to-server
- * calls to operate within a specific tenant context.
- *
- * TODO: For production, consider:
- * - Storing API keys in DB with tenant restrictions
- * - Validating the key is authorized for the specified tenant
- */
-async function validateApiKey(apiKey: string): Promise<AuthContext | null> {
-  // PLACEHOLDER: In production, validate against database or auth service
-  // For now, check against environment variable for basic protection
-
-  const validKeys = process.env.API_KEYS?.split(',').map((k) => k.trim()) || [];
-
-  if (validKeys.includes(apiKey)) {
-    // Get tenant ID from header (required for multi-tenant operations)
-    const tenantId = await extractTenantIdHeader();
-
-    return {
-      authenticated: true,
-      apiKeyId: hashApiKeyId(apiKey), // Unique per key, but doesn't expose raw key
-      tenantId: tenantId || undefined, // Will fail org-required checks if not provided
-      roles: ['recruiter'], // Default role for API key access
-      authMethod: 'api-key',
-    };
-  }
-
-  return null;
 }
 
 /**
@@ -195,22 +99,12 @@ async function getClerkAuthContext(): Promise<AuthContext | null> {
 
 /**
  * Get auth context for current request
- * Priority: Clerk session > API key
  */
 export async function getAuthContext(): Promise<AuthContext> {
-  // Try Clerk auth first (browser sessions)
+  // Get Clerk auth (browser sessions)
   const clerkContext = await getClerkAuthContext();
   if (clerkContext?.authenticated) {
     return clerkContext;
-  }
-
-  // Fall back to API key (server-to-server)
-  const apiKey = await extractApiKey();
-  if (apiKey) {
-    const context = await validateApiKey(apiKey);
-    if (context) {
-      return context;
-    }
   }
 
   // No valid authentication found
@@ -261,7 +155,7 @@ export async function checkAuth(
   if (!context.authenticated) {
     return {
       authorized: false,
-      error: 'Authentication required. Sign in or provide API key via Authorization header.',
+      error: 'Authentication required. Please sign in.',
     };
   }
 
@@ -327,7 +221,7 @@ export async function withAuth(
 
 /**
  * Get actor string for audit logging
- * Format: {method}:{id}[@{tenantId}]
+ * Format: user:{id}[@{tenantId}]
  */
 export function getActorString(context: AuthContext): string {
   if (!context.authenticated) {
@@ -338,8 +232,6 @@ export function getActorString(context: AuthContext): string {
 
   if (context.userId) {
     actor = `user:${context.userId}`;
-  } else if (context.apiKeyId) {
-    actor = `api-key:${context.apiKeyId}`;
   } else {
     actor = 'authenticated';
   }

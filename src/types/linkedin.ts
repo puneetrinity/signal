@@ -245,11 +245,20 @@ export interface CommitEmailEvidence {
 }
 
 /**
+ * Failure stage for batch enrichment errors
+ */
+export type EnrichmentFailureStage =
+  | 'candidate_not_found'
+  | 'discovery_error'
+  | 'persist_error'
+  | 'unknown_error';
+
+/**
  * Enrichment result from v2/enrich
  */
 export interface EnrichmentResultData {
   candidateId: string;
-  sessionId: string;
+  sessionId: string | null;
   status: 'completed' | 'failed' | 'partial';
   identitiesFound: number;
   identitiesStored: number;
@@ -258,6 +267,7 @@ export interface EnrichmentResultData {
   earlyStopReason: string | null;
   durationMs: number;
   error?: string;
+  failureStage?: EnrichmentFailureStage;
 }
 
 /**

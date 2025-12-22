@@ -38,11 +38,20 @@ export interface EnrichmentOptions extends BridgeDiscoveryOptions {
 }
 
 /**
+ * Failure stage for batch enrichment errors
+ */
+export type EnrichmentFailureStage =
+  | 'candidate_not_found'
+  | 'discovery_error'
+  | 'persist_error'
+  | 'unknown_error';
+
+/**
  * Enrichment result
  */
 export interface EnrichmentResult {
   candidateId: string;
-  sessionId: string;
+  sessionId: string | null; // null if session couldn't be created
   status: 'completed' | 'failed' | 'partial';
   identitiesFound: number;
   identitiesStored: number;
@@ -51,6 +60,7 @@ export interface EnrichmentResult {
   earlyStopReason: string | null;
   durationMs: number;
   error?: string;
+  failureStage?: EnrichmentFailureStage;
 }
 
 /**
@@ -402,6 +412,24 @@ export async function enrichCandidate(
 }
 
 /**
+ * Determine failure stage from error
+ */
+function determineFailureStage(error: unknown): EnrichmentFailureStage {
+  const message = error instanceof Error ? error.message.toLowerCase() : '';
+
+  if (message.includes('not found') || message.includes('does not exist')) {
+    return 'candidate_not_found';
+  }
+  if (message.includes('persist') || message.includes('database') || message.includes('prisma')) {
+    return 'persist_error';
+  }
+  if (message.includes('discovery') || message.includes('github') || message.includes('search')) {
+    return 'discovery_error';
+  }
+  return 'unknown_error';
+}
+
+/**
  * Enrich multiple candidates in batch
  */
 export async function enrichCandidates(
@@ -411,22 +439,29 @@ export async function enrichCandidates(
   const results: EnrichmentResult[] = [];
 
   for (const candidateId of candidateIds) {
+    const startTime = Date.now();
     try {
       const result = await enrichCandidate(candidateId, options);
       results.push(result);
     } catch (error) {
-      console.error(`[Enrichment] Failed to enrich ${candidateId}:`, error);
+      const durationMs = Date.now() - startTime;
+      const failureStage = determineFailureStage(error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+      console.error(`[Enrichment] Failed to enrich ${candidateId} (${failureStage}):`, error);
+
       results.push({
         candidateId,
-        sessionId: '',
+        sessionId: null, // Session couldn't be created
         status: 'failed',
         identitiesFound: 0,
         identitiesStored: 0,
         platformsQueried: [],
         queriesExecuted: 0,
         earlyStopReason: null,
-        durationMs: 0,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        durationMs,
+        error: errorMessage,
+        failureStage,
       });
     }
   }
@@ -446,13 +481,14 @@ export async function getEnrichmentSession(
 }
 
 /**
- * Get identity candidates for a candidate
+ * Get identity candidates for a candidate (tenant-scoped)
  */
 export async function getIdentityCandidates(
+  tenantId: string,
   candidateId: string
 ): Promise<IdentityCandidate[]> {
   return prisma.identityCandidate.findMany({
-    where: { candidateId },
+    where: { candidateId, tenantId },
     orderBy: { confidence: 'desc' },
   });
 }

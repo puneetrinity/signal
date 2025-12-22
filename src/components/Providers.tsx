@@ -1,7 +1,6 @@
 'use client';
 
 import { ClerkProvider } from '@clerk/nextjs';
-import { ApiKeyProvider } from '@/contexts/ApiKeyContext';
 import type { ReactNode } from 'react';
 
 /**
@@ -16,12 +15,12 @@ export function Providers({ children }: { children: ReactNode }) {
   // During build or if Clerk is not configured, skip ClerkProvider
   // This allows static pages to build without Clerk keys
   if (!isClerkConfigured()) {
-    return <ApiKeyProvider>{children}</ApiKeyProvider>;
+    return <>{children}</>;
   }
 
   return (
     <ClerkProvider>
-      <ApiKeyProvider>{children}</ApiKeyProvider>
+      {children}
     </ClerkProvider>
   );
 }

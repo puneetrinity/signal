@@ -56,8 +56,8 @@ export async function POST(request: NextRequest) {
   }
   const tenantId = requireTenantId(authCheck.context);
 
-  // Rate limit
-  const rateLimitKey = authCheck.context.apiKeyId || undefined;
+  // Rate limit by userId (all requests are now Clerk-authenticated)
+  const rateLimitKey = authCheck.context.userId || undefined;
   const rateLimitCheck = await withRateLimit(ENRICH_RATE_LIMIT, rateLimitKey);
   if (!rateLimitCheck.allowed) {
     return rateLimitCheck.response;

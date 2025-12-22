@@ -214,8 +214,8 @@ export async function POST(request: NextRequest) {
   }
   const tenantId = requireTenantId(authCheck.context);
 
-  // Rate limit by API key if authenticated, otherwise by IP
-  const rateLimitKey = authCheck.context.apiKeyId || undefined;
+  // Rate limit by userId (all requests are now Clerk-authenticated)
+  const rateLimitKey = authCheck.context.userId || undefined;
   const rateLimitCheck = await withRateLimit(CONFIRM_RATE_LIMIT, rateLimitKey);
   if (!rateLimitCheck.allowed) {
     return rateLimitCheck.response;
@@ -415,8 +415,8 @@ export async function DELETE(request: NextRequest) {
   }
   const tenantId = requireTenantId(authCheck.context);
 
-  // Rate limit by API key if authenticated, otherwise by IP
-  const rateLimitKey = authCheck.context.apiKeyId || undefined;
+  // Rate limit by userId (all requests are now Clerk-authenticated)
+  const rateLimitKey = authCheck.context.userId || undefined;
   const rateLimitCheck = await withRateLimit(CONFIRM_RATE_LIMIT, rateLimitKey);
   if (!rateLimitCheck.allowed) {
     return rateLimitCheck.response;

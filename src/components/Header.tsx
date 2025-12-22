@@ -1,6 +1,7 @@
 'use client';
 
 import { OrganizationSwitcher, UserButton, useAuth } from '@clerk/nextjs';
+import { Search } from 'lucide-react';
 import Image from 'next/image';
 import Link from 'next/link';
 
@@ -12,19 +13,34 @@ export function Header() {
       <div className="mx-auto max-w-7xl px-4">
         <div className="flex h-16 items-center justify-between">
           {/* Logo */}
-          <Link href="/" className="flex items-center gap-2">
-            <div className="h-8 w-8 overflow-hidden rounded-lg">
-              <Image
-                src="/logo.png"
-                alt="Signal"
-                width={32}
-                height={32}
-                className="h-8 w-8 object-cover object-[center_15%] scale-110"
-                unoptimized
-              />
-            </div>
-            <span className="text-lg font-semibold text-[#F59E0B]">Signal</span>
-          </Link>
+          <div className="flex items-center gap-6">
+            <Link href="/" className="flex items-center gap-2">
+              <div className="h-8 w-8 overflow-hidden rounded-lg">
+                <Image
+                  src="/logo.png"
+                  alt="Signal"
+                  width={32}
+                  height={32}
+                  className="h-8 w-8 object-cover object-[center_15%] scale-110"
+                  unoptimized
+                />
+              </div>
+              <span className="text-lg font-semibold text-[#F59E0B]">Signal</span>
+            </Link>
+
+            {/* Navigation links - only show when signed in */}
+            {isSignedIn && (
+              <nav className="flex items-center gap-4">
+                <Link
+                  href="/search"
+                  className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  <Search className="h-4 w-4" />
+                  Search
+                </Link>
+              </nav>
+            )}
+          </div>
 
           {/* Right side */}
           <div className="flex items-center gap-4">

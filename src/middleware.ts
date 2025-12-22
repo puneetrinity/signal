@@ -9,7 +9,6 @@ const isPublicRoute = createRouteMatcher([
   '/sign-in(.*)',
   '/sign-up(.*)',
   '/api/health',
-  // Note: /api/v2/search is NOT public - handled specially below
 ]);
 
 /**
@@ -18,7 +17,6 @@ const isPublicRoute = createRouteMatcher([
 const isProtectedRoute = createRouteMatcher([
   '/search(.*)',
   '/enrich(.*)',
-  '/previous(.*)',
   '/org-selector(.*)',
 ]);
 
@@ -31,25 +29,9 @@ const isProtectedApiRoute = createRouteMatcher([
   '/api/v2/identity(.*)',
 ]);
 
-/**
- * Check if request has API key authentication headers
- * API key requests bypass Clerk middleware and are validated in route handlers
- */
-function hasApiKeyAuth(req: Request): boolean {
-  const authHeader = req.headers.get('authorization');
-  const apiKeyHeader = req.headers.get('x-api-key');
-  return !!(authHeader?.startsWith('Bearer ') || apiKeyHeader);
-}
-
 export default clerkMiddleware(async (auth, req) => {
   const { userId, orgId } = await auth();
   const url = req.nextUrl;
-
-  // API key requests bypass Clerk middleware - validated in route handlers via withAuth()
-  // Route handlers will check API key validity and X-Tenant-Id header
-  if (isProtectedApiRoute(req) && hasApiKeyAuth(req)) {
-    return NextResponse.next();
-  }
 
   // Special case: /api/v2/search GET without 'q' param is a public health check
   if (url.pathname === '/api/v2/search' && req.method === 'GET' && !url.searchParams.has('q')) {
@@ -75,7 +57,6 @@ export default clerkMiddleware(async (auth, req) => {
   }
 
   // Protected API routes - require auth + org
-  // This includes /api/v2/search (except health check handled above)
   if (isProtectedApiRoute(req)) {
     if (!userId) {
       return NextResponse.json(

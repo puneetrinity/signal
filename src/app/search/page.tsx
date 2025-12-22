@@ -9,9 +9,8 @@ import { Loader2, Clock } from 'lucide-react';
 import { SearchBar } from '@/components/SearchBar';
 import { LoadingState } from '@/components/LoadingState';
 import ProfileSummaryCard from '@/components/ProfileSummaryCard';
-import { ApiKeySettings } from '@/components/ApiKeySettings';
 import { Header } from '@/components/Header';
-import type { ProfileSummary } from '@/types/linkedin';
+import type { ProfileSummaryV2 } from '@/types/linkedin';
 
 interface SearchMetadata {
   cached: boolean;
@@ -25,7 +24,7 @@ function SearchContent() {
   const router = useRouter();
   const query = searchParams.get('q')?.trim() ?? '';
 
-  const [summaries, setSummaries] = useState<ProfileSummary[]>([]);
+  const [summaries, setSummaries] = useState<ProfileSummaryV2[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [metadata, setMetadata] = useState<SearchMetadata>({
@@ -60,7 +59,7 @@ function SearchContent() {
       setSummaries([]);
 
       try {
-        const response = await fetch('/api/search', {
+        const response = await fetch('/api/v2/search', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ query }),
@@ -73,7 +72,7 @@ function SearchContent() {
           throw new Error(data.error || 'Search failed');
         }
 
-        setSummaries((data.results as ProfileSummary[]) || []);
+        setSummaries((data.results as ProfileSummaryV2[]) || []);
         setMetadata({
           cached: Boolean(data.cached),
           timestamp: typeof data.timestamp === 'number' ? data.timestamp : null,
@@ -99,10 +98,7 @@ function SearchContent() {
       <div className="min-h-screen px-4 py-8 pt-24">
         <div className="mx-auto max-w-7xl">
         <div className="mb-8 flex flex-col gap-4">
-          <div className="flex items-center justify-between">
-            <h1 className="text-3xl font-bold">Search Results</h1>
-            <ApiKeySettings />
-          </div>
+          <h1 className="text-3xl font-bold">Search Results</h1>
           <SearchBar onSearch={handleSearch} isLoading={isLoading} value={query} />
         </div>
 
