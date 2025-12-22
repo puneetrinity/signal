@@ -1,8 +1,5 @@
 'use client';
 
-// Disable static prerendering - this page requires auth
-export const dynamic = 'force-dynamic';
-
 import { use, useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';

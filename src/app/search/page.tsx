@@ -1,8 +1,5 @@
 'use client';
 
-// Disable static prerendering - this page requires auth
-export const dynamic = 'force-dynamic';
-
 import { Suspense, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Loader2, Clock } from 'lucide-react';

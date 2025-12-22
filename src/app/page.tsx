@@ -1,8 +1,5 @@
 "use client";
 
-// Disable static prerendering - layout uses Clerk auth
-export const dynamic = 'force-dynamic';
-
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { SearchBar } from "@/components/SearchBar";
