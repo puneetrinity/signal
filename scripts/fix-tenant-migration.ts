@@ -1,5 +1,5 @@
 /**
- * Fix missing tenantId columns in production database
+ * Fix missing columns in production database (baselined migrations that didn't execute)
  * Run with: npx tsx scripts/fix-tenant-migration.ts
  */
 
@@ -8,9 +8,41 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 
 async function main() {
-  console.log('[Fix] Starting tenant migration fix...');
+  console.log('[Fix] Starting migration fix...');
 
   const statements = [
+    // === Migration 20251217000000: Add summary fields to enrichment_sessions ===
+    `ALTER TABLE "enrichment_sessions" ADD COLUMN IF NOT EXISTS "summary" TEXT`,
+    `ALTER TABLE "enrichment_sessions" ADD COLUMN IF NOT EXISTS "summaryStructured" JSONB`,
+    `ALTER TABLE "enrichment_sessions" ADD COLUMN IF NOT EXISTS "summaryEvidence" JSONB`,
+    `ALTER TABLE "enrichment_sessions" ADD COLUMN IF NOT EXISTS "summaryModel" TEXT`,
+    `ALTER TABLE "enrichment_sessions" ADD COLUMN IF NOT EXISTS "summaryTokens" INTEGER`,
+    `ALTER TABLE "enrichment_sessions" ADD COLUMN IF NOT EXISTS "summaryGeneratedAt" TIMESTAMP(3)`,
+
+    // === Migration 20251218000000: Add runTrace field ===
+    `ALTER TABLE "enrichment_sessions" ADD COLUMN IF NOT EXISTS "runTrace" JSONB`,
+
+    // === Migration 20251218200000: Create tenant_settings table ===
+    `CREATE TABLE IF NOT EXISTS "tenant_settings" (
+      "id" TEXT NOT NULL,
+      "tenantId" TEXT NOT NULL,
+      "rateLimitMultiplier" DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+      "maxEnrichmentsPerDay" INTEGER NOT NULL DEFAULT 100,
+      "maxQueriesPerEnrichment" INTEGER NOT NULL DEFAULT 30,
+      "maxParallelPlatforms" INTEGER NOT NULL DEFAULT 3,
+      "features" JSONB,
+      "allowContactStorage" BOOLEAN NOT NULL DEFAULT true,
+      "plan" TEXT NOT NULL DEFAULT 'free',
+      "planSince" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "tenant_settings_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "tenant_settings_tenantId_key" ON "tenant_settings"("tenantId")`,
+    `CREATE INDEX IF NOT EXISTS "tenant_settings_tenantId_idx" ON "tenant_settings"("tenantId")`,
+    `CREATE INDEX IF NOT EXISTS "tenant_settings_plan_idx" ON "tenant_settings"("plan")`,
+
+    // === Migration 20251218100000: Add tenantId columns ===
     // Step 1: Add tenantId columns
     `ALTER TABLE "candidates" ADD COLUMN IF NOT EXISTS "tenantId" TEXT`,
     `ALTER TABLE "identity_candidates" ADD COLUMN IF NOT EXISTS "tenantId" TEXT`,
