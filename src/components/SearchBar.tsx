@@ -22,17 +22,18 @@ export function SearchBar({
   onChange,
   placeholder = 'e.g., 10 AI Engineers in SF',
 }: SearchBarProps) {
-  // Internal state for uncontrolled mode
-  const [internalQuery, setInternalQuery] = useState('');
+  // Internal state - initialized from value prop if provided
+  const [internalQuery, setInternalQuery] = useState(value ?? '');
 
-  // Sync internal state when controlled value changes
+  // Sync internal state when controlled value changes (e.g., URL param)
   useEffect(() => {
     if (value !== undefined) {
       setInternalQuery(value);
     }
   }, [value]);
 
-  const query = value !== undefined ? value : internalQuery;
+  // Always use internal state for display - synced from value prop via useEffect
+  const query = internalQuery;
 
   const handleChange = (newValue: string) => {
     setInternalQuery(newValue);
