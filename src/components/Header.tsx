@@ -1,9 +1,27 @@
 'use client';
 
-import { OrganizationSwitcher, UserButton, useAuth } from '@clerk/nextjs';
-import { Search } from 'lucide-react';
+import dynamic from 'next/dynamic';
+import { useAuth } from '@clerk/nextjs';
+import { Search, Loader2 } from 'lucide-react';
 import Image from 'next/image';
 import Link from 'next/link';
+
+// Dynamically import Clerk components to prevent SSR/hydration issues
+const OrganizationSwitcher = dynamic(
+  () => import('@clerk/nextjs').then((mod) => mod.OrganizationSwitcher),
+  {
+    ssr: false,
+    loading: () => <div className="h-9 w-32 animate-pulse rounded-lg bg-muted" />,
+  }
+);
+
+const UserButton = dynamic(
+  () => import('@clerk/nextjs').then((mod) => mod.UserButton),
+  {
+    ssr: false,
+    loading: () => <div className="h-8 w-8 animate-pulse rounded-full bg-muted" />,
+  }
+);
 
 export function Header() {
   const { isSignedIn } = useAuth();
