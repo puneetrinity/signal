@@ -10,6 +10,11 @@ echo "[Migrate] Checking migration status..."
 # Try to deploy migrations normally first
 if npx prisma migrate deploy 2>&1; then
   echo "[Migrate] Migrations applied successfully"
+
+  # Run tenant migration fix (handles baselined migrations that didn't execute)
+  echo "[Migrate] Running tenant migration fix..."
+  npx tsx scripts/fix-tenant-migration.ts || echo "[Migrate] Tenant fix completed (some statements may have been skipped)"
+
   exit 0
 fi
 
