@@ -77,7 +77,7 @@ export interface EvidencePointer {
 }
 
 /**
- * Score breakdown for transparency
+ * Score breakdown for transparency (all fields are numeric for UI rendering)
  */
 export interface ScoreBreakdown {
   bridgeWeight: number;
@@ -89,9 +89,6 @@ export interface ScoreBreakdown {
   profileCompleteness: number;
   activityScore: number;
   total: number;
-  bridgeTier?: BridgeTier;
-  bridgeSignals?: BridgeSignal[];
-  bridgeUrl?: string | null;
 }
 
 /**

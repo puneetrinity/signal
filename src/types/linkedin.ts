@@ -215,6 +215,20 @@ export interface ProfileSummaryV2 extends ProfileSummary {
 }
 
 /**
+ * Score breakdown for identity confidence (all fields numeric)
+ */
+export interface ScoreBreakdownData {
+  bridgeWeight: number;
+  nameMatch: number;
+  handleMatch: number;
+  companyMatch: number;
+  locationMatch: number;
+  profileCompleteness: number;
+  activityScore: number;
+  total: number;
+}
+
+/**
  * Identity candidate (unconfirmed match from enrichment)
  */
 export interface IdentityCandidateData {
@@ -224,14 +238,14 @@ export interface IdentityCandidateData {
   profileUrl: string;
   confidence: number;
   confidenceBucket: string | null;
-  scoreBreakdown: Record<string, number> | null;
+  scoreBreakdown: ScoreBreakdownData | null;
   hasContradiction: boolean;
   contradictionNote: string | null;
   status: 'unconfirmed' | 'confirmed' | 'rejected';
   evidence?: CommitEmailEvidence[];
   createdAt: string;
   updatedAt?: string;
-  // Bridge tier info (v2.1)
+  // Bridge tier info (v2.1) - stored separately from scoreBreakdown
   bridgeTier?: number | null; // 1 = auto-merge, 2 = human review, 3 = weak
   bridgeSignals?: string[] | null;
   persistReason?: string | null;

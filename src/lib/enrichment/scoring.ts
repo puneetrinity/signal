@@ -53,9 +53,6 @@ export interface ScoreBreakdown {
   profileCompleteness: number; // 0-1 based on profile data completeness
   activityScore: number; // 0-1 based on platform activity metrics
   total: number; // Sum of all weights
-  bridgeTier?: BridgeTier;
-  bridgeSignals?: BridgeSignal[];
-  bridgeUrl?: string | null;
 }
 
 /**

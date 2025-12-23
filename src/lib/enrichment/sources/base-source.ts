@@ -796,30 +796,31 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
           // Calculate score
           const scoreBreakdown = this.calculateScore(hints, result, profileInfo);
 
-          // Skip if below threshold
-          if (scoreBreakdown.total < opts.minConfidence) {
+          // Detect bridge signals BEFORE applying minConfidence filter
+          // Tier-1/Tier-2 signals can override the confidence threshold
+          const bridgeSignals = this.detectBridgeSignals(hints, result, profileInfo);
+          const bridge = createBridgeDetection(bridgeSignals, result.url);
+
+          // Skip if below threshold UNLESS we have strong bridge signals (Tier 1 or 2)
+          const hasStrongBridgeSignals = bridge.tier === 1 || bridge.tier === 2;
+          if (scoreBreakdown.total < opts.minConfidence && !hasStrongBridgeSignals) {
             console.log(
-              `[${this.displayName}] Skipping ${result.platformId} (confidence: ${scoreBreakdown.total.toFixed(2)} < ${opts.minConfidence})`
+              `[${this.displayName}] Skipping ${result.platformId} (confidence: ${scoreBreakdown.total.toFixed(2)} < ${opts.minConfidence}, no strong bridge signals)`
             );
             continue;
+          }
+
+          // Log if we're keeping a low-confidence match due to bridge signals
+          if (scoreBreakdown.total < opts.minConfidence && hasStrongBridgeSignals) {
+            console.log(
+              `[${this.displayName}] Keeping ${result.platformId} despite low confidence (${scoreBreakdown.total.toFixed(2)}) due to Tier-${bridge.tier} bridge signals: ${bridge.signals.join(', ')}`
+            );
           }
 
           identitiesAboveThreshold++;
 
           // Detect contradictions
           const contradictions = this.detectContradictions(hints, profileInfo);
-
-          // Detect bridge signals from search result
-          const bridgeSignals = this.detectBridgeSignals(hints, result, profileInfo);
-          const bridge = createBridgeDetection(bridgeSignals, result.url);
-
-          // Enhance scoreBreakdown with bridge info
-          const enhancedScoreBreakdown = {
-            ...scoreBreakdown,
-            bridgeTier: bridge.tier,
-            bridgeSignals: bridge.signals,
-            bridgeUrl: bridge.bridgeUrl,
-          };
 
           // Generate human-readable persist reason
           const persistReason = this.formatPersistReason(bridge, scoreBreakdown);
@@ -832,7 +833,7 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
             displayName: profileInfo.name,
             confidence: scoreBreakdown.total,
             confidenceBucket: this.classifyConfidence(scoreBreakdown.total),
-            scoreBreakdown: enhancedScoreBreakdown,
+            scoreBreakdown,
             evidence: this.createEvidence(result),
             hasContradiction: contradictions.hasContradiction,
             contradictionNote: contradictions.note,

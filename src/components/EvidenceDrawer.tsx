@@ -225,7 +225,8 @@ export function EvidenceDrawer({ identity, isOpen, onClose }: EvidenceDrawerProp
                 </h3>
                 <div className="space-y-2">
                   {Object.entries(identity.scoreBreakdown!)
-                    .sort(([, a], [, b]) => b - a)
+                    .filter(([, value]) => typeof value === 'number' && !isNaN(value))
+                    .sort(([, a], [, b]) => (b as number) - (a as number))
                     .map(([key, value]) => (
                       <div key={key} className="flex items-center justify-between">
                         <span className="text-sm text-foreground">
@@ -237,17 +238,17 @@ export function EvidenceDrawer({ identity, isOpen, onClose }: EvidenceDrawerProp
                               className={`h-full rounded-full ${
                                 key === 'total'
                                   ? 'bg-primary'
-                                  : value > 0.2
+                                  : (value as number) > 0.2
                                   ? 'bg-green-500'
-                                  : value > 0.1
+                                  : (value as number) > 0.1
                                   ? 'bg-yellow-500'
                                   : 'bg-muted-foreground'
                               }`}
-                              style={{ width: `${Math.min(value * 100, 100)}%` }}
+                              style={{ width: `${Math.min((value as number) * 100, 100)}%` }}
                             />
                           </div>
                           <span className="text-xs font-mono text-muted-foreground w-12 text-right">
-                            {(value * 100).toFixed(0)}%
+                            {((value as number) * 100).toFixed(0)}%
                           </span>
                         </div>
                       </div>
