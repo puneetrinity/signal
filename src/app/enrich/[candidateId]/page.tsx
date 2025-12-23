@@ -90,9 +90,9 @@ export default function EnrichmentPage({ params }: PageProps) {
     needsReview: identityCandidates.filter(
       (ic) => ic.status === 'unconfirmed' && ic.bridgeTier === 2
     ),
-    // Tier 3 unconfirmed = "Low Confidence"
+    // Tier 3 unconfirmed = "Low Confidence" (including null/undefined bridgeTier)
     lowConfidence: identityCandidates.filter(
-      (ic) => ic.status === 'unconfirmed' && (ic.bridgeTier === 3 || ic.bridgeTier === null)
+      (ic) => ic.status === 'unconfirmed' && (ic.bridgeTier === 3 || !ic.bridgeTier)
     ),
     // Rejected
     rejected: identityCandidates.filter((ic) => ic.status === 'rejected'),
