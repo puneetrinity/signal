@@ -42,6 +42,7 @@ interface BraveResponse {
 const DEFAULT_TIMEOUT = 8000;
 const DEFAULT_MAX_RESULTS = 20;
 const BRAVE_MAX_PER_PAGE = 20; // Brave API max per request
+const BRAVE_MAX_OFFSET = 9; // Brave API limit: offset must be <= 9
 const BRAVE_API_URL = 'https://api.search.brave.com/res/v1/web/search';
 
 function getConfig() {
@@ -81,7 +82,12 @@ async function executeSearch(
   const url = new URL(BRAVE_API_URL);
   url.searchParams.set('q', query);
   url.searchParams.set('count', String(Math.min(count, BRAVE_MAX_PER_PAGE)));
+  // Brave API requires offset <= 9, skip pagination if offset exceeds limit
   if (offset > 0) {
+    if (offset > BRAVE_MAX_OFFSET) {
+      console.warn(`[Brave] Offset ${offset} exceeds API limit (${BRAVE_MAX_OFFSET}), skipping pagination`);
+      return { query: { original: query } }; // Return empty response
+    }
     url.searchParams.set('offset', String(offset));
   }
 
