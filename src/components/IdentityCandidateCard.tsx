@@ -239,6 +239,9 @@ export function IdentityCandidateCard({
   };
 
   const hasEvidence = identity.evidence && identity.evidence.length > 0;
+  // Email reveal only works for GitHub (via commit emails)
+  const canRevealEmail = hasEvidence && identity.platform === 'github' &&
+    identity.evidence?.some(e => e.type === 'commit_email');
 
   // Extract significant score signals for "Why matched" chips
   const scoreSignals = identity.scoreBreakdown
@@ -340,7 +343,7 @@ export function IdentityCandidateCard({
         )}
         {identity.status === 'unconfirmed' && (
           <>
-            {hasEvidence && onRevealEmail && !revealedEmail && (
+            {canRevealEmail && onRevealEmail && !revealedEmail && (
               <Button
                 size="sm"
                 variant="outline"
