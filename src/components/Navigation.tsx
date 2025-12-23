@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import Image from 'next/image';
 import { usePathname } from 'next/navigation';
-import { Home } from 'lucide-react';
+import { Home, Search, ClipboardCheck, Activity } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const navItems = [
@@ -11,6 +11,21 @@ const navItems = [
     name: 'Home',
     href: '/',
     icon: Home,
+  },
+  {
+    name: 'Search',
+    href: '/search',
+    icon: Search,
+  },
+  {
+    name: 'Review',
+    href: '/review',
+    icon: ClipboardCheck,
+  },
+  {
+    name: 'Sessions',
+    href: '/sessions',
+    icon: Activity,
   },
 ];
 

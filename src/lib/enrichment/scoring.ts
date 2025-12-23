@@ -14,8 +14,25 @@
  * - low: >= 0.35 (possible match, needs review)
  * - rejected: < 0.35 (unlikely match)
  *
+ * Bridge tiers (v2.1):
+ * - Tier 1: Explicit bidirectional link - auto-merge eligible
+ * - Tier 2: Strong unidirectional signals - human review
+ * - Tier 3: Weak/speculative - store as candidate only
+ *
+ * NOTE: Bridge tiering + auto-merge logic is protected by offline eval harness.
+ * Changes require fixture updates + CI gate review.
+ * @see eval/TODO.md for invariants and metrics.
+ *
  * @see docs/ARCHITECTURE_V2.1.md
  */
+
+import {
+  type BridgeTier,
+  type BridgeSignal,
+  type BridgeDetection,
+  createBridgeDetection,
+  TIER_2_CAP,
+} from './bridge-types';
 
 /**
  * Score breakdown for transparency
@@ -36,6 +53,9 @@ export interface ScoreBreakdown {
   profileCompleteness: number; // 0-1 based on profile data completeness
   activityScore: number; // 0-1 based on platform activity metrics
   total: number; // Sum of all weights
+  bridgeTier?: BridgeTier;
+  bridgeSignals?: BridgeSignal[];
+  bridgeUrl?: string | null;
 }
 
 /**
@@ -427,9 +447,224 @@ export function detectContradictions(input: ScoringInput): {
   return { hasContradiction: false };
 }
 
+/**
+ * Detect bridge signals from scoring input
+ * Returns the signals detected for use in bridge tier classification
+ */
+export function detectBridgeSignals(input: ScoringInput): BridgeSignal[] {
+  const signals: BridgeSignal[] = [];
+
+  // Tier 1 signals (explicit links)
+  if (input.hasProfileLink) {
+    signals.push('linkedin_url_in_bio');
+  }
+
+  // Tier 2 signals (strong unidirectional)
+  if (input.hasCommitEvidence && input.commitCount > 0) {
+    signals.push('commit_email_domain');
+  }
+
+  // If no signals found, return 'none'
+  if (signals.length === 0) {
+    signals.push('none');
+  }
+
+  return signals;
+}
+
+/**
+ * Create bridge detection from scoring input
+ * Integrates signal detection with tier classification
+ */
+export function createBridgeFromScoring(
+  input: ScoringInput,
+  bridgeUrl: string | null = null,
+  extraSignals: BridgeSignal[] = []
+): BridgeDetection {
+  const signals = [...detectBridgeSignals(input), ...extraSignals];
+  return createBridgeDetection(signals, bridgeUrl);
+}
+
+/**
+ * Extended scoring result with bridge detection
+ */
+export interface ScoringResultWithBridge {
+  score: ScoreBreakdown;
+  bridge: BridgeDetection;
+  adjustedConfidence: number;
+  persistDecision: 'persist' | 'skip' | 'cap_exceeded';
+}
+
+/**
+ * Calculate confidence score with bridge tier integration
+ * Applies confidence floor based on bridge tier
+ */
+/**
+ * Tier-1 score boost when explicit bridge evidence exists
+ * This helps Tier-1 matches clear the auto-merge threshold (0.90)
+ * Only applied when: Tier-1, no contradictions, not team-page downgrade
+ */
+const TIER_1_SCORE_BOOST = 0.08;
+
+export function calculateConfidenceWithBridge(
+  input: ScoringInput,
+  bridgeUrl: string | null = null,
+  tier2Count: number = 0,
+  extraSignals: BridgeSignal[] = [],
+  hasContradiction: boolean = false
+): ScoringResultWithBridge {
+  const score = calculateConfidenceScore(input);
+  const bridge = createBridgeFromScoring(input, bridgeUrl, extraSignals);
+
+  // Check if this is a "strict" Tier-1 (not downgraded from team page)
+  const isStrictTier1 = bridge.tier === 1 &&
+    !bridge.signals.includes('linkedin_url_in_team_page') &&
+    !hasContradiction;
+
+  // Apply Tier-1 boost when strict Tier-1 evidence exists
+  // This helps Tier-1 matches clear the auto-merge threshold (0.90)
+  let boostedScore = score.total;
+  if (isStrictTier1) {
+    boostedScore = Math.min(1.0, score.total + TIER_1_SCORE_BOOST);
+  }
+
+  // Apply confidence floor from bridge tier (use boosted score)
+  const adjustedConfidence = Math.max(boostedScore, bridge.confidenceFloor);
+
+  // Determine persist decision
+  let persistDecision: 'persist' | 'skip' | 'cap_exceeded' = 'skip';
+
+  if (bridge.tier === 1) {
+    // Tier 1: Always persist (auto-merge eligible)
+    persistDecision = 'persist';
+  } else if (bridge.tier === 2) {
+    // Tier 2: Persist up to global cap
+    if (tier2Count < TIER_2_CAP) {
+      persistDecision = 'persist';
+    } else {
+      persistDecision = 'cap_exceeded';
+    }
+  } else {
+    // Tier 3: Only persist if meets traditional threshold with meaningful signals
+    if (shouldPersistIdentity(score)) {
+      persistDecision = 'persist';
+    }
+  }
+
+  return {
+    score,
+    bridge,
+    adjustedConfidence,
+    persistDecision,
+  };
+}
+
+/**
+ * Generate human-readable reason string from bridge signals
+ */
+function formatBridgeReason(bridge: BridgeDetection, score: ScoreBreakdown): string {
+  const signals = bridge.signals.filter(s => s !== 'none');
+
+  if (signals.length === 0) {
+    if (score.bridgeWeight > 0) {
+      return 'Profile contains LinkedIn link';
+    }
+    if ((score.handleMatch ?? 0) > 0.5) {
+      return `Username match (${(score.handleMatch! * 100).toFixed(0)}% confidence)`;
+    }
+    if (score.nameMatch > 0.2) {
+      return `Name match: ${(score.nameMatch * 100 / 0.30).toFixed(0)}% similarity`;
+    }
+    return 'Search result match';
+  }
+
+  const signalDescriptions: Record<BridgeSignal, string> = {
+    'linkedin_url_in_bio': 'LinkedIn URL found in profile bio',
+    'linkedin_url_in_blog': 'LinkedIn URL found in website/blog field',
+    'linkedin_url_in_page': 'LinkedIn URL found on external page',
+    'linkedin_url_in_team_page': 'LinkedIn URL found on team page (multiple profiles)',
+    'commit_email_domain': 'Commit email matches company domain',
+    'cross_platform_handle': 'Same username across platforms',
+    'mutual_reference': 'Both profiles reference each other',
+    'verified_domain': 'Platform-verified company domain',
+    'email_in_public_page': 'Email found on public page',
+    'conference_speaker': 'Listed as conference speaker with LinkedIn',
+    'none': 'No bridge signal detected',
+  };
+
+  return signals.map(s => signalDescriptions[s] || s).join('; ');
+}
+
+/**
+ * Check if identity should be persisted based on bridge tier and score
+ * Updated to integrate bridge tier logic
+ *
+ * Returns human-readable reason strings for transparency
+ */
+export function shouldPersistWithBridge(
+  score: ScoreBreakdown,
+  bridge: BridgeDetection,
+  tier2Count: number = 0
+): {
+  shouldPersist: boolean;
+  reason: string;
+  tier: BridgeTier;
+} {
+  const bridgeReason = formatBridgeReason(bridge, score);
+
+  // Tier 1: Always persist (explicit bidirectional link)
+  if (bridge.tier === 1) {
+    return {
+      shouldPersist: true,
+      reason: `Auto-merge eligible: ${bridgeReason}`,
+      tier: 1,
+    };
+  }
+
+  // Tier 2: Check cap (strong unidirectional signal)
+  if (bridge.tier === 2) {
+    if (tier2Count < TIER_2_CAP) {
+      return {
+        shouldPersist: true,
+        reason: `Strong signal (${tier2Count + 1}/${TIER_2_CAP}): ${bridgeReason}`,
+        tier: 2,
+      };
+    }
+    return {
+      shouldPersist: false,
+      reason: `Cap exceeded (${tier2Count}/${TIER_2_CAP}): ${bridgeReason}`,
+      tier: 2,
+    };
+  }
+
+  // Tier 3: Traditional threshold check (weak/speculative)
+  if (shouldPersistIdentity(score)) {
+    const confidence = (score.total * 100).toFixed(0);
+    return {
+      shouldPersist: true,
+      reason: `Threshold match (${confidence}%): ${bridgeReason}`,
+      tier: 3,
+    };
+  }
+
+  return {
+    shouldPersist: false,
+    reason: `Below threshold (${(score.total * 100).toFixed(0)}%): ${bridgeReason}`,
+    tier: 3,
+  };
+}
+
+// Re-export bridge types for convenience
+export type { BridgeTier, BridgeSignal, BridgeDetection };
+
 export default {
   calculateConfidenceScore,
   classifyConfidence,
   meetsStorageThreshold,
+  shouldPersistIdentity,
   detectContradictions,
+  detectBridgeSignals,
+  createBridgeFromScoring,
+  calculateConfidenceWithBridge,
+  shouldPersistWithBridge,
 };

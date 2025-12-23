@@ -1,0 +1,22 @@
+{
+  "$schema": "./config.schema.json",
+  "description": "Enrichment evaluation configuration",
+  "thresholds": {
+    "autoMergeMinScore": 0.90,
+    "tier2HandleMin": 0.70,
+    "tier2NameMin": 0.60,
+    "persistMinScore": 0.35
+  },
+  "caps": {
+    "tier2GlobalMax": 3
+  },
+  "modes": {
+    "enableUrlReverse": true,
+    "enableHintConfidenceGating": true
+  },
+  "ciGates": {
+    "autoMergePrecision": 0.98,
+    "tier1DetectionRecall": 0.85,
+    "candidatesWithPersistedIdentityDelta": 0.05
+  }
+}

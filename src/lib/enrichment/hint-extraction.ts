@@ -8,6 +8,8 @@
  * @see docs/ARCHITECTURE_V2.1.md
  */
 
+import type { HintWithConfidence, EnrichedHints, HintSource } from './bridge-types';
+
 /**
  * Extracted hints from LinkedIn SERP data
  */
@@ -17,6 +19,16 @@ export interface ExtractedHints {
   locationHint: string | null;
   companyHint: string | null;
   nameSource: 'title' | 'slug' | null;
+}
+
+/**
+ * Extended hints with confidence scores
+ */
+export interface ExtractedHintsWithConfidence extends ExtractedHints {
+  nameConfidence: number;
+  headlineConfidence: number;
+  locationConfidence: number;
+  companyConfidence: number;
 }
 
 /**
@@ -420,6 +432,202 @@ function cleanCompanyName(name: string): string {
     .trim();
 }
 
+/**
+ * Calculate name hint confidence based on extraction method and quality
+ */
+function calculateNameConfidence(
+  name: string | null,
+  source: 'title' | 'slug' | null,
+  title: string
+): number {
+  if (!name) return 0;
+
+  // Title-based extraction is more reliable
+  if (source === 'title') {
+    // Check if title follows clean "Name - Headline | LinkedIn" pattern
+    if (/^[A-Z][a-z]+\s+[A-Z][a-z]+\s*-\s*.+\|\s*LinkedIn$/i.test(title)) {
+      return 0.95;
+    }
+    // Standard pattern with delimiter
+    if (title.includes(' - ') || title.includes(' | ')) {
+      return 0.85;
+    }
+    return 0.75;
+  }
+
+  // Slug-based extraction is less reliable
+  if (source === 'slug') {
+    const parts = name.split(/\s+/);
+    // Two-part names (first last) are more reliable
+    if (parts.length === 2) {
+      return 0.60;
+    }
+    // Three-part names might include middle name
+    if (parts.length === 3) {
+      return 0.50;
+    }
+    return 0.40;
+  }
+
+  return 0.30;
+}
+
+/**
+ * Calculate headline hint confidence
+ */
+function calculateHeadlineConfidence(headline: string | null, title: string): number {
+  if (!headline) return 0;
+
+  // Clean pattern with clear delimiter
+  if (title.includes(' - ') && headline.length > 10 && headline.length < 100) {
+    return 0.85;
+  }
+
+  // Shorter headlines might be truncated
+  if (headline.length < 10) {
+    return 0.50;
+  }
+
+  // Very long headlines might include extra content
+  if (headline.length > 100) {
+    return 0.60;
+  }
+
+  return 0.70;
+}
+
+/**
+ * Calculate location hint confidence
+ */
+function calculateLocationConfidence(location: string | null, snippet: string): number {
+  if (!location) return 0;
+
+  // Explicit "Location:" pattern is very reliable
+  if (snippet.toLowerCase().includes('location:')) {
+    return 0.95;
+  }
+
+  // City, State/Country pattern
+  if (/^[A-Z][a-z]+(?:\s[A-Z][a-z]+)*,\s*[A-Z]/.test(location)) {
+    return 0.85;
+  }
+
+  // Known cities/regions
+  const knownLocations = [
+    'san francisco', 'new york', 'los angeles', 'seattle', 'boston',
+    'london', 'berlin', 'bangalore', 'singapore', 'toronto',
+  ];
+  if (knownLocations.some(loc => location.toLowerCase().includes(loc))) {
+    return 0.80;
+  }
+
+  return 0.60;
+}
+
+/**
+ * Calculate company hint confidence
+ */
+function calculateCompanyConfidence(company: string | null, headline: string | null): number {
+  if (!company) return 0;
+
+  // "at Company" pattern is very reliable
+  if (headline && /\bat\s+/i.test(headline)) {
+    return 0.90;
+  }
+
+  // Known major companies
+  const majorCompanies = [
+    'google', 'meta', 'amazon', 'microsoft', 'apple', 'netflix',
+    'uber', 'airbnb', 'stripe', 'openai', 'anthropic',
+  ];
+  if (majorCompanies.some(c => company.toLowerCase().includes(c))) {
+    return 0.95;
+  }
+
+  // Company indicators (Inc, LLC, etc.)
+  if (/\b(inc|llc|ltd|corp|company)\b/i.test(company)) {
+    return 0.85;
+  }
+
+  // Inferred from context
+  return 0.60;
+}
+
+/**
+ * Extract all hints with confidence scores
+ */
+export function extractAllHintsWithConfidence(
+  linkedinId: string,
+  linkedinUrl: string,
+  title: string,
+  snippet: string,
+  roleType: string | null = null
+): EnrichedHints {
+  const basic = extractAllHints(linkedinId, title, snippet);
+
+  const nameConfidence = calculateNameConfidence(basic.nameHint, basic.nameSource, title);
+  const headlineConfidence = calculateHeadlineConfidence(basic.headlineHint, title);
+  const locationConfidence = calculateLocationConfidence(basic.locationHint, snippet);
+  const companyConfidence = calculateCompanyConfidence(basic.companyHint, basic.headlineHint);
+
+  // Map nameSource to HintSource
+  const nameHintSource: HintSource = basic.nameSource === 'title' ? 'serp_title' :
+    basic.nameSource === 'slug' ? 'url_slug' : 'unknown';
+
+  return {
+    nameHint: {
+      value: basic.nameHint,
+      confidence: nameConfidence,
+      source: nameHintSource,
+    },
+    headlineHint: {
+      value: basic.headlineHint,
+      confidence: headlineConfidence,
+      source: 'serp_title',
+    },
+    locationHint: {
+      value: basic.locationHint,
+      confidence: locationConfidence,
+      source: 'serp_snippet',
+    },
+    companyHint: {
+      value: basic.companyHint,
+      confidence: companyConfidence,
+      source: basic.headlineHint ? 'headline_parse' : 'serp_title',
+    },
+    linkedinId,
+    linkedinUrl,
+    roleType,
+  };
+}
+
+/**
+ * Check if a hint is reliable enough for use in queries
+ */
+export function isHintReliable(hint: HintWithConfidence, threshold: number = 0.5): boolean {
+  return hint.value !== null && hint.confidence >= threshold;
+}
+
+/**
+ * Get the most reliable hints above a threshold
+ */
+export function getReliableHints(
+  hints: EnrichedHints,
+  threshold: number = 0.5
+): {
+  name: string | null;
+  company: string | null;
+  location: string | null;
+  headline: string | null;
+} {
+  return {
+    name: isHintReliable(hints.nameHint, threshold) ? hints.nameHint.value : null,
+    company: isHintReliable(hints.companyHint, threshold) ? hints.companyHint.value : null,
+    location: isHintReliable(hints.locationHint, threshold) ? hints.locationHint.value : null,
+    headline: isHintReliable(hints.headlineHint, threshold) ? hints.headlineHint.value : null,
+  };
+}
+
 export default {
   extractNameFromSlug,
   extractNameFromTitle,
@@ -427,4 +635,7 @@ export default {
   extractCompanyFromHeadline,
   extractLocationFromSnippet,
   extractAllHints,
+  extractAllHintsWithConfidence,
+  isHintReliable,
+  getReliableHints,
 };

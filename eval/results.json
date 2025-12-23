@@ -1,0 +1,1477 @@
+{
+  "config": {
+    "$schema": "./config.schema.json",
+    "description": "Enrichment evaluation configuration",
+    "thresholds": {
+      "autoMergeMinScore": 0.9,
+      "tier2HandleMin": 0.7,
+      "tier2NameMin": 0.6,
+      "persistMinScore": 0.35
+    },
+    "caps": {
+      "tier2GlobalMax": 3
+    },
+    "modes": {
+      "enableUrlReverse": true,
+      "enableHintConfidenceGating": true
+    },
+    "ciGates": {
+      "autoMergePrecision": 0.98,
+      "tier1DetectionRecall": 0.85,
+      "candidatesWithPersistedIdentityDelta": 0.05
+    }
+  },
+  "summary": {
+    "totalCandidates": 20,
+    "candidatesWithPersistedIdentity": 15,
+    "candidatesWithTier1": 9,
+    "candidatesWithTier2": 0,
+    "candidatesWithTier3Only": 6,
+    "autoMergeAttempts": 8,
+    "autoMergeCorrect": 8,
+    "autoMergeIncorrect": 0,
+    "autoMergePrecision": 1,
+    "autoMergeRecall": 0.4,
+    "tier1ExpectedCount": 9,
+    "tier1DetectedCount": 9,
+    "tier1DetectionRecall": 0.8888888888888888,
+    "topIdentityAttempts": 15,
+    "topIdentityCorrect": 17,
+    "topIdentityAccuracy": 1.1333333333333333,
+    "tierCorrectCount": 13,
+    "tierAccuracy": 0.65,
+    "avgQueriesPerCandidate": 4.7,
+    "totalQueries": 94,
+    "contradictionCount": 0,
+    "contradictionRate": 0,
+    "passedCIGates": true,
+    "ciGateResults": {
+      "autoMergePrecision": {
+        "passed": true,
+        "value": 1,
+        "threshold": 0.98
+      },
+      "tier1DetectionRecall": {
+        "passed": true,
+        "value": 0.8888888888888888,
+        "threshold": 0.85
+      },
+      "candidatesWithPersistedIdentity": {
+        "passed": true,
+        "value": 0.75,
+        "threshold": 0.5
+      }
+    }
+  },
+  "results": [
+    {
+      "candidateId": "c_001",
+      "linkedinId": "sarah-chen-dev",
+      "identitiesFound": [
+        {
+          "platform": "github",
+          "platformId": "sarahchen",
+          "profileUrl": "https://github.com/sarahchen",
+          "confidence": 0.98,
+          "bridgeTier": 1,
+          "bridgeSignals": [
+            "linkedin_url_in_bio",
+            "linkedin_url_in_page"
+          ],
+          "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio; LinkedIn URL found on external page",
+          "autoMergeEligible": true
+        }
+      ],
+      "persistedIdentities": [
+        {
+          "platform": "github",
+          "platformId": "sarahchen",
+          "profileUrl": "https://github.com/sarahchen",
+          "confidence": 0.98,
+          "bridgeTier": 1,
+          "bridgeSignals": [
+            "linkedin_url_in_bio",
+            "linkedin_url_in_page"
+          ],
+          "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio; LinkedIn URL found on external page",
+          "autoMergeEligible": true
+        }
+      ],
+      "topIdentity": {
+        "platform": "github",
+        "platformId": "sarahchen",
+        "profileUrl": "https://github.com/sarahchen",
+        "confidence": 0.98,
+        "bridgeTier": 1,
+        "bridgeSignals": [
+          "linkedin_url_in_bio",
+          "linkedin_url_in_page"
+        ],
+        "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio; LinkedIn URL found on external page",
+        "autoMergeEligible": true
+      },
+      "autoMergeDecision": true,
+      "autoMergedIdentity": {
+        "platform": "github",
+        "platformId": "sarahchen",
+        "profileUrl": "https://github.com/sarahchen",
+        "confidence": 0.98,
+        "bridgeTier": 1,
+        "bridgeSignals": [
+          "linkedin_url_in_bio",
+          "linkedin_url_in_page"
+        ],
+        "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio; LinkedIn URL found on external page",
+        "autoMergeEligible": true
+      },
+      "queriesExecuted": 3,
+      "queriesByType": {
+        "name_only": 2,
+        "name_company": 0,
+        "name_location": 0,
+        "slug_based": 0,
+        "handle_based": 0,
+        "url_reverse": 3,
+        "company_amplified": 0
+      },
+      "bridgesDetected": 1,
+      "tier1Count": 1,
+      "tier2Count": 0,
+      "tier3Count": 0,
+      "topIdentityCorrect": true,
+      "autoMergeCorrect": true,
+      "tierCorrect": true,
+      "hasContradiction": false,
+      "trace": {
+        "webSearchQueries": [
+          "\"https://www.linkedin.com/in/sarah-chen-dev\"",
+          "\"https://www.linkedin.com/in/sarah-chen-dev\" site:github.com",
+          "\"https://www.linkedin.com/in/sarah-chen-dev\" (github OR \"personal site\" OR portfolio OR about)"
+        ],
+        "githubSearchQueries": [],
+        "bridgeSignalsFound": [
+          "linkedin_url_in_bio",
+          "linkedin_url_in_page"
+        ]
+      }
+    },
+    {
+      "candidateId": "c_002",
+      "linkedinId": "michael-torres-123",
+      "identitiesFound": [
+        {
+          "platform": "github",
+          "platformId": "mtorres",
+          "profileUrl": "https://github.com/mtorres",
+          "confidence": 0.83,
+          "bridgeTier": 1,
+          "bridgeSignals": [
+            "linkedin_url_in_bio"
+          ],
+          "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+          "autoMergeEligible": true
+        }
+      ],
+      "persistedIdentities": [
+        {
+          "platform": "github",
+          "platformId": "mtorres",
+          "profileUrl": "https://github.com/mtorres",
+          "confidence": 0.83,
+          "bridgeTier": 1,
+          "bridgeSignals": [
+            "linkedin_url_in_bio"
+          ],
+          "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+          "autoMergeEligible": true
+        }
+      ],
+      "topIdentity": {
+        "platform": "github",
+        "platformId": "mtorres",
+        "profileUrl": "https://github.com/mtorres",
+        "confidence": 0.83,
+        "bridgeTier": 1,
+        "bridgeSignals": [
+          "linkedin_url_in_bio"
+        ],
+        "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+        "autoMergeEligible": true
+      },
+      "autoMergeDecision": false,
+      "autoMergedIdentity": null,
+      "queriesExecuted": 4,
+      "queriesByType": {
+        "name_only": 2,
+        "name_company": 0,
+        "name_location": 0,
+        "slug_based": 0,
+        "handle_based": 0,
+        "url_reverse": 3,
+        "company_amplified": 0
+      },
+      "bridgesDetected": 1,
+      "tier1Count": 1,
+      "tier2Count": 0,
+      "tier3Count": 0,
+      "topIdentityCorrect": true,
+      "autoMergeCorrect": false,
+      "tierCorrect": true,
+      "hasContradiction": false,
+      "trace": {
+        "webSearchQueries": [
+          "\"https://www.linkedin.com/in/michael-torres-123\"",
+          "\"https://www.linkedin.com/in/michael-torres-123\" site:github.com",
+          "\"https://www.linkedin.com/in/michael-torres-123\" (github OR \"personal site\" OR portfolio OR about)"
+        ],
+        "githubSearchQueries": [
+          "\"Michael Torres\""
+        ],
+        "bridgeSignalsFound": [
+          "linkedin_url_in_bio"
+        ]
+      }
+    },
+    {
+      "candidateId": "c_003",
+      "linkedinId": "emma-wilson-eng",
+      "identitiesFound": [
+        {
+          "platform": "github",
+          "platformId": "emmawilson",
+          "profileUrl": "https://github.com/emmawilson",
+          "confidence": 0.49999999999999994,
+          "bridgeTier": 3,
+          "bridgeSignals": [],
+          "persistReason": "Threshold match (50%): Name match: 100% similarity",
+          "autoMergeEligible": false
+        }
+      ],
+      "persistedIdentities": [
+        {
+          "platform": "github",
+          "platformId": "emmawilson",
+          "profileUrl": "https://github.com/emmawilson",
+          "confidence": 0.49999999999999994,
+          "bridgeTier": 3,
+          "bridgeSignals": [],
+          "persistReason": "Threshold match (50%): Name match: 100% similarity",
+          "autoMergeEligible": false
+        }
+      ],
+      "topIdentity": {
+        "platform": "github",
+        "platformId": "emmawilson",
+        "profileUrl": "https://github.com/emmawilson",
+        "confidence": 0.49999999999999994,
+        "bridgeTier": 3,
+        "bridgeSignals": [],
+        "persistReason": "Threshold match (50%): Name match: 100% similarity",
+        "autoMergeEligible": false
+      },
+      "autoMergeDecision": false,
+      "autoMergedIdentity": null,
+      "queriesExecuted": 6,
+      "queriesByType": {
+        "name_only": 2,
+        "name_company": 0,
+        "name_location": 0,
+        "slug_based": 0,
+        "handle_based": 0,
+        "url_reverse": 3,
+        "company_amplified": 1
+      },
+      "bridgesDetected": 0,
+      "tier1Count": 0,
+      "tier2Count": 0,
+      "tier3Count": 1,
+      "topIdentityCorrect": true,
+      "autoMergeCorrect": true,
+      "tierCorrect": false,
+      "hasContradiction": false,
+      "trace": {
+        "webSearchQueries": [
+          "\"https://www.linkedin.com/in/emma-wilson-eng\"",
+          "\"https://www.linkedin.com/in/emma-wilson-eng\" site:github.com",
+          "\"https://www.linkedin.com/in/emma-wilson-eng\" (github OR \"personal site\" OR portfolio OR about)"
+        ],
+        "githubSearchQueries": [
+          "\"Emma Wilson\"",
+          "Emma Wilson",
+          "\"Emma Wilson\" ai backend"
+        ],
+        "bridgeSignalsFound": []
+      }
+    },
+    {
+      "candidateId": "c_004",
+      "linkedinId": "alex-kumar-ml",
+      "identitiesFound": [
+        {
+          "platform": "github",
+          "platformId": "alexkumar",
+          "profileUrl": "https://github.com/alexkumar",
+          "confidence": 0.49999999999999994,
+          "bridgeTier": 3,
+          "bridgeSignals": [],
+          "persistReason": "Threshold match (50%): Name match: 100% similarity",
+          "autoMergeEligible": false
+        }
+      ],
+      "persistedIdentities": [
+        {
+          "platform": "github",
+          "platformId": "alexkumar",
+          "profileUrl": "https://github.com/alexkumar",
+          "confidence": 0.49999999999999994,
+          "bridgeTier": 3,
+          "bridgeSignals": [],
+          "persistReason": "Threshold match (50%): Name match: 100% similarity",
+          "autoMergeEligible": false
+        }
+      ],
+      "topIdentity": {
+        "platform": "github",
+        "platformId": "alexkumar",
+        "profileUrl": "https://github.com/alexkumar",
+        "confidence": 0.49999999999999994,
+        "bridgeTier": 3,
+        "bridgeSignals": [],
+        "persistReason": "Threshold match (50%): Name match: 100% similarity",
+        "autoMergeEligible": false
+      },
+      "autoMergeDecision": false,
+      "autoMergedIdentity": null,
+      "queriesExecuted": 6,
+      "queriesByType": {
+        "name_only": 2,
+        "name_company": 0,
+        "name_location": 0,
+        "slug_based": 0,
+        "handle_based": 0,
+        "url_reverse": 3,
+        "company_amplified": 1
+      },
+      "bridgesDetected": 0,
+      "tier1Count": 0,
+      "tier2Count": 0,
+      "tier3Count": 1,
+      "topIdentityCorrect": true,
+      "autoMergeCorrect": true,
+      "tierCorrect": false,
+      "hasContradiction": false,
+      "trace": {
+        "webSearchQueries": [
+          "\"https://www.linkedin.com/in/alex-kumar-ml\"",
+          "\"https://www.linkedin.com/in/alex-kumar-ml\" site:github.com",
+          "\"https://www.linkedin.com/in/alex-kumar-ml\" (github OR \"personal site\" OR portfolio OR about)"
+        ],
+        "githubSearchQueries": [
+          "\"Alex Kumar\"",
+          "Alex Kumar",
+          "\"Alex Kumar\" ml ai"
+        ],
+        "bridgeSignalsFound": []
+      }
+    },
+    {
+      "candidateId": "c_005",
+      "linkedinId": "jennifer-martinez-pm",
+      "identitiesFound": [
+        {
+          "platform": "github",
+          "platformId": "jmartinez",
+          "profileUrl": "https://github.com/jmartinez",
+          "confidence": 0.35,
+          "bridgeTier": 3,
+          "bridgeSignals": [],
+          "persistReason": "Threshold match (35%): Name match: 100% similarity",
+          "autoMergeEligible": false
+        }
+      ],
+      "persistedIdentities": [
+        {
+          "platform": "github",
+          "platformId": "jmartinez",
+          "profileUrl": "https://github.com/jmartinez",
+          "confidence": 0.35,
+          "bridgeTier": 3,
+          "bridgeSignals": [],
+          "persistReason": "Threshold match (35%): Name match: 100% similarity",
+          "autoMergeEligible": false
+        }
+      ],
+      "topIdentity": {
+        "platform": "github",
+        "platformId": "jmartinez",
+        "profileUrl": "https://github.com/jmartinez",
+        "confidence": 0.35,
+        "bridgeTier": 3,
+        "bridgeSignals": [],
+        "persistReason": "Threshold match (35%): Name match: 100% similarity",
+        "autoMergeEligible": false
+      },
+      "autoMergeDecision": false,
+      "autoMergedIdentity": null,
+      "queriesExecuted": 5,
+      "queriesByType": {
+        "name_only": 2,
+        "name_company": 0,
+        "name_location": 0,
+        "slug_based": 0,
+        "handle_based": 0,
+        "url_reverse": 3,
+        "company_amplified": 0
+      },
+      "bridgesDetected": 0,
+      "tier1Count": 0,
+      "tier2Count": 0,
+      "tier3Count": 1,
+      "topIdentityCorrect": true,
+      "autoMergeCorrect": true,
+      "tierCorrect": true,
+      "hasContradiction": false,
+      "trace": {
+        "webSearchQueries": [
+          "\"https://www.linkedin.com/in/jennifer-martinez-pm\"",
+          "\"https://www.linkedin.com/in/jennifer-martinez-pm\" site:github.com",
+          "\"https://www.linkedin.com/in/jennifer-martinez-pm\" (github OR \"personal site\" OR portfolio OR about)"
+        ],
+        "githubSearchQueries": [
+          "\"Jennifer Martinez\"",
+          "Jennifer Martinez"
+        ],
+        "bridgeSignalsFound": []
+      }
+    },
+    {
+      "candidateId": "c_006",
+      "linkedinId": "david-lee-swe",
+      "identitiesFound": [
+        {
+          "platform": "github",
+          "platformId": "davidlee-dev",
+          "profileUrl": "https://github.com/davidlee-dev",
+          "confidence": 0.98,
+          "bridgeTier": 1,
+          "bridgeSignals": [
+            "linkedin_url_in_bio"
+          ],
+          "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+          "autoMergeEligible": true
+        }
+      ],
+      "persistedIdentities": [
+        {
+          "platform": "github",
+          "platformId": "davidlee-dev",
+          "profileUrl": "https://github.com/davidlee-dev",
+          "confidence": 0.98,
+          "bridgeTier": 1,
+          "bridgeSignals": [
+            "linkedin_url_in_bio"
+          ],
+          "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+          "autoMergeEligible": true
+        }
+      ],
+      "topIdentity": {
+        "platform": "github",
+        "platformId": "davidlee-dev",
+        "profileUrl": "https://github.com/davidlee-dev",
+        "confidence": 0.98,
+        "bridgeTier": 1,
+        "bridgeSignals": [
+          "linkedin_url_in_bio"
+        ],
+        "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+        "autoMergeEligible": true
+      },
+      "autoMergeDecision": true,
+      "autoMergedIdentity": {
+        "platform": "github",
+        "platformId": "davidlee-dev",
+        "profileUrl": "https://github.com/davidlee-dev",
+        "confidence": 0.98,
+        "bridgeTier": 1,
+        "bridgeSignals": [
+          "linkedin_url_in_bio"
+        ],
+        "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+        "autoMergeEligible": true
+      },
+      "queriesExecuted": 4,
+      "queriesByType": {
+        "name_only": 2,
+        "name_company": 0,
+        "name_location": 0,
+        "slug_based": 0,
+        "handle_based": 0,
+        "url_reverse": 3,
+        "company_amplified": 0
+      },
+      "bridgesDetected": 1,
+      "tier1Count": 1,
+      "tier2Count": 0,
+      "tier3Count": 0,
+      "topIdentityCorrect": true,
+      "autoMergeCorrect": true,
+      "tierCorrect": true,
+      "hasContradiction": false,
+      "trace": {
+        "webSearchQueries": [
+          "\"https://www.linkedin.com/in/david-lee-swe\"",
+          "\"https://www.linkedin.com/in/david-lee-swe\" site:github.com",
+          "\"https://www.linkedin.com/in/david-lee-swe\" (github OR \"personal site\" OR portfolio OR about)"
+        ],
+        "githubSearchQueries": [
+          "\"David Lee\""
+        ],
+        "bridgeSignalsFound": [
+          "linkedin_url_in_bio"
+        ]
+      }
+    },
+    {
+      "candidateId": "c_007",
+      "linkedinId": "priya-patel-cloud",
+      "identitiesFound": [
+        {
+          "platform": "github",
+          "platformId": "priyapatel",
+          "profileUrl": "https://github.com/priyapatel",
+          "confidence": 0.6,
+          "bridgeTier": 3,
+          "bridgeSignals": [],
+          "persistReason": "Threshold match (60%): Name match: 100% similarity",
+          "autoMergeEligible": false
+        }
+      ],
+      "persistedIdentities": [
+        {
+          "platform": "github",
+          "platformId": "priyapatel",
+          "profileUrl": "https://github.com/priyapatel",
+          "confidence": 0.6,
+          "bridgeTier": 3,
+          "bridgeSignals": [],
+          "persistReason": "Threshold match (60%): Name match: 100% similarity",
+          "autoMergeEligible": false
+        }
+      ],
+      "topIdentity": {
+        "platform": "github",
+        "platformId": "priyapatel",
+        "profileUrl": "https://github.com/priyapatel",
+        "confidence": 0.6,
+        "bridgeTier": 3,
+        "bridgeSignals": [],
+        "persistReason": "Threshold match (60%): Name match: 100% similarity",
+        "autoMergeEligible": false
+      },
+      "autoMergeDecision": false,
+      "autoMergedIdentity": null,
+      "queriesExecuted": 6,
+      "queriesByType": {
+        "name_only": 2,
+        "name_company": 0,
+        "name_location": 0,
+        "slug_based": 0,
+        "handle_based": 0,
+        "url_reverse": 3,
+        "company_amplified": 1
+      },
+      "bridgesDetected": 0,
+      "tier1Count": 0,
+      "tier2Count": 0,
+      "tier3Count": 1,
+      "topIdentityCorrect": true,
+      "autoMergeCorrect": true,
+      "tierCorrect": false,
+      "hasContradiction": false,
+      "trace": {
+        "webSearchQueries": [
+          "\"https://www.linkedin.com/in/priya-patel-cloud\"",
+          "\"https://www.linkedin.com/in/priya-patel-cloud\" site:github.com",
+          "\"https://www.linkedin.com/in/priya-patel-cloud\" (github OR \"personal site\" OR portfolio OR about)"
+        ],
+        "githubSearchQueries": [
+          "\"Priya Patel\"",
+          "Priya Patel",
+          "\"Priya Patel\" aws"
+        ],
+        "bridgeSignalsFound": []
+      }
+    },
+    {
+      "candidateId": "c_008",
+      "linkedinId": "james-wong-founder",
+      "identitiesFound": [
+        {
+          "platform": "github",
+          "platformId": "jameswong",
+          "profileUrl": "https://github.com/jameswong",
+          "confidence": 0.98,
+          "bridgeTier": 1,
+          "bridgeSignals": [
+            "linkedin_url_in_bio"
+          ],
+          "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+          "autoMergeEligible": true
+        }
+      ],
+      "persistedIdentities": [
+        {
+          "platform": "github",
+          "platformId": "jameswong",
+          "profileUrl": "https://github.com/jameswong",
+          "confidence": 0.98,
+          "bridgeTier": 1,
+          "bridgeSignals": [
+            "linkedin_url_in_bio"
+          ],
+          "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+          "autoMergeEligible": true
+        }
+      ],
+      "topIdentity": {
+        "platform": "github",
+        "platformId": "jameswong",
+        "profileUrl": "https://github.com/jameswong",
+        "confidence": 0.98,
+        "bridgeTier": 1,
+        "bridgeSignals": [
+          "linkedin_url_in_bio"
+        ],
+        "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+        "autoMergeEligible": true
+      },
+      "autoMergeDecision": true,
+      "autoMergedIdentity": {
+        "platform": "github",
+        "platformId": "jameswong",
+        "profileUrl": "https://github.com/jameswong",
+        "confidence": 0.98,
+        "bridgeTier": 1,
+        "bridgeSignals": [
+          "linkedin_url_in_bio"
+        ],
+        "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+        "autoMergeEligible": true
+      },
+      "queriesExecuted": 4,
+      "queriesByType": {
+        "name_only": 2,
+        "name_company": 0,
+        "name_location": 0,
+        "slug_based": 0,
+        "handle_based": 0,
+        "url_reverse": 3,
+        "company_amplified": 0
+      },
+      "bridgesDetected": 1,
+      "tier1Count": 1,
+      "tier2Count": 0,
+      "tier3Count": 0,
+      "topIdentityCorrect": true,
+      "autoMergeCorrect": true,
+      "tierCorrect": true,
+      "hasContradiction": false,
+      "trace": {
+        "webSearchQueries": [
+          "\"https://www.linkedin.com/in/james-wong-founder\"",
+          "\"https://www.linkedin.com/in/james-wong-founder\" site:github.com",
+          "\"https://www.linkedin.com/in/james-wong-founder\" (github OR \"personal site\" OR portfolio OR about)"
+        ],
+        "githubSearchQueries": [
+          "\"James Wong\""
+        ],
+        "bridgeSignalsFound": [
+          "linkedin_url_in_bio"
+        ]
+      }
+    },
+    {
+      "candidateId": "c_009",
+      "linkedinId": "lisa-zhang-research",
+      "identitiesFound": [
+        {
+          "platform": "github",
+          "platformId": "lisazhang",
+          "profileUrl": "https://github.com/lisazhang",
+          "confidence": 0.98,
+          "bridgeTier": 1,
+          "bridgeSignals": [
+            "linkedin_url_in_bio"
+          ],
+          "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+          "autoMergeEligible": true
+        }
+      ],
+      "persistedIdentities": [
+        {
+          "platform": "github",
+          "platformId": "lisazhang",
+          "profileUrl": "https://github.com/lisazhang",
+          "confidence": 0.98,
+          "bridgeTier": 1,
+          "bridgeSignals": [
+            "linkedin_url_in_bio"
+          ],
+          "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+          "autoMergeEligible": true
+        }
+      ],
+      "topIdentity": {
+        "platform": "github",
+        "platformId": "lisazhang",
+        "profileUrl": "https://github.com/lisazhang",
+        "confidence": 0.98,
+        "bridgeTier": 1,
+        "bridgeSignals": [
+          "linkedin_url_in_bio"
+        ],
+        "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+        "autoMergeEligible": true
+      },
+      "autoMergeDecision": true,
+      "autoMergedIdentity": {
+        "platform": "github",
+        "platformId": "lisazhang",
+        "profileUrl": "https://github.com/lisazhang",
+        "confidence": 0.98,
+        "bridgeTier": 1,
+        "bridgeSignals": [
+          "linkedin_url_in_bio"
+        ],
+        "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+        "autoMergeEligible": true
+      },
+      "queriesExecuted": 4,
+      "queriesByType": {
+        "name_only": 2,
+        "name_company": 0,
+        "name_location": 0,
+        "slug_based": 0,
+        "handle_based": 0,
+        "url_reverse": 3,
+        "company_amplified": 0
+      },
+      "bridgesDetected": 1,
+      "tier1Count": 1,
+      "tier2Count": 0,
+      "tier3Count": 0,
+      "topIdentityCorrect": true,
+      "autoMergeCorrect": true,
+      "tierCorrect": true,
+      "hasContradiction": false,
+      "trace": {
+        "webSearchQueries": [
+          "\"https://www.linkedin.com/in/lisa-zhang-research\"",
+          "\"https://www.linkedin.com/in/lisa-zhang-research\" site:github.com",
+          "\"https://www.linkedin.com/in/lisa-zhang-research\" (github OR \"personal site\" OR portfolio OR about)"
+        ],
+        "githubSearchQueries": [
+          "\"Lisa Zhang\""
+        ],
+        "bridgeSignalsFound": [
+          "linkedin_url_in_bio"
+        ]
+      }
+    },
+    {
+      "candidateId": "c_010",
+      "linkedinId": "robert-johnson-dev",
+      "identitiesFound": [
+        {
+          "platform": "github",
+          "platformId": "rjohnson",
+          "profileUrl": "https://github.com/rjohnson",
+          "confidence": 0.35,
+          "bridgeTier": 3,
+          "bridgeSignals": [],
+          "persistReason": "Threshold match (35%): Name match: 100% similarity",
+          "autoMergeEligible": false
+        }
+      ],
+      "persistedIdentities": [
+        {
+          "platform": "github",
+          "platformId": "rjohnson",
+          "profileUrl": "https://github.com/rjohnson",
+          "confidence": 0.35,
+          "bridgeTier": 3,
+          "bridgeSignals": [],
+          "persistReason": "Threshold match (35%): Name match: 100% similarity",
+          "autoMergeEligible": false
+        }
+      ],
+      "topIdentity": {
+        "platform": "github",
+        "platformId": "rjohnson",
+        "profileUrl": "https://github.com/rjohnson",
+        "confidence": 0.35,
+        "bridgeTier": 3,
+        "bridgeSignals": [],
+        "persistReason": "Threshold match (35%): Name match: 100% similarity",
+        "autoMergeEligible": false
+      },
+      "autoMergeDecision": false,
+      "autoMergedIdentity": null,
+      "queriesExecuted": 5,
+      "queriesByType": {
+        "name_only": 2,
+        "name_company": 0,
+        "name_location": 0,
+        "slug_based": 0,
+        "handle_based": 0,
+        "url_reverse": 3,
+        "company_amplified": 0
+      },
+      "bridgesDetected": 0,
+      "tier1Count": 0,
+      "tier2Count": 0,
+      "tier3Count": 1,
+      "topIdentityCorrect": true,
+      "autoMergeCorrect": true,
+      "tierCorrect": false,
+      "hasContradiction": false,
+      "trace": {
+        "webSearchQueries": [
+          "\"https://www.linkedin.com/in/robert-johnson-dev\"",
+          "\"https://www.linkedin.com/in/robert-johnson-dev\" site:github.com",
+          "\"https://www.linkedin.com/in/robert-johnson-dev\" (github OR \"personal site\" OR portfolio OR about)"
+        ],
+        "githubSearchQueries": [
+          "\"Robert Johnson\"",
+          "Robert Johnson"
+        ],
+        "bridgeSignalsFound": []
+      }
+    },
+    {
+      "candidateId": "c_011",
+      "linkedinId": "dev",
+      "identitiesFound": [],
+      "persistedIdentities": [],
+      "topIdentity": null,
+      "autoMergeDecision": false,
+      "autoMergedIdentity": null,
+      "queriesExecuted": 6,
+      "queriesByType": {
+        "name_only": 2,
+        "name_company": 0,
+        "name_location": 1,
+        "slug_based": 0,
+        "handle_based": 0,
+        "url_reverse": 3,
+        "company_amplified": 0
+      },
+      "bridgesDetected": 0,
+      "tier1Count": 0,
+      "tier2Count": 0,
+      "tier3Count": 0,
+      "topIdentityCorrect": true,
+      "autoMergeCorrect": true,
+      "tierCorrect": true,
+      "hasContradiction": false,
+      "trace": {
+        "webSearchQueries": [
+          "\"https://www.linkedin.com/in/dev\"",
+          "\"https://www.linkedin.com/in/dev\" site:github.com",
+          "\"https://www.linkedin.com/in/dev\" (github OR \"personal site\" OR portfolio OR about)"
+        ],
+        "githubSearchQueries": [
+          "\"Dev\"",
+          "Dev",
+          "\"Dev\" Generic developer profile."
+        ],
+        "bridgeSignalsFound": []
+      }
+    },
+    {
+      "candidateId": "c_012",
+      "linkedinId": "team-member-acme",
+      "identitiesFound": [],
+      "persistedIdentities": [],
+      "topIdentity": null,
+      "autoMergeDecision": false,
+      "autoMergedIdentity": null,
+      "queriesExecuted": 6,
+      "queriesByType": {
+        "name_only": 2,
+        "name_company": 0,
+        "name_location": 1,
+        "slug_based": 0,
+        "handle_based": 0,
+        "url_reverse": 3,
+        "company_amplified": 0
+      },
+      "bridgesDetected": 0,
+      "tier1Count": 0,
+      "tier2Count": 0,
+      "tier3Count": 0,
+      "topIdentityCorrect": false,
+      "autoMergeCorrect": true,
+      "tierCorrect": false,
+      "hasContradiction": false,
+      "trace": {
+        "webSearchQueries": [
+          "\"https://www.linkedin.com/in/team-member-acme\"",
+          "\"https://www.linkedin.com/in/team-member-acme\" site:github.com",
+          "\"https://www.linkedin.com/in/team-member-acme\" (github OR \"personal site\" OR portfolio OR about)"
+        ],
+        "githubSearchQueries": [
+          "\"Team Member\"",
+          "Team Member",
+          "\"Team Member\" Works on various projects."
+        ],
+        "bridgeSignalsFound": []
+      }
+    },
+    {
+      "candidateId": "c_013",
+      "linkedinId": "anna-smith-swe",
+      "identitiesFound": [
+        {
+          "platform": "github",
+          "platformId": "annasmith",
+          "profileUrl": "https://github.com/annasmith",
+          "confidence": 0.9299999999999999,
+          "bridgeTier": 1,
+          "bridgeSignals": [
+            "linkedin_url_in_bio"
+          ],
+          "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+          "autoMergeEligible": true
+        }
+      ],
+      "persistedIdentities": [
+        {
+          "platform": "github",
+          "platformId": "annasmith",
+          "profileUrl": "https://github.com/annasmith",
+          "confidence": 0.9299999999999999,
+          "bridgeTier": 1,
+          "bridgeSignals": [
+            "linkedin_url_in_bio"
+          ],
+          "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+          "autoMergeEligible": true
+        }
+      ],
+      "topIdentity": {
+        "platform": "github",
+        "platformId": "annasmith",
+        "profileUrl": "https://github.com/annasmith",
+        "confidence": 0.9299999999999999,
+        "bridgeTier": 1,
+        "bridgeSignals": [
+          "linkedin_url_in_bio"
+        ],
+        "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+        "autoMergeEligible": true
+      },
+      "autoMergeDecision": true,
+      "autoMergedIdentity": {
+        "platform": "github",
+        "platformId": "annasmith",
+        "profileUrl": "https://github.com/annasmith",
+        "confidence": 0.9299999999999999,
+        "bridgeTier": 1,
+        "bridgeSignals": [
+          "linkedin_url_in_bio"
+        ],
+        "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+        "autoMergeEligible": true
+      },
+      "queriesExecuted": 4,
+      "queriesByType": {
+        "name_only": 2,
+        "name_company": 0,
+        "name_location": 0,
+        "slug_based": 0,
+        "handle_based": 0,
+        "url_reverse": 3,
+        "company_amplified": 0
+      },
+      "bridgesDetected": 1,
+      "tier1Count": 1,
+      "tier2Count": 0,
+      "tier3Count": 0,
+      "topIdentityCorrect": true,
+      "autoMergeCorrect": true,
+      "tierCorrect": true,
+      "hasContradiction": false,
+      "trace": {
+        "webSearchQueries": [
+          "\"https://www.linkedin.com/in/anna-smith-swe\"",
+          "\"https://www.linkedin.com/in/anna-smith-swe\" site:github.com",
+          "\"https://www.linkedin.com/in/anna-smith-swe\" (github OR \"personal site\" OR portfolio OR about)"
+        ],
+        "githubSearchQueries": [
+          "\"Anna Smith\""
+        ],
+        "bridgeSignalsFound": [
+          "linkedin_url_in_bio"
+        ]
+      }
+    },
+    {
+      "candidateId": "c_014",
+      "linkedinId": "carlos-garcia-data",
+      "identitiesFound": [
+        {
+          "platform": "github",
+          "platformId": "carlosgarcia",
+          "profileUrl": "https://github.com/carlosgarcia",
+          "confidence": 0.6,
+          "bridgeTier": 3,
+          "bridgeSignals": [],
+          "persistReason": "Threshold match (60%): Name match: 100% similarity",
+          "autoMergeEligible": false
+        }
+      ],
+      "persistedIdentities": [
+        {
+          "platform": "github",
+          "platformId": "carlosgarcia",
+          "profileUrl": "https://github.com/carlosgarcia",
+          "confidence": 0.6,
+          "bridgeTier": 3,
+          "bridgeSignals": [],
+          "persistReason": "Threshold match (60%): Name match: 100% similarity",
+          "autoMergeEligible": false
+        }
+      ],
+      "topIdentity": {
+        "platform": "github",
+        "platformId": "carlosgarcia",
+        "profileUrl": "https://github.com/carlosgarcia",
+        "confidence": 0.6,
+        "bridgeTier": 3,
+        "bridgeSignals": [],
+        "persistReason": "Threshold match (60%): Name match: 100% similarity",
+        "autoMergeEligible": false
+      },
+      "autoMergeDecision": false,
+      "autoMergedIdentity": null,
+      "queriesExecuted": 5,
+      "queriesByType": {
+        "name_only": 2,
+        "name_company": 0,
+        "name_location": 0,
+        "slug_based": 0,
+        "handle_based": 0,
+        "url_reverse": 3,
+        "company_amplified": 0
+      },
+      "bridgesDetected": 0,
+      "tier1Count": 0,
+      "tier2Count": 0,
+      "tier3Count": 1,
+      "topIdentityCorrect": true,
+      "autoMergeCorrect": true,
+      "tierCorrect": false,
+      "hasContradiction": false,
+      "trace": {
+        "webSearchQueries": [
+          "\"https://www.linkedin.com/in/carlos-garcia-data\"",
+          "\"https://www.linkedin.com/in/carlos-garcia-data\" site:github.com",
+          "\"https://www.linkedin.com/in/carlos-garcia-data\" (github OR \"personal site\" OR portfolio OR about)"
+        ],
+        "githubSearchQueries": [
+          "\"Carlos Garcia\"",
+          "Carlos Garcia"
+        ],
+        "bridgeSignalsFound": []
+      }
+    },
+    {
+      "candidateId": "c_015",
+      "linkedinId": "maria-rodriguez-ux",
+      "identitiesFound": [],
+      "persistedIdentities": [],
+      "topIdentity": null,
+      "autoMergeDecision": false,
+      "autoMergedIdentity": null,
+      "queriesExecuted": 5,
+      "queriesByType": {
+        "name_only": 2,
+        "name_company": 0,
+        "name_location": 0,
+        "slug_based": 0,
+        "handle_based": 0,
+        "url_reverse": 3,
+        "company_amplified": 0
+      },
+      "bridgesDetected": 0,
+      "tier1Count": 0,
+      "tier2Count": 0,
+      "tier3Count": 0,
+      "topIdentityCorrect": false,
+      "autoMergeCorrect": true,
+      "tierCorrect": true,
+      "hasContradiction": false,
+      "trace": {
+        "webSearchQueries": [
+          "\"https://www.linkedin.com/in/maria-rodriguez-ux\"",
+          "\"https://www.linkedin.com/in/maria-rodriguez-ux\" site:github.com",
+          "\"https://www.linkedin.com/in/maria-rodriguez-ux\" (github OR \"personal site\" OR portfolio OR about)"
+        ],
+        "githubSearchQueries": [
+          "\"Maria Rodriguez\"",
+          "Maria Rodriguez"
+        ],
+        "bridgeSignalsFound": []
+      }
+    },
+    {
+      "candidateId": "c_016",
+      "linkedinId": "kevin-brown-security",
+      "identitiesFound": [
+        {
+          "platform": "github",
+          "platformId": "kevinbrown-sec",
+          "profileUrl": "https://github.com/kevinbrown-sec",
+          "confidence": 1,
+          "bridgeTier": 1,
+          "bridgeSignals": [
+            "linkedin_url_in_bio"
+          ],
+          "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+          "autoMergeEligible": true
+        }
+      ],
+      "persistedIdentities": [
+        {
+          "platform": "github",
+          "platformId": "kevinbrown-sec",
+          "profileUrl": "https://github.com/kevinbrown-sec",
+          "confidence": 1,
+          "bridgeTier": 1,
+          "bridgeSignals": [
+            "linkedin_url_in_bio"
+          ],
+          "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+          "autoMergeEligible": true
+        }
+      ],
+      "topIdentity": {
+        "platform": "github",
+        "platformId": "kevinbrown-sec",
+        "profileUrl": "https://github.com/kevinbrown-sec",
+        "confidence": 1,
+        "bridgeTier": 1,
+        "bridgeSignals": [
+          "linkedin_url_in_bio"
+        ],
+        "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+        "autoMergeEligible": true
+      },
+      "autoMergeDecision": true,
+      "autoMergedIdentity": {
+        "platform": "github",
+        "platformId": "kevinbrown-sec",
+        "profileUrl": "https://github.com/kevinbrown-sec",
+        "confidence": 1,
+        "bridgeTier": 1,
+        "bridgeSignals": [
+          "linkedin_url_in_bio"
+        ],
+        "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+        "autoMergeEligible": true
+      },
+      "queriesExecuted": 4,
+      "queriesByType": {
+        "name_only": 2,
+        "name_company": 0,
+        "name_location": 0,
+        "slug_based": 0,
+        "handle_based": 0,
+        "url_reverse": 3,
+        "company_amplified": 0
+      },
+      "bridgesDetected": 1,
+      "tier1Count": 1,
+      "tier2Count": 0,
+      "tier3Count": 0,
+      "topIdentityCorrect": true,
+      "autoMergeCorrect": true,
+      "tierCorrect": true,
+      "hasContradiction": false,
+      "trace": {
+        "webSearchQueries": [
+          "\"https://www.linkedin.com/in/kevin-brown-security\"",
+          "\"https://www.linkedin.com/in/kevin-brown-security\" site:github.com",
+          "\"https://www.linkedin.com/in/kevin-brown-security\" (github OR \"personal site\" OR portfolio OR about)"
+        ],
+        "githubSearchQueries": [
+          "\"Kevin Brown\""
+        ],
+        "bridgeSignalsFound": [
+          "linkedin_url_in_bio"
+        ]
+      }
+    },
+    {
+      "candidateId": "c_017",
+      "linkedinId": "alex-johnson",
+      "identitiesFound": [],
+      "persistedIdentities": [],
+      "topIdentity": null,
+      "autoMergeDecision": false,
+      "autoMergedIdentity": null,
+      "queriesExecuted": 5,
+      "queriesByType": {
+        "name_only": 2,
+        "name_company": 0,
+        "name_location": 0,
+        "slug_based": 0,
+        "handle_based": 0,
+        "url_reverse": 3,
+        "company_amplified": 0
+      },
+      "bridgesDetected": 0,
+      "tier1Count": 0,
+      "tier2Count": 0,
+      "tier3Count": 0,
+      "topIdentityCorrect": true,
+      "autoMergeCorrect": true,
+      "tierCorrect": true,
+      "hasContradiction": false,
+      "trace": {
+        "webSearchQueries": [
+          "\"https://www.linkedin.com/in/alex-johnson\"",
+          "\"https://www.linkedin.com/in/alex-johnson\" site:github.com",
+          "\"https://www.linkedin.com/in/alex-johnson\" (github OR \"personal site\" OR portfolio OR about)"
+        ],
+        "githubSearchQueries": [
+          "\"Alex Johnson\"",
+          "Alex Johnson"
+        ],
+        "bridgeSignalsFound": []
+      }
+    },
+    {
+      "candidateId": "c_018",
+      "linkedinId": "rachel-kim-frontend",
+      "identitiesFound": [
+        {
+          "platform": "github",
+          "platformId": "rachelkim",
+          "profileUrl": "https://github.com/rachelkim",
+          "confidence": 1,
+          "bridgeTier": 1,
+          "bridgeSignals": [
+            "linkedin_url_in_bio",
+            "linkedin_url_in_page"
+          ],
+          "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio; LinkedIn URL found on external page",
+          "autoMergeEligible": true
+        }
+      ],
+      "persistedIdentities": [
+        {
+          "platform": "github",
+          "platformId": "rachelkim",
+          "profileUrl": "https://github.com/rachelkim",
+          "confidence": 1,
+          "bridgeTier": 1,
+          "bridgeSignals": [
+            "linkedin_url_in_bio",
+            "linkedin_url_in_page"
+          ],
+          "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio; LinkedIn URL found on external page",
+          "autoMergeEligible": true
+        }
+      ],
+      "topIdentity": {
+        "platform": "github",
+        "platformId": "rachelkim",
+        "profileUrl": "https://github.com/rachelkim",
+        "confidence": 1,
+        "bridgeTier": 1,
+        "bridgeSignals": [
+          "linkedin_url_in_bio",
+          "linkedin_url_in_page"
+        ],
+        "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio; LinkedIn URL found on external page",
+        "autoMergeEligible": true
+      },
+      "autoMergeDecision": true,
+      "autoMergedIdentity": {
+        "platform": "github",
+        "platformId": "rachelkim",
+        "profileUrl": "https://github.com/rachelkim",
+        "confidence": 1,
+        "bridgeTier": 1,
+        "bridgeSignals": [
+          "linkedin_url_in_bio",
+          "linkedin_url_in_page"
+        ],
+        "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio; LinkedIn URL found on external page",
+        "autoMergeEligible": true
+      },
+      "queriesExecuted": 3,
+      "queriesByType": {
+        "name_only": 2,
+        "name_company": 0,
+        "name_location": 0,
+        "slug_based": 0,
+        "handle_based": 0,
+        "url_reverse": 3,
+        "company_amplified": 1
+      },
+      "bridgesDetected": 1,
+      "tier1Count": 1,
+      "tier2Count": 0,
+      "tier3Count": 0,
+      "topIdentityCorrect": true,
+      "autoMergeCorrect": true,
+      "tierCorrect": true,
+      "hasContradiction": false,
+      "trace": {
+        "webSearchQueries": [
+          "\"https://www.linkedin.com/in/rachel-kim-frontend\"",
+          "\"https://www.linkedin.com/in/rachel-kim-frontend\" site:github.com",
+          "\"https://www.linkedin.com/in/rachel-kim-frontend\" (github OR \"personal site\" OR portfolio OR about)"
+        ],
+        "githubSearchQueries": [],
+        "bridgeSignalsFound": [
+          "linkedin_url_in_bio",
+          "linkedin_url_in_page"
+        ]
+      }
+    },
+    {
+      "candidateId": "c_019",
+      "linkedinId": "chris-miller-devops",
+      "identitiesFound": [],
+      "persistedIdentities": [],
+      "topIdentity": null,
+      "autoMergeDecision": false,
+      "autoMergedIdentity": null,
+      "queriesExecuted": 5,
+      "queriesByType": {
+        "name_only": 1,
+        "name_company": 0,
+        "name_location": 0,
+        "slug_based": 0,
+        "handle_based": 0,
+        "url_reverse": 3,
+        "company_amplified": 1
+      },
+      "bridgesDetected": 0,
+      "tier1Count": 0,
+      "tier2Count": 0,
+      "tier3Count": 0,
+      "topIdentityCorrect": false,
+      "autoMergeCorrect": true,
+      "tierCorrect": false,
+      "hasContradiction": false,
+      "trace": {
+        "webSearchQueries": [
+          "\"https://www.linkedin.com/in/chris-miller-devops\"",
+          "\"https://www.linkedin.com/in/chris-miller-devops\" site:github.com",
+          "\"https://www.linkedin.com/in/chris-miller-devops\" (github OR \"personal site\" OR portfolio OR about)"
+        ],
+        "githubSearchQueries": [
+          "Chris Miller Devops",
+          "\"Chris Miller Devops\" devops"
+        ],
+        "bridgeSignalsFound": []
+      }
+    },
+    {
+      "candidateId": "c_020",
+      "linkedinId": "sophia-nguyen-ai",
+      "identitiesFound": [
+        {
+          "platform": "github",
+          "platformId": "sophianguyen",
+          "profileUrl": "https://github.com/sophianguyen",
+          "confidence": 1,
+          "bridgeTier": 1,
+          "bridgeSignals": [
+            "linkedin_url_in_bio"
+          ],
+          "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+          "autoMergeEligible": true
+        }
+      ],
+      "persistedIdentities": [
+        {
+          "platform": "github",
+          "platformId": "sophianguyen",
+          "profileUrl": "https://github.com/sophianguyen",
+          "confidence": 1,
+          "bridgeTier": 1,
+          "bridgeSignals": [
+            "linkedin_url_in_bio"
+          ],
+          "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+          "autoMergeEligible": true
+        }
+      ],
+      "topIdentity": {
+        "platform": "github",
+        "platformId": "sophianguyen",
+        "profileUrl": "https://github.com/sophianguyen",
+        "confidence": 1,
+        "bridgeTier": 1,
+        "bridgeSignals": [
+          "linkedin_url_in_bio"
+        ],
+        "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+        "autoMergeEligible": true
+      },
+      "autoMergeDecision": true,
+      "autoMergedIdentity": {
+        "platform": "github",
+        "platformId": "sophianguyen",
+        "profileUrl": "https://github.com/sophianguyen",
+        "confidence": 1,
+        "bridgeTier": 1,
+        "bridgeSignals": [
+          "linkedin_url_in_bio"
+        ],
+        "persistReason": "Auto-merge eligible: LinkedIn URL found in profile bio",
+        "autoMergeEligible": true
+      },
+      "queriesExecuted": 4,
+      "queriesByType": {
+        "name_only": 2,
+        "name_company": 0,
+        "name_location": 0,
+        "slug_based": 0,
+        "handle_based": 0,
+        "url_reverse": 3,
+        "company_amplified": 1
+      },
+      "bridgesDetected": 1,
+      "tier1Count": 1,
+      "tier2Count": 0,
+      "tier3Count": 0,
+      "topIdentityCorrect": true,
+      "autoMergeCorrect": true,
+      "tierCorrect": true,
+      "hasContradiction": false,
+      "trace": {
+        "webSearchQueries": [
+          "\"https://www.linkedin.com/in/sophia-nguyen-ai\"",
+          "\"https://www.linkedin.com/in/sophia-nguyen-ai\" site:github.com",
+          "\"https://www.linkedin.com/in/sophia-nguyen-ai\" (github OR \"personal site\" OR portfolio OR about)"
+        ],
+        "githubSearchQueries": [
+          "\"Sophia Nguyen\""
+        ],
+        "bridgeSignalsFound": [
+          "linkedin_url_in_bio"
+        ]
+      }
+    }
+  ],
+  "timestamp": "2025-12-23T10:34:25.018Z",
+  "durationMs": 27
+}

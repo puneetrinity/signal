@@ -902,6 +902,9 @@ export async function persistResultsNode(
       const evidence = identity.evidence
         ? (JSON.parse(JSON.stringify(identity.evidence)) as Prisma.InputJsonValue)
         : undefined;
+      const bridgeSignals = identity.bridgeSignals
+        ? (JSON.parse(JSON.stringify(identity.bridgeSignals)) as Prisma.InputJsonValue)
+        : undefined;
 
       try {
         await prisma.identityCandidate.upsert({
@@ -920,6 +923,9 @@ export async function persistResultsNode(
             evidence,
             hasContradiction: identity.hasContradiction,
             contradictionNote: identity.contradictionNote,
+            bridgeTier: identity.bridgeTier || undefined,
+            bridgeSignals,
+            persistReason: identity.persistReason || undefined,
             discoveredBy: state.sessionId || undefined,
           },
           create: {
@@ -934,6 +940,9 @@ export async function persistResultsNode(
             evidence,
             hasContradiction: identity.hasContradiction,
             contradictionNote: identity.contradictionNote,
+            bridgeTier: identity.bridgeTier || undefined,
+            bridgeSignals,
+            persistReason: identity.persistReason || undefined,
             status: 'unconfirmed',
             discoveredBy: state.sessionId || undefined,
           },

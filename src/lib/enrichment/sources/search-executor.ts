@@ -19,6 +19,32 @@
 import { getProvider, type RawSearchResult, type SearchProviderType } from '@/lib/search/providers';
 import type { EnrichmentPlatform, CandidateHints } from './types';
 
+// Replay mode types (inline to avoid external import)
+interface MockSearchResult {
+  url: string;
+  title: string;
+  snippet: string;
+}
+
+// Replay mode module (lazy loaded only when needed)
+let replayModule: {
+  mockWebSearch: (query: string) => MockSearchResult[];
+} | null = null;
+
+async function getReplayModule() {
+  if (!replayModule && process.env.ENRICHMENT_EVAL_REPLAY === '1') {
+    try {
+      // Dynamic import only when replay mode is enabled
+      const mod = await import(/* webpackIgnore: true */ '../../../../eval/replay');
+      replayModule = mod;
+    } catch (e) {
+      console.warn('[SearchExecutor] Replay mode enabled but module not found:', e);
+      return null;
+    }
+  }
+  return replayModule;
+}
+
 /**
  * Get enrichment-specific search provider configuration
  * Separate from main search to allow different strategies
@@ -56,7 +82,7 @@ export function getEnrichmentProviderConfig(): {
 /**
  * Raw search result with provider attribution
  */
-interface RawSearchWithProvider {
+export interface RawSearchWithProvider {
   results: RawSearchResult[];
   providerUsed: string;
   rateLimited: boolean;
@@ -126,6 +152,37 @@ async function searchRawWithFallback(
 
   console.log('[EnrichmentSearch] No results from any provider');
   return { results: [], providerUsed: config.primary, rateLimited: primaryRateLimited };
+}
+
+/**
+ * Execute raw search using enrichment provider config (primary + fallback).
+ * In replay mode (ENRICHMENT_EVAL_REPLAY=1), returns mock results from fixture.
+ */
+export async function searchRawWithEnrichmentProviders(
+  query: string,
+  maxResults: number = 20
+): Promise<RawSearchWithProvider> {
+  // Check for replay mode
+  if (process.env.ENRICHMENT_EVAL_REPLAY === '1') {
+    const replay = await getReplayModule();
+    if (replay) {
+      const mockResults = replay.mockWebSearch(query);
+      return {
+        results: mockResults.map((r, idx) => ({
+          url: r.url,
+          title: r.title,
+          snippet: r.snippet,
+          position: idx + 1,
+        })),
+        providerUsed: 'replay',
+        rateLimited: false,
+      };
+    }
+    // Fall through to real search if replay module not available
+    console.warn('[SearchExecutor] Replay mode enabled but falling back to real search');
+  }
+
+  return searchRawWithFallback(query, maxResults);
 }
 
 /**

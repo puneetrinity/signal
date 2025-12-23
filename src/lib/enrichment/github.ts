@@ -105,6 +105,50 @@ const DEFAULT_RETRY_CONFIG: RetryConfig = {
   maxDelayMs: 30000,
 };
 
+// Replay mode types (inline to avoid external import)
+interface MockGitHubSearchResult {
+  login: string;
+  name?: string;
+  company?: string;
+  bio?: string;
+  html_url: string;
+  followers?: number;
+  public_repos?: number;
+}
+
+interface MockGitHubUser {
+  login: string;
+  name: string | null;
+  company: string | null;
+  location: string | null;
+  bio: string | null;
+  blog: string;
+  html_url: string;
+  followers: number;
+  public_repos: number;
+}
+
+// Replay mode module (lazy loaded only when needed)
+let replayModule: {
+  mockGitHubUserSearch: (query: string) => MockGitHubSearchResult[];
+  mockGitHubGetUser: (username: string) => MockGitHubUser | null;
+} | null = null;
+
+async function getReplayModule() {
+  if (!replayModule && process.env.ENRICHMENT_EVAL_REPLAY === '1') {
+    try {
+      // Dynamic import only when replay mode is enabled
+      // This path is relative from the build output, not source
+      const mod = await import(/* webpackIgnore: true */ '../../../eval/replay');
+      replayModule = mod;
+    } catch (e) {
+      console.warn('[GitHub] Replay mode enabled but module not found:', e);
+      return null;
+    }
+  }
+  return replayModule;
+}
+
 /**
  * Sleep helper
  */
@@ -324,6 +368,23 @@ export class GitHubClient {
     query: string,
     maxResults: number = 10
   ): Promise<GitHubUserSearchResult[]> {
+    // Check for replay mode
+    if (process.env.ENRICHMENT_EVAL_REPLAY === '1') {
+      const replay = await getReplayModule();
+      if (replay) {
+        const mockResults = replay.mockGitHubUserSearch(query);
+        return mockResults.map((r, idx) => ({
+          login: r.login,
+          id: idx + 1000,
+          html_url: r.html_url,
+          avatar_url: '',
+          type: 'User',
+          score: 100 - idx,
+        })).slice(0, maxResults);
+      }
+      // Fall through to real API if replay module not available
+    }
+
     const params = new URLSearchParams({
       q: `${query} type:user`,
       per_page: Math.min(maxResults, 100).toString(),
@@ -346,6 +407,34 @@ export class GitHubClient {
    * @returns User profile
    */
   async getUser(username: string): Promise<GitHubUserProfile> {
+    // Check for replay mode
+    if (process.env.ENRICHMENT_EVAL_REPLAY === '1') {
+      const replay = await getReplayModule();
+      if (replay) {
+        const mockUser = replay.mockGitHubGetUser(username);
+        if (mockUser) {
+          return {
+            login: mockUser.login,
+            id: 1000,
+            html_url: mockUser.html_url,
+            name: mockUser.name,
+            company: mockUser.company,
+            blog: mockUser.blog,
+            location: mockUser.location,
+            email: null,
+            bio: mockUser.bio,
+            twitter_username: null,
+            public_repos: mockUser.public_repos,
+            followers: mockUser.followers,
+            following: 0,
+            created_at: '2020-01-01T00:00:00Z',
+          };
+        }
+        throw new GitHubApiError(`User not found in replay: ${username}`, 404);
+      }
+      // Fall through to real API if replay module not available
+    }
+
     return this.request<GitHubUserProfile>(`/users/${encodeURIComponent(username)}`);
   }
 

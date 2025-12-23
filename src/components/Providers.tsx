@@ -1,7 +1,8 @@
 'use client';
 
 import { ClerkProvider } from '@clerk/nextjs';
-import type { ReactNode } from 'react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { useState, type ReactNode } from 'react';
 
 /**
  * Check if Clerk is configured (publishable key available)
@@ -12,15 +13,27 @@ function isClerkConfigured(): boolean {
 }
 
 export function Providers({ children }: { children: ReactNode }) {
+  const [queryClient] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: {
+          queries: {
+            staleTime: 30 * 1000, // 30 seconds
+            refetchOnWindowFocus: false,
+          },
+        },
+      })
+  );
+
+  const content = (
+    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+  );
+
   // During build or if Clerk is not configured, skip ClerkProvider
   // This allows static pages to build without Clerk keys
   if (!isClerkConfigured()) {
-    return <>{children}</>;
+    return content;
   }
 
-  return (
-    <ClerkProvider>
-      {children}
-    </ClerkProvider>
-  );
+  return <ClerkProvider>{content}</ClerkProvider>;
 }

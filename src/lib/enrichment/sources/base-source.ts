@@ -33,6 +33,10 @@ import {
 } from './search-executor';
 import { checkProvidersHealth } from '@/lib/search/providers';
 import { validateQuery, generateHandleVariants } from './handle-variants';
+import {
+  type BridgeSignal,
+  createBridgeDetection,
+} from '../bridge-types';
 
 /** Maximum rejection reasons to store in diagnostics */
 const MAX_REJECTION_REASONS = 10;
@@ -151,6 +155,54 @@ function calculateLocationMatch(
   }
 
   return 0;
+}
+
+/**
+ * Generic handles that should NOT trigger cross_platform_handle signal
+ * These are too common to be reliable identity bridges
+ */
+const GENERIC_HANDLES = new Set([
+  'dev', 'developer', 'admin', 'root', 'user', 'test', 'demo', 'example',
+  'alex', 'sam', 'john', 'jane', 'mike', 'david', 'chris', 'james', 'robert',
+  'andrew', 'daniel', 'matt', 'matthew', 'mark', 'peter', 'tom', 'steve',
+  'web', 'app', 'code', 'tech', 'data', 'info', 'main', 'home', 'default',
+  'engineer', 'coder', 'hacker', 'ninja', 'guru', 'master', 'pro',
+]);
+
+/**
+ * Check if a handle is too generic to be a reliable cross-platform signal
+ */
+function isGenericHandle(handle: string): boolean {
+  const normalized = handle.toLowerCase().replace(/[-_\d]/g, '');
+  return GENERIC_HANDLES.has(normalized) || normalized.length < 4;
+}
+
+/**
+ * Extract all LinkedIn URLs from text and return them with their IDs
+ */
+function extractLinkedInUrls(text: string): { url: string; id: string }[] {
+  const results: { url: string; id: string }[] = [];
+
+  // Match regular LinkedIn URLs
+  const regularPattern = /linkedin\.com\/in\/([a-zA-Z0-9_-]+)/gi;
+  let match;
+  while ((match = regularPattern.exec(text)) !== null) {
+    results.push({ url: match[0], id: match[1].toLowerCase() });
+  }
+
+  // Match URL-encoded LinkedIn URLs (e.g., linkedin.com%2Fin%2F)
+  const encodedPattern = /linkedin\.com%2Fin%2F([a-zA-Z0-9_-]+)/gi;
+  while ((match = encodedPattern.exec(text)) !== null) {
+    results.push({ url: decodeURIComponent(match[0]), id: match[1].toLowerCase() });
+  }
+
+  // Match double-encoded URLs (linkedin.com%252Fin%252F)
+  const doubleEncodedPattern = /linkedin\.com%252Fin%252F([a-zA-Z0-9_-]+)/gi;
+  while ((match = doubleEncodedPattern.exec(text)) !== null) {
+    results.push({ url: decodeURIComponent(decodeURIComponent(match[0])), id: match[1].toLowerCase() });
+  }
+
+  return results;
 }
 
 /**
@@ -440,6 +492,87 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
   }
 
   /**
+   * Detect bridge signals from a search result
+   * Override in subclasses for platform-specific detection
+   *
+   * IMPORTANT: Tier 1 signals (linkedin_url_in_bio, linkedin_url_in_page) require
+   * an explicit linkedin.com/in/{id} URL that matches the candidate's LinkedIn ID.
+   * This prevents false positives from handle-only matching.
+   */
+  protected detectBridgeSignals(
+    hints: CandidateHints,
+    result: EnrichmentSearchResult,
+    profileInfo: ReturnType<typeof this.extractProfileInfo>
+  ): BridgeSignal[] {
+    const signals: BridgeSignal[] = [];
+    const targetLinkedinId = hints.linkedinId.toLowerCase();
+
+    // Check for LinkedIn URL in bio/description
+    // TIER 1: Requires explicit linkedin.com/in/{id} URL match
+    if (profileInfo.bio) {
+      const linkedinUrls = extractLinkedInUrls(profileInfo.bio);
+      const matchingUrl = linkedinUrls.find(u => u.id === targetLinkedinId);
+
+      if (matchingUrl) {
+        // Check for team page (multiple different LinkedIn URLs) -> Tier 2
+        const uniqueIds = new Set(linkedinUrls.map(u => u.id));
+        if (uniqueIds.size > 1) {
+          // Multiple LinkedIn profiles found - likely a team page, Tier 2 (no auto-merge)
+          console.log(`[BridgeSignal] Multiple LinkedIn URLs in bio (${uniqueIds.size}), using linkedin_url_in_team_page (Tier 2)`);
+          signals.push('linkedin_url_in_team_page');
+        } else {
+          signals.push('linkedin_url_in_bio');
+        }
+      }
+    }
+
+    // Check for LinkedIn URL in snippet (found via search)
+    // TIER 1: Requires explicit linkedin.com/in/{id} URL match
+    if (result.snippet) {
+      const linkedinUrls = extractLinkedInUrls(result.snippet);
+      const matchingUrl = linkedinUrls.find(u => u.id === targetLinkedinId);
+
+      if (matchingUrl) {
+        // Check for team page (multiple different LinkedIn URLs) -> Tier 2
+        const uniqueIds = new Set(linkedinUrls.map(u => u.id));
+        if (uniqueIds.size > 1) {
+          console.log(`[BridgeSignal] Multiple LinkedIn URLs in snippet (${uniqueIds.size}), using linkedin_url_in_team_page (Tier 2)`);
+          // Team page signal - Tier 2, no auto-merge
+          signals.push('linkedin_url_in_team_page');
+        } else if (!signals.includes('linkedin_url_in_bio') && !signals.includes('linkedin_url_in_team_page')) {
+          // Only add if not already found in bio
+          signals.push('linkedin_url_in_page');
+        }
+      }
+    }
+
+    // Check for cross-platform handle match (e.g., same username)
+    // TIER 2: Requires non-generic handle match
+    if (result.platformId && hints.linkedinId) {
+      const platformId = result.platformId.toLowerCase();
+      const linkedinId = hints.linkedinId.toLowerCase();
+
+      // Skip if handle is too generic (dev, alex, john, etc.)
+      if (!isGenericHandle(platformId) && !isGenericHandle(linkedinId)) {
+        // Normalize for comparison (remove hyphens, underscores, trailing numbers)
+        const normalizedPlatformId = platformId.replace(/[-_]/g, '');
+        const normalizedLinkedinId = linkedinId.replace(/[-_]/g, '').replace(/\d+$/, '');
+
+        if (normalizedPlatformId === normalizedLinkedinId) {
+          signals.push('cross_platform_handle');
+        }
+      }
+    }
+
+    // If no meaningful signals found, return 'none'
+    if (signals.length === 0) {
+      signals.push('none');
+    }
+
+    return signals;
+  }
+
+  /**
    * Classify confidence into buckets
    */
   protected classifyConfidence(
@@ -449,6 +582,63 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
     if (confidence >= 0.7) return 'suggest';
     if (confidence >= 0.35) return 'low';
     return 'rejected';
+  }
+
+  /**
+   * Generate human-readable persist reason from bridge and score
+   */
+  protected formatPersistReason(
+    bridge: ReturnType<typeof createBridgeDetection>,
+    score: ScoreBreakdown
+  ): string {
+    const signalDescriptions: Record<BridgeSignal, string> = {
+      'linkedin_url_in_bio': 'LinkedIn URL in bio',
+      'linkedin_url_in_blog': 'LinkedIn URL in website',
+      'linkedin_url_in_page': 'LinkedIn URL on page',
+      'linkedin_url_in_team_page': 'LinkedIn URL on team page',
+      'commit_email_domain': 'Commit email matches domain',
+      'cross_platform_handle': 'Same username',
+      'mutual_reference': 'Mutual reference',
+      'verified_domain': 'Verified domain',
+      'email_in_public_page': 'Email on page',
+      'conference_speaker': 'Conference speaker',
+      'none': 'Search match',
+    };
+
+    const signals = bridge.signals.filter(s => s !== 'none');
+    const signalText = signals.length > 0
+      ? signals.map(s => signalDescriptions[s] || s).join(', ')
+      : this.formatScoreReason(score);
+
+    if (bridge.tier === 1) {
+      return `Tier 1 (auto-merge): ${signalText}`;
+    }
+    if (bridge.tier === 2) {
+      return `Tier 2 (review): ${signalText}`;
+    }
+    return `Tier 3 (${(score.total * 100).toFixed(0)}%): ${signalText}`;
+  }
+
+  /**
+   * Generate reason from score breakdown when no bridge signals
+   */
+  private formatScoreReason(score: ScoreBreakdown): string {
+    const parts: string[] = [];
+
+    if ((score.handleMatch ?? 0) > 0.3) {
+      parts.push(`handle ${((score.handleMatch ?? 0) * 100).toFixed(0)}%`);
+    }
+    if (score.nameMatch > 0.1) {
+      parts.push(`name ${(score.nameMatch * 100 / 0.30).toFixed(0)}%`);
+    }
+    if (score.companyMatch > 0) {
+      parts.push('company match');
+    }
+    if (score.locationMatch > 0) {
+      parts.push('location match');
+    }
+
+    return parts.length > 0 ? parts.join(', ') : 'search result';
   }
 
   /**
@@ -619,6 +809,21 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
           // Detect contradictions
           const contradictions = this.detectContradictions(hints, profileInfo);
 
+          // Detect bridge signals from search result
+          const bridgeSignals = this.detectBridgeSignals(hints, result, profileInfo);
+          const bridge = createBridgeDetection(bridgeSignals, result.url);
+
+          // Enhance scoreBreakdown with bridge info
+          const enhancedScoreBreakdown = {
+            ...scoreBreakdown,
+            bridgeTier: bridge.tier,
+            bridgeSignals: bridge.signals,
+            bridgeUrl: bridge.bridgeUrl,
+          };
+
+          // Generate human-readable persist reason
+          const persistReason = this.formatPersistReason(bridge, scoreBreakdown);
+
           // Create identity
           const identity: DiscoveredIdentity = {
             platform: this.platform,
@@ -627,17 +832,20 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
             displayName: profileInfo.name,
             confidence: scoreBreakdown.total,
             confidenceBucket: this.classifyConfidence(scoreBreakdown.total),
-            scoreBreakdown,
+            scoreBreakdown: enhancedScoreBreakdown,
             evidence: this.createEvidence(result),
             hasContradiction: contradictions.hasContradiction,
             contradictionNote: contradictions.note,
             platformProfile: profileInfo,
+            bridgeTier: bridge.tier,
+            bridgeSignals: bridge.signals,
+            persistReason,
           };
 
           identities.push(identity);
 
           console.log(
-            `[${this.displayName}] Found: ${result.platformId} (confidence: ${scoreBreakdown.total.toFixed(2)}, bucket: ${identity.confidenceBucket})`
+            `[${this.displayName}] Found: ${result.platformId} (confidence: ${scoreBreakdown.total.toFixed(2)}, tier: ${bridge.tier}, bucket: ${identity.confidenceBucket})`
           );
 
           // Early stop on high confidence match

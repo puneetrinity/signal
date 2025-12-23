@@ -11,6 +11,15 @@ async function main() {
   console.log('[Fix] Starting migration fix...');
 
   const statements = [
+    // === Migration: Add companyHint to candidates ===
+    `ALTER TABLE "candidates" ADD COLUMN IF NOT EXISTS "companyHint" TEXT`,
+
+    // === Migration: Add bridge detection fields to identity_candidates (v2.1) ===
+    `ALTER TABLE "identity_candidates" ADD COLUMN IF NOT EXISTS "bridgeTier" INTEGER`,
+    `ALTER TABLE "identity_candidates" ADD COLUMN IF NOT EXISTS "bridgeSignals" JSONB`,
+    `ALTER TABLE "identity_candidates" ADD COLUMN IF NOT EXISTS "persistReason" TEXT`,
+    `CREATE INDEX IF NOT EXISTS "identity_candidates_bridgeTier_idx" ON "identity_candidates"("bridgeTier")`,
+
     // === Migration 20251217000000: Add summary fields to enrichment_sessions ===
     `ALTER TABLE "enrichment_sessions" ADD COLUMN IF NOT EXISTS "summary" TEXT`,
     `ALTER TABLE "enrichment_sessions" ADD COLUMN IF NOT EXISTS "summaryStructured" JSONB`,

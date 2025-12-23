@@ -12,7 +12,9 @@
     "db:studio": "prisma studio",
     "db:seed": "tsx prisma/seed.ts",
     "db:generate": "prisma generate",
-    "worker:enrichment": "tsx src/lib/enrichment/worker.ts"
+    "worker:enrichment": "tsx src/lib/enrichment/worker.ts",
+    "eval": "tsx scripts/eval-enrichment.ts",
+    "eval:verbose": "tsx scripts/eval-enrichment.ts --verbose"
   },
   "dependencies": {
     "@ai-sdk/google": "^2.0.17",

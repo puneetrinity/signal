@@ -6,6 +6,7 @@
  */
 
 import type { RoleType } from '@/types/linkedin';
+import type { BridgeSignal, BridgeTier } from '../bridge-types';
 
 /**
  * Supported enrichment platforms
@@ -88,6 +89,9 @@ export interface ScoreBreakdown {
   profileCompleteness: number;
   activityScore: number;
   total: number;
+  bridgeTier?: BridgeTier;
+  bridgeSignals?: BridgeSignal[];
+  bridgeUrl?: string | null;
 }
 
 /**
@@ -114,6 +118,12 @@ export interface DiscoveredIdentity {
     publicRepos?: number;
     publications?: number;
   };
+  /** Bridge tier classification (v2.1) */
+  bridgeTier?: 1 | 2 | 3;
+  /** Bridge signals detected */
+  bridgeSignals?: string[];
+  /** Reason for persistence decision */
+  persistReason?: string;
 }
 
 /**

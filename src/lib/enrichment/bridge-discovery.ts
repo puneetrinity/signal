@@ -7,14 +7,18 @@
  * - GitHub profile links to LinkedIn
  * - Commit email patterns
  * - Multi-platform search discovery
+ * - URL-anchored reverse link searches (bridge-first)
  *
  * Returns IdentityCandidate entries with evidence pointers (NOT PII).
+ *
+ * NOTE: Bridge tiering + auto-merge logic is protected by offline eval harness.
+ * Changes require fixture updates + CI gate review.
+ * @see eval/TODO.md for invariants and metrics.
  *
  * @see docs/ARCHITECTURE_V2.1.md
  */
 
 import {
-  GitHubClient,
   getGitHubClient,
   type GitHubUserProfile,
   type CommitEmailEvidence,
@@ -22,10 +26,14 @@ import {
 import {
   calculateConfidenceScore,
   classifyConfidence,
-  shouldPersistIdentity,
   detectContradictions,
+  createBridgeFromScoring,
+  shouldPersistWithBridge,
   type ScoreBreakdown,
+  type BridgeDetection,
+  type BridgeTier,
 } from './scoring';
+import { searchRawWithEnrichmentProviders } from './sources/search-executor';
 import {
   discoverAcrossSources,
   type CandidateHints as SourceCandidateHints,
@@ -33,6 +41,17 @@ import {
   type MultiSourceDiscoveryResult,
 } from './sources';
 import type { RoleType } from '@/types/linkedin';
+import {
+  type TrackedQuery,
+  type QueryType,
+  type BridgeSignal,
+  type EnrichmentMetrics,
+  type EnrichedHints,
+  createEmptyMetrics,
+} from './bridge-types';
+import {
+  extractAllHintsWithConfidence,
+} from './hint-extraction';
 
 /**
  * Candidate hints from search results (NOT scraped data)
@@ -68,6 +87,12 @@ export interface DiscoveredIdentity {
     followers: number;
     publicRepos: number;
   };
+  /** Bridge detection info (v2.1) */
+  bridge?: BridgeDetection;
+  /** Bridge tier classification */
+  bridgeTier?: BridgeTier;
+  /** Reason for persistence decision */
+  persistReason?: string;
 }
 
 /**
@@ -79,6 +104,10 @@ export interface BridgeDiscoveryResult {
   identitiesFound: DiscoveredIdentity[];
   queriesExecuted: number;
   earlyStopReason: string | null;
+  /** Metrics for this discovery run (v2.1) */
+  metrics?: EnrichmentMetrics;
+  /** Whether any Tier 1 bridge was found */
+  hasTier1Bridge?: boolean;
 }
 
 /**
@@ -129,76 +158,453 @@ function extractLinkedInFromProfile(profile: GitHubUserProfile): string | null {
 }
 
 /**
- * Build search queries for a candidate
- * Uses hints from search snippets (NOT scraped data)
+ * Confidence thresholds for query building
  */
-function buildSearchQueries(hints: CandidateHints): string[] {
-  const queries = new Set<string>();
-
-  // Query 1: Full name
-  if (hints.nameHint) {
-    queries.add(hints.nameHint);
-  }
-
-  // Query 2: Name + Company (prefer explicit company hint)
-  let companyHint = hints.companyHint || null;
-  if (!companyHint && hints.headlineHint) {
-    // Try to extract company from headline
-    // Common patterns: "Title at Company", "Title @ Company", "Title, Company"
-    const companyMatch = hints.headlineHint.match(
-      /(?:at|@|,)\s*([A-Z][A-Za-z0-9\s&]+?)(?:\s*[-|·]|$)/
-    );
-    if (companyMatch) {
-      companyHint = companyMatch[1].trim();
-    }
-  }
-  if (hints.nameHint && companyHint) {
-    queries.add(`${hints.nameHint} ${companyHint}`);
-  }
-
-  // Query 3: Name + Location
-  if (hints.nameHint && hints.locationHint) {
-    // Only add if location is specific (not just country)
-    if (hints.locationHint.length < 30) {
-      queries.add(`${hints.nameHint} ${hints.locationHint}`);
-    }
-  }
-
-  if (queries.size === 0) {
-    for (const fallback of buildFallbackQueries(hints)) {
-      queries.add(fallback);
-    }
-  }
-
-  return Array.from(queries);
-}
+const CONFIDENCE_THRESHOLDS = {
+  HIGH: 0.7,    // Use for exact match queries
+  MEDIUM: 0.5,  // Use for amplified queries
+  LOW: 0.3,     // Use for fuzzy fallbacks
+};
 
 /**
- * Build fallback queries when name hints are missing.
+ * Build search queries for a candidate with confidence gating
+ * Uses hints from search snippets (NOT scraped data)
+ *
+ * Query strategy (GitHub-native):
+ * 1. High-confidence name: exact match queries
+ * 2. Medium-confidence: amplified with company/location
+ * 3. Low-confidence or missing: slug-based fallback
  */
-function buildFallbackQueries(hints: CandidateHints): string[] {
-  const queries: string[] = [];
-  const handle = hints.linkedinId?.trim();
+function buildSearchQueries(
+  hints: CandidateHints,
+  enrichedHints?: EnrichedHints
+): TrackedQuery[] {
+  const queries: TrackedQuery[] = [];
+  const seen = new Set<string>();
 
-  if (handle) {
-    queries.push(handle);
+  const addQuery = (query: string, type: QueryType, variantId: string) => {
+    const normalized = query.toLowerCase().trim();
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      queries.push({ query, type, variantId });
+    }
+  };
 
-    const withoutSuffix = handle
-      .replace(/-[a-f0-9]{6,}$/i, '')
-      .replace(/-\d{3,}$/, '');
-    if (withoutSuffix && withoutSuffix !== handle) {
-      queries.push(withoutSuffix);
+  // Get confidence levels (use enrichedHints if provided, otherwise assume high confidence)
+  const nameConfidence = enrichedHints?.nameHint?.confidence ?? 0.8;
+  const companyConfidence = enrichedHints?.companyHint?.confidence ?? 0.5;
+  const locationConfidence = enrichedHints?.locationHint?.confidence ?? 0.5;
+
+  // === Phase 1: Name-based queries (confidence-gated) ===
+  if (hints.nameHint && nameConfidence >= CONFIDENCE_THRESHOLDS.LOW) {
+    // High confidence: use exact match
+    if (nameConfidence >= CONFIDENCE_THRESHOLDS.HIGH) {
+      addQuery(`"${hints.nameHint}"`, 'name_only', 'name_exact');
+    }
+    // Medium confidence: use unquoted for fuzzy match
+    addQuery(hints.nameHint, 'name_only', 'name');
+
+    // Name + Company (prefer explicit company hint)
+    let companyHint = hints.companyHint || null;
+    if (!companyHint && hints.headlineHint) {
+      const companyMatch = hints.headlineHint.match(
+        /(?:at|@|,)\s*([A-Z][A-Za-z0-9\s&]+?)(?:\s*[-|·]|$)/
+      );
+      if (companyMatch) {
+        companyHint = companyMatch[1].trim();
+      }
     }
 
-    if (handle.includes('-')) {
-      const spaced = handle.replace(/-/g, ' ').trim();
-      if (spaced && spaced !== handle) {
-        queries.push(spaced);
+    // Only use company if confidence is adequate
+    if (companyHint && companyConfidence >= CONFIDENCE_THRESHOLDS.MEDIUM) {
+      addQuery(`"${hints.nameHint}" "${companyHint}"`, 'name_company', 'name+company');
+      // Company-amplified variants (only for high-confidence names)
+      if (nameConfidence >= CONFIDENCE_THRESHOLDS.HIGH) {
+        addQuery(`"${hints.nameHint}" "${companyHint}" github`, 'company_amplified', 'name+company+github');
+        addQuery(`"${hints.nameHint}" "${companyHint}" linkedin`, 'company_amplified', 'name+company+linkedin');
+      }
+    }
+
+    // Name + Location (only if both have adequate confidence)
+    if (hints.locationHint && hints.locationHint.length < 30 &&
+        locationConfidence >= CONFIDENCE_THRESHOLDS.MEDIUM) {
+      addQuery(`"${hints.nameHint}" ${hints.locationHint}`, 'name_location', 'name+location');
+    }
+
+    // Name + Headline keywords (for tech talent)
+    if (hints.headlineHint) {
+      const techKeywords = extractTechKeywords(hints.headlineHint);
+      if (techKeywords.length > 0) {
+        addQuery(`"${hints.nameHint}" ${techKeywords.slice(0, 2).join(' ')}`, 'company_amplified', 'name+tech');
       }
     }
   }
 
+  // === Phase 2: Slug-based fallback queries ===
+  // Use when no name hint OR name confidence is too low
+  if (queries.length === 0 || !hints.nameHint || nameConfidence < CONFIDENCE_THRESHOLDS.LOW) {
+    const fallbacks = buildFallbackQueries(hints);
+    for (const q of fallbacks) {
+      addQuery(q.query, q.type, q.variantId);
+    }
+  }
+
   return queries;
+}
+
+/**
+ * Build URL-anchored reverse link queries
+ * These search for pages that link TO the LinkedIn profile (strongest bridge signal)
+ */
+function buildUrlAnchoredQueries(hints: CandidateHints): TrackedQuery[] {
+  const queries: TrackedQuery[] = [];
+  const linkedinUrl = getCanonicalLinkedInUrl(hints);
+
+  if (!linkedinUrl) return queries;
+
+  // Exact URL search (quoted)
+  queries.push({
+    query: `"${linkedinUrl}"`,
+    type: 'url_reverse',
+    variantId: 'url_exact',
+  });
+
+  // URL + GitHub context
+  queries.push({
+    query: `"${linkedinUrl}" site:github.com`,
+    type: 'url_reverse',
+    variantId: 'url_github',
+  });
+
+  // URL + personal site context
+  queries.push({
+    query: `"${linkedinUrl}" (github OR "personal site" OR portfolio OR about)`,
+    type: 'url_reverse',
+    variantId: 'url_personal',
+  });
+
+  // URL + conference context (tech talent often listed as speakers)
+  if (hints.roleType === 'engineer' || hints.roleType === 'researcher') {
+    queries.push({
+      query: `"${linkedinUrl}" (conference OR speaker OR talk OR meetup OR sessionize)`,
+      type: 'url_reverse',
+      variantId: 'url_conference',
+    });
+  }
+
+  return queries;
+}
+
+/**
+ * Canonicalize LinkedIn URL for reverse-link matching and queries.
+ */
+function getCanonicalLinkedInUrl(hints: CandidateHints): string | null {
+  if (hints.linkedinId) {
+    return `https://www.linkedin.com/in/${hints.linkedinId}`;
+  }
+
+  if (!hints.linkedinUrl) return null;
+
+  try {
+    const parsed = new URL(hints.linkedinUrl);
+    if (!parsed.hostname.includes('linkedin.com')) return null;
+
+    const host = parsed.hostname.replace(/^www\./, '');
+    const pathname = parsed.pathname.replace(/\/$/, '');
+    return `https://www.${host}${pathname}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build fallback queries when name hints are missing.
+ * Uses LinkedIn slug with numeric suffix handling.
+ */
+function buildFallbackQueries(hints: CandidateHints): TrackedQuery[] {
+  const queries: TrackedQuery[] = [];
+  const handle = hints.linkedinId?.trim();
+
+  if (!handle) return queries;
+
+  // Strip numeric suffix for name-guess queries
+  // "john-smith-12345" -> "john-smith" for name queries
+  // but keep "john-smith-12345" for exact handle search
+  const withoutNumericSuffix = handle
+    .replace(/-[a-f0-9]{6,}$/i, '')  // Remove hex suffix
+    .replace(/-\d{3,}$/, '');        // Remove numeric suffix
+
+  // Exact handle (might find matching handles on other platforms)
+  queries.push({
+    query: handle,
+    type: 'handle_based',
+    variantId: 'handle_exact',
+  });
+
+  // Handle without numeric suffix (if different)
+  if (withoutNumericSuffix && withoutNumericSuffix !== handle) {
+    queries.push({
+      query: withoutNumericSuffix,
+      type: 'handle_based',
+      variantId: 'handle_clean',
+    });
+  }
+
+  // Convert hyphens to spaces for name-like search
+  // "john-smith" -> "john smith"
+  if (withoutNumericSuffix.includes('-')) {
+    const spaced = withoutNumericSuffix.replace(/-/g, ' ').trim();
+    if (spaced && spaced !== handle) {
+      queries.push({
+        query: spaced,
+        type: 'slug_based',
+        variantId: 'slug_spaced',
+      });
+
+      // Add quoted version for exact phrase
+      queries.push({
+        query: `"${spaced}"`,
+        type: 'slug_based',
+        variantId: 'slug_quoted',
+      });
+    }
+  }
+
+  return queries;
+}
+
+/**
+ * Extract tech keywords from headline for query amplification
+ */
+function extractTechKeywords(headline: string): string[] {
+  const techTerms = [
+    'python', 'javascript', 'typescript', 'java', 'go', 'rust', 'c++',
+    'react', 'angular', 'vue', 'node', 'django', 'flask', 'rails',
+    'aws', 'gcp', 'azure', 'kubernetes', 'docker', 'terraform',
+    'ml', 'ai', 'machine learning', 'data science', 'deep learning',
+    'backend', 'frontend', 'fullstack', 'devops', 'sre',
+  ];
+
+  const lower = headline.toLowerCase();
+  return techTerms.filter(term => lower.includes(term));
+}
+
+/**
+ * Result from URL-anchored web search
+ */
+export interface UrlAnchoredResult {
+  /** URL of the page that mentions the LinkedIn profile */
+  sourceUrl: string;
+  /** Title of the page */
+  title: string;
+  /** Snippet containing the LinkedIn URL mention */
+  snippet: string;
+  /** Platform detected from the URL (github, medium, etc.) */
+  platform: string | null;
+  /** Platform ID extracted if possible */
+  platformId: string | null;
+  /** Bridge signal type */
+  signal: BridgeSignal;
+}
+
+/**
+ * Execute URL-anchored reverse link discovery via web search
+ *
+ * This searches for pages that link TO the LinkedIn profile using
+ * general web search providers (Brave/SearXNG), not GitHub search.
+ *
+ * Returns pages that contain the LinkedIn URL, which can then be
+ * parsed to extract platform identities (GitHub profiles, personal sites, etc.)
+ */
+export async function discoverUrlAnchoredBridges(
+  hints: CandidateHints,
+  metrics: EnrichmentMetrics
+): Promise<{ results: UrlAnchoredResult[]; queriesExecuted: number }> {
+  const results: UrlAnchoredResult[] = [];
+  const linkedinUrl = getCanonicalLinkedInUrl(hints);
+
+  if (!linkedinUrl) return { results, queriesExecuted: 0 };
+
+  // Boundary pattern: end of string, whitespace, or common URL terminators
+  // Includes: space, newline, ), ], }, ", ', ,, ., ;, :, and end-of-string
+  const boundaryPattern = `(?:[/?#\\s)\\]}"',\\.;:]|$)`;
+
+  // LinkedIn ID pattern - matches linkedin.com/in/{id} with various prefixes
+  // Handles: https://www.linkedin.com, https://linkedin.com, http://, m.linkedin.com
+  const linkedinIdPattern = hints.linkedinId
+    ? new RegExp(
+        `(?:https?://)?(?:www\\.|m\\.)?linkedin\\.com/in/${escapeRegExp(hints.linkedinId)}${boundaryPattern}`,
+        'i'
+      )
+    : null;
+
+  // Full URL pattern
+  const linkedinUrlPattern = new RegExp(escapeRegExp(linkedinUrl), 'i');
+
+  // Encoded URL patterns (for URLs embedded in other URLs or JSON)
+  const encodedLinkedinUrl = encodeURIComponent(linkedinUrl);
+  const encodedLinkedinUrlAlt = hints.linkedinId
+    ? encodeURIComponent(`https://linkedin.com/in/${hints.linkedinId}`)
+    : null;
+  const encodedUrlPattern = new RegExp(escapeRegExp(encodedLinkedinUrl), 'i');
+  const encodedUrlAltPattern = encodedLinkedinUrlAlt
+    ? new RegExp(escapeRegExp(encodedLinkedinUrlAlt), 'i')
+    : null;
+
+  // Build URL-anchored queries for web search
+  const queries = buildUrlAnchoredQueries(hints);
+
+  // Update metrics
+  for (const q of queries) {
+    metrics.queriesByType[q.type] = (metrics.queriesByType[q.type] || 0) + 1;
+    metrics.totalQueries++;
+  }
+
+  console.log(`[UrlAnchoredDiscovery] Executing ${queries.length} URL-anchored queries for ${hints.linkedinId}`);
+
+  for (const trackedQuery of queries) {
+    try {
+      // Use web search provider (Brave/SearXNG) for general web search
+      const { results: searchResults } = await searchRawWithEnrichmentProviders(
+        trackedQuery.query,
+        10
+      );
+
+      for (const result of searchResults) {
+        // Skip LinkedIn results (we're looking for external pages)
+        if (result.url.includes('linkedin.com')) continue;
+
+        // Build haystack from title, snippet, and URL
+        const rawHaystack = `${result.title} ${result.snippet} ${result.url}`;
+
+        // Iterative decode (max 3 passes) to handle encoded URLs
+        const haystacks = [rawHaystack];
+        let decoded = rawHaystack;
+        for (let i = 0; i < 3; i++) {
+          try {
+            // Decode common URL encodings
+            const next = decoded
+              .replace(/%2F/gi, '/')
+              .replace(/%3A/gi, ':')
+              .replace(/%3D/gi, '=')
+              .replace(/%26/gi, '&')
+              .replace(/%3F/gi, '?')
+              .replace(/\+/g, ' ');
+            // Also try full decodeURIComponent
+            const fullDecoded = decodeURIComponent(next);
+            if (fullDecoded === decoded) break; // No change, stop
+            decoded = fullDecoded;
+            haystacks.push(decoded);
+          } catch {
+            break; // Invalid encoding, stop
+          }
+        }
+
+        // Check all haystack variants for LinkedIn mention
+        const mentionsLinkedIn = haystacks.some(haystack =>
+          linkedinUrlPattern.test(haystack) ||
+          encodedUrlPattern.test(haystack) ||
+          (encodedUrlAltPattern ? encodedUrlAltPattern.test(haystack) : false) ||
+          (linkedinIdPattern ? linkedinIdPattern.test(haystack) : false)
+        );
+
+        if (!mentionsLinkedIn) continue;
+
+        // Detect platform from URL
+        const { platform, platformId } = detectPlatformFromUrl(result.url);
+
+        // URL-anchored reverse links imply explicit LinkedIn URL presence
+        const signal: BridgeSignal = 'linkedin_url_in_page';
+
+        results.push({
+          sourceUrl: result.url,
+          title: result.title,
+          snippet: result.snippet || '',
+          platform,
+          platformId,
+          signal,
+        });
+        metrics.candidatesFound += 1;
+
+        console.log(`[UrlAnchoredDiscovery] Found bridge: ${result.url} (signal: ${signal}, platform: ${platform || 'unknown'})`);
+      }
+    } catch (error) {
+      console.error(
+        `[UrlAnchoredDiscovery] Query failed: "${trackedQuery.query}"`,
+        error instanceof Error ? error.message : error
+      );
+    }
+  }
+
+  console.log(`[UrlAnchoredDiscovery] Found ${results.length} URL-anchored bridges`);
+  return { results, queriesExecuted: queries.length };
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Detect platform and extract ID from a URL
+ */
+function detectPlatformFromUrl(url: string): { platform: string | null; platformId: string | null } {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    const path = parsed.pathname;
+    const segments = path.split('/').filter(Boolean);
+
+    // GitHub
+    if (host === 'github.com' || host === 'www.github.com') {
+      if (segments.length === 1) {
+        const handle = segments[0];
+        if (!['about', 'features', 'pricing', 'enterprise', 'topics', 'collections', 'trending', 'events', 'sponsors', 'settings', 'marketplace', 'explore', 'notifications', 'issues', 'pulls', 'discussions', 'codespaces', 'orgs'].includes(handle)) {
+          return { platform: 'github', platformId: handle };
+        }
+      }
+    }
+
+    // Twitter/X
+    if (host === 'twitter.com' || host === 'x.com' || host === 'www.twitter.com') {
+      const match = path.match(/^\/([^/]+)/);
+      if (match && !['home', 'explore', 'notifications', 'messages', 'settings', 'i', 'search'].includes(match[1])) {
+        return { platform: 'twitter', platformId: match[1] };
+      }
+    }
+
+    // Medium
+    if (host === 'medium.com' || host.endsWith('.medium.com')) {
+      const match = path.match(/^\/@([^/]+)/);
+      if (match) {
+        return { platform: 'medium', platformId: match[1] };
+      }
+    }
+
+    // Substack
+    if (host.endsWith('.substack.com')) {
+      const subdomain = host.replace('.substack.com', '');
+      return { platform: 'substack', platformId: subdomain };
+    }
+
+    // Personal sites / portfolios (common patterns)
+    if (path.includes('/about') || path.includes('/team') || path.includes('/people')) {
+      return { platform: 'companyteam', platformId: null };
+    }
+
+    return { platform: null, platformId: null };
+  } catch {
+    return { platform: null, platformId: null };
+  }
+}
+
+/**
+ * Update metrics with query breakdown
+ */
+function updateQueryMetrics(metrics: EnrichmentMetrics, queries: TrackedQuery[]): void {
+  for (const q of queries) {
+    metrics.queriesByType[q.type] = (metrics.queriesByType[q.type] || 0) + 1;
+    metrics.totalQueries++;
+  }
 }
 
 /**
@@ -215,11 +621,41 @@ export async function discoverGitHubIdentities(
   const identitiesFound: DiscoveredIdentity[] = [];
   let queriesExecuted = 0;
   let earlyStopReason: string | null = null;
+  let hasTier1Bridge = false;
 
-  // Build search queries
-  const queries = buildSearchQueries(hints);
+  // Initialize metrics
+  const metrics = createEmptyMetrics();
 
-  if (queries.length === 0) {
+  // Track Tier-2 identity count (global cap, not per-platform)
+  let tier2Count = 0;
+
+  // Build enriched hints with confidence scoring
+  // Note: We use empty title/snippet since we don't have SERP data here,
+  // but we can still derive confidence from existing hints
+  const enrichedHints = extractAllHintsWithConfidence(
+    hints.linkedinId,
+    hints.linkedinUrl,
+    hints.nameHint || '',  // Use nameHint as pseudo-title
+    hints.headlineHint || '',  // Use headline as pseudo-snippet
+    hints.roleType
+  );
+
+  // Log hint confidence for debugging
+  console.log(`[BridgeDiscovery] Hint confidence for ${hints.linkedinId}: ` +
+    `name=${enrichedHints.nameHint.confidence.toFixed(2)}, ` +
+    `company=${enrichedHints.companyHint.confidence.toFixed(2)}, ` +
+    `location=${enrichedHints.locationHint.confidence.toFixed(2)}`);
+
+  // Run URL-anchored reverse link discovery via web search
+  const { results: urlBridges, queriesExecuted: urlQueriesExecuted } =
+    await discoverUrlAnchoredBridges(hints, metrics);
+  queriesExecuted += urlQueriesExecuted;
+
+  // Build GitHub-native search queries with confidence gating
+  const queries = buildSearchQueries(hints, enrichedHints);
+  updateQueryMetrics(metrics, queries);
+
+  if (queries.length === 0 && urlBridges.length === 0) {
     console.warn(
       `[BridgeDiscovery] No search queries for candidate ${hints.linkedinId} (no name hint)`
     );
@@ -227,136 +663,222 @@ export async function discoverGitHubIdentities(
       candidateId,
       linkedinId: hints.linkedinId,
       identitiesFound: [],
-      queriesExecuted: 0,
+      queriesExecuted,
       earlyStopReason: 'no_search_queries',
+      metrics,
+      hasTier1Bridge: false,
     };
   }
 
   // Track seen profiles to avoid duplicates
   const seenProfiles = new Set<string>();
 
-  // Execute queries
-  for (const query of queries) {
-    try {
-      queriesExecuted++;
-
-      console.log(
-        `[BridgeDiscovery] Searching GitHub for: "${query}" (candidate: ${hints.linkedinId})`
-      );
-
-      const searchResults = await github.searchUsers(query, opts.maxGitHubResults);
-
-      for (const result of searchResults) {
-        // Skip if already processed
-        if (seenProfiles.has(result.login.toLowerCase())) {
-          continue;
-        }
-        seenProfiles.add(result.login.toLowerCase());
-
-        try {
-          // Get full profile
-          const profile = await github.getUser(result.login);
-
-          // Check for LinkedIn bridge (strongest signal)
-          const linkedInId = extractLinkedInFromProfile(profile);
-          const hasProfileLink =
-            linkedInId?.toLowerCase() === hints.linkedinId.toLowerCase();
-
-          // Get commit evidence if enabled (disabled by default for compliance)
-          let commitEvidence: CommitEmailEvidence[] = [];
-          if (opts.includeCommitEvidence) {
-            commitEvidence = await github.getCommitEvidence(
-              result.login,
-              opts.maxCommitRepos
-            );
-          } else if (queriesExecuted === 1 && searchResults.indexOf(result) === 0) {
-            // Log once per discovery run
-            console.log('[BridgeDiscovery] Commit email evidence disabled (set ENABLE_COMMIT_EMAIL_EVIDENCE=true to enable)');
-          }
-
-          // Calculate confidence score
-          const scoreInput = {
-            hasCommitEvidence: commitEvidence.length > 0,
-            commitCount: commitEvidence.length,
-            hasProfileLink,
-            candidateName: hints.nameHint,
-            platformName: profile.name,
-            candidateHeadline: hints.headlineHint,
-            platformCompany: profile.company,
-            candidateLocation: hints.locationHint,
-            platformLocation: profile.location,
-            platformFollowers: profile.followers,
-            platformRepos: profile.public_repos,
-            platformBio: profile.bio,
-          };
-
-          const scoreBreakdown = calculateConfidenceScore(scoreInput);
-          const confidence = scoreBreakdown.total;
-          const confidenceBucket = classifyConfidence(confidence);
-
-          // Check for contradictions
-          const { hasContradiction, note: contradictionNote } =
-            detectContradictions(scoreInput);
-
-          // Only store if meets threshold AND has meaningful signals
-          if (shouldPersistIdentity(scoreBreakdown)) {
-            identitiesFound.push({
-              platform: 'github',
-              platformId: result.login,
-              profileUrl: profile.html_url,
-              confidence,
-              confidenceBucket,
-              scoreBreakdown,
-              evidence: commitEvidence.length > 0 ? commitEvidence : null,
-              hasContradiction,
-              contradictionNote: contradictionNote || null,
-              platformProfile: {
-                name: profile.name,
-                company: profile.company,
-                location: profile.location,
-                bio: profile.bio,
-                followers: profile.followers,
-                publicRepos: profile.public_repos,
-              },
-            });
-
-            console.log(
-              `[BridgeDiscovery] Found match: ${result.login} (confidence: ${confidence.toFixed(2)}, bucket: ${confidenceBucket})`
-            );
-
-            // Early stop if we found a high-confidence match
-            if (confidence >= 0.9) {
-              earlyStopReason = 'confidence_threshold';
-              console.log(
-                `[BridgeDiscovery] Early stop: found high-confidence match`
-              );
-              break;
-            }
-          }
-        } catch (error) {
-          console.warn(
-            `[BridgeDiscovery] Failed to process ${result.login}:`,
-            error instanceof Error ? error.message : error
-          );
-        }
-      }
-
-      // Break outer loop if early stop
-      if (earlyStopReason) break;
-    } catch (error) {
-      console.error(
-        `[BridgeDiscovery] Query failed: "${query}"`,
-        error instanceof Error ? error.message : error
-      );
+  const reverseBridgeMap = new Map<string, { bridgeUrl: string | null; signals: BridgeSignal[] }>();
+  for (const bridge of urlBridges) {
+    if (bridge.platform !== 'github' || !bridge.platformId) continue;
+    const loginKey = bridge.platformId.toLowerCase();
+    const existing = reverseBridgeMap.get(loginKey);
+    if (existing) {
+      const mergedSignals = new Set([...existing.signals, bridge.signal]);
+      reverseBridgeMap.set(loginKey, {
+        bridgeUrl: existing.bridgeUrl || bridge.sourceUrl,
+        signals: Array.from(mergedSignals),
+      });
+    } else {
+      reverseBridgeMap.set(loginKey, {
+        bridgeUrl: bridge.sourceUrl,
+        signals: [bridge.signal],
+      });
     }
   }
 
-  // Sort by confidence (highest first)
-  identitiesFound.sort((a, b) => b.confidence - a.confidence);
+  const processLogin = async (
+    login: string,
+    extraSignals: BridgeSignal[] = [],
+    bridgeUrl: string | null = null
+  ) => {
+    const loginKey = login.toLowerCase();
+    if (seenProfiles.has(loginKey)) return;
+    seenProfiles.add(loginKey);
+
+    try {
+      const profile = await github.getUser(login);
+
+      const linkedInId = extractLinkedInFromProfile(profile);
+      const hasProfileLink =
+        linkedInId?.toLowerCase() === hints.linkedinId.toLowerCase();
+
+      let commitEvidence: CommitEmailEvidence[] = [];
+      if (opts.includeCommitEvidence) {
+        commitEvidence = await github.getCommitEvidence(
+          login,
+          opts.maxCommitRepos
+        );
+      } else if (queriesExecuted === 0) {
+        console.log('[BridgeDiscovery] Commit email evidence disabled (set ENABLE_COMMIT_EMAIL_EVIDENCE=true to enable)');
+      }
+
+      const scoreInput = {
+        hasCommitEvidence: commitEvidence.length > 0,
+        commitCount: commitEvidence.length,
+        hasProfileLink,
+        candidateName: hints.nameHint,
+        platformName: profile.name,
+        candidateHeadline: hints.headlineHint,
+        platformCompany: profile.company,
+        candidateLocation: hints.locationHint,
+        platformLocation: profile.location,
+        platformFollowers: profile.followers,
+        platformRepos: profile.public_repos,
+        platformBio: profile.bio,
+      };
+
+      const resolvedBridgeUrl = bridgeUrl || (hasProfileLink ? profile.html_url : null);
+      const bridge = createBridgeFromScoring(scoreInput, resolvedBridgeUrl, extraSignals);
+      const baseScore = calculateConfidenceScore(scoreInput);
+
+      // Apply Tier-1 boost when strict Tier-1 evidence exists (not team-page, no contradictions)
+      const { hasContradiction } = detectContradictions(scoreInput);
+      const isStrictTier1 = bridge.tier === 1 &&
+        !bridge.signals.includes('linkedin_url_in_team_page') &&
+        !hasContradiction;
+      const TIER_1_BOOST = 0.08;
+      const boostedTotal = isStrictTier1
+        ? Math.min(1.0, baseScore.total + TIER_1_BOOST)
+        : baseScore.total;
+
+      const scoreBreakdown = {
+        ...baseScore,
+        total: boostedTotal,
+        bridgeTier: bridge.tier,
+        bridgeSignals: bridge.signals,
+        bridgeUrl: bridge.bridgeUrl,
+      };
+      const confidence = boostedTotal;
+      const confidenceBucket = classifyConfidence(confidence);
+
+      // Track bridge signals in metrics (including 'none' when no meaningful signals)
+      if (bridge.hadNoSignals) {
+        metrics.bridgesBySignal.none = (metrics.bridgesBySignal.none || 0) + 1;
+      } else {
+        for (const signal of bridge.signals) {
+          metrics.bridgesBySignal[signal] = (metrics.bridgesBySignal[signal] || 0) + 1;
+        }
+      }
+      if (bridge.signals.length > 0) {
+        metrics.totalBridges++;
+      }
+
+      // Get contradiction note (hasContradiction already computed above for Tier-1 boost)
+      const { note: contradictionNote } = detectContradictions(scoreInput);
+
+      const persistResult = shouldPersistWithBridge(
+        scoreBreakdown,
+        bridge,
+        tier2Count
+      );
+
+      metrics.identitiesByTier[persistResult.tier] =
+        (metrics.identitiesByTier[persistResult.tier] || 0) + 1;
+
+      if (persistResult.shouldPersist) {
+        if (bridge.tier === 2) {
+          tier2Count += 1;
+        }
+
+        if (bridge.tier === 1) {
+          hasTier1Bridge = true;
+          metrics.hasTier1Bridge = true;
+        }
+
+        identitiesFound.push({
+          platform: 'github',
+          platformId: login,
+          profileUrl: profile.html_url,
+          confidence,
+          confidenceBucket,
+          scoreBreakdown,
+          evidence: commitEvidence.length > 0 ? commitEvidence : null,
+          hasContradiction,
+          contradictionNote: contradictionNote || null,
+          platformProfile: {
+            name: profile.name,
+            company: profile.company,
+            location: profile.location,
+            bio: profile.bio,
+            followers: profile.followers,
+            publicRepos: profile.public_repos,
+          },
+          bridge,
+          bridgeTier: bridge.tier,
+          persistReason: persistResult.reason,
+        });
+
+        console.log(
+          `[BridgeDiscovery] Found match: ${login} (confidence: ${confidence.toFixed(2)}, tier: ${bridge.tier}, reason: ${persistResult.reason})`
+        );
+
+        if (bridge.tier === 1) {
+          earlyStopReason = 'tier1_bridge_found';
+        }
+      } else {
+        console.log(
+          `[BridgeDiscovery] Skipped: ${login} (tier: ${bridge.tier}, reason: ${persistResult.reason})`
+        );
+      }
+    } catch (error) {
+      console.warn(
+        `[BridgeDiscovery] Failed to process ${login}:`,
+        error instanceof Error ? error.message : error
+      );
+    }
+  };
+
+  for (const [login, bridgeInfo] of reverseBridgeMap.entries()) {
+    await processLogin(login, bridgeInfo.signals, bridgeInfo.bridgeUrl);
+    if (earlyStopReason) break;
+  }
+
+  if (!earlyStopReason) {
+    for (const trackedQuery of queries) {
+      try {
+        queriesExecuted++;
+
+        console.log(
+          `[BridgeDiscovery] Searching GitHub for: "${trackedQuery.query}" [${trackedQuery.type}] (candidate: ${hints.linkedinId})`
+        );
+
+        const searchResults = await github.searchUsers(trackedQuery.query, opts.maxGitHubResults);
+        metrics.candidatesFound += searchResults.length;
+
+        for (const result of searchResults) {
+          await processLogin(result.login);
+          if (earlyStopReason) break;
+        }
+
+        if (earlyStopReason) break;
+      } catch (error) {
+        console.error(
+          `[BridgeDiscovery] Query failed: "${trackedQuery.query}"`,
+          error instanceof Error ? error.message : error
+        );
+      }
+    }
+  }
+
+  // Sort by bridge tier (lower is better), then by confidence
+  identitiesFound.sort((a, b) => {
+    const tierDiff = (a.bridgeTier || 3) - (b.bridgeTier || 3);
+    if (tierDiff !== 0) return tierDiff;
+    return b.confidence - a.confidence;
+  });
 
   console.log(
-    `[BridgeDiscovery] Completed for ${hints.linkedinId}: ${identitiesFound.length} identities found, ${queriesExecuted} queries executed`
+    `[BridgeDiscovery] Completed for ${hints.linkedinId}: ${identitiesFound.length} identities found, ${queriesExecuted} queries executed, hasTier1: ${hasTier1Bridge}`
   );
+
+  // Log metrics summary
+  console.log(`[BridgeDiscovery] Metrics: queries=${JSON.stringify(metrics.queriesByType)}, bridges=${metrics.totalBridges}, tiers=${JSON.stringify(metrics.identitiesByTier)}`);
 
   return {
     candidateId,
@@ -364,6 +886,8 @@ export async function discoverGitHubIdentities(
     identitiesFound,
     queriesExecuted,
     earlyStopReason,
+    metrics,
+    hasTier1Bridge,
   };
 }
 

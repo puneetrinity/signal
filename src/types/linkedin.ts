@@ -231,6 +231,19 @@ export interface IdentityCandidateData {
   evidence?: CommitEmailEvidence[];
   createdAt: string;
   updatedAt?: string;
+  // Bridge tier info (v2.1)
+  bridgeTier?: number | null; // 1 = auto-merge, 2 = human review, 3 = weak
+  bridgeSignals?: string[] | null;
+  persistReason?: string | null;
+  // Candidate info for review queue
+  candidateId?: string;
+  candidate?: {
+    linkedinId: string;
+    linkedinUrl: string;
+    nameHint: string | null;
+    headlineHint?: string | null;
+    roleType?: string | null;
+  };
 }
 
 /**
