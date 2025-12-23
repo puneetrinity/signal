@@ -424,6 +424,7 @@ async function processSummaryOnlyJob(
         nameHint: true,
         headlineHint: true,
         locationHint: true,
+        companyHint: true,
         roleType: true,
       },
     });
