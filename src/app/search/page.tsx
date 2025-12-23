@@ -139,6 +139,9 @@ function SearchContent() {
               <span>
                 Showing {summaries.length}{' '}
                 {summaries.length === 1 ? 'candidate' : 'candidates'}
+                {summaries.length >= 50 && (
+                  <span className="ml-2 text-amber-500">(max 50 per search)</span>
+                )}
               </span>
               <span>
                 {metadata.cached ? 'Served from cache' : 'Fresh search'}{' '}
