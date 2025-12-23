@@ -347,9 +347,14 @@ export async function githubBridgeNode(
       confidence: i.confidence,
       confidenceBucket: i.confidenceBucket as 'auto_merge' | 'suggest' | 'low' | 'rejected',
       scoreBreakdown: {
-        ...i.scoreBreakdown,
-        handleMatch: i.scoreBreakdown.handleMatch ?? 0, // May not exist in GitHub API results
+        bridgeWeight: i.scoreBreakdown.bridgeWeight,
+        nameMatch: i.scoreBreakdown.nameMatch,
+        handleMatch: i.scoreBreakdown.handleMatch ?? 0,
+        companyMatch: i.scoreBreakdown.companyMatch,
+        locationMatch: i.scoreBreakdown.locationMatch,
+        profileCompleteness: i.scoreBreakdown.profileCompleteness,
         activityScore: i.scoreBreakdown.activityScore ?? i.scoreBreakdown.profileCompleteness ?? 0,
+        total: i.scoreBreakdown.total,
       },
       evidence: i.evidence?.map((e) => ({
         type: 'commit_email' as const,
@@ -369,6 +374,10 @@ export async function githubBridgeNode(
         followers: i.platformProfile.followers,
         publicRepos: i.platformProfile.publicRepos,
       },
+      // Preserve bridge tier info (stored separately from scoreBreakdown)
+      bridgeTier: i.bridgeTier,
+      bridgeSignals: i.bridge?.signals,
+      persistReason: i.persistReason,
     }));
 
     const platformResult: PlatformQueryResult = {

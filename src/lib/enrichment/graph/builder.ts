@@ -96,6 +96,7 @@ export function buildEnrichmentGraph() {
  */
 export function createInitialState(input: EnrichmentGraphInput): Partial<EnrichmentState> {
   return {
+    tenantId: input.tenantId,
     candidateId: input.candidateId,
     sessionId: input.sessionId || uuidv4(),
     roleType: input.roleType || 'general',

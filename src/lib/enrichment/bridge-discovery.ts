@@ -747,12 +747,11 @@ export async function discoverGitHubIdentities(
         ? Math.min(1.0, baseScore.total + TIER_1_BOOST)
         : baseScore.total;
 
-      const scoreBreakdown = {
+      // scoreBreakdown should only contain numeric fields for scoring
+      // Bridge info is stored separately on the identity (bridgeTier, bridge.signals, etc.)
+      const scoreBreakdown: ScoreBreakdown = {
         ...baseScore,
         total: boostedTotal,
-        bridgeTier: bridge.tier,
-        bridgeSignals: bridge.signals,
-        bridgeUrl: bridge.bridgeUrl,
       };
       const confidence = boostedTotal;
       const confidenceBucket = classifyConfidence(confidence);
