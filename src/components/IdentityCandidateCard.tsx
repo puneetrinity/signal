@@ -27,6 +27,7 @@ import {
   Twitter,
   Palette,
   Brush,
+  Info,
 } from 'lucide-react';
 
 export function getConfidenceColor(confidence: number): string {
@@ -189,6 +190,8 @@ interface IdentityCandidateCardProps {
   onReject?: (id: string) => Promise<boolean>;
   /** Show "Why matched" chips with score breakdown */
   showScoreChips?: boolean;
+  /** Callback to open evidence drawer */
+  onViewEvidence?: (identity: IdentityCandidateData) => void;
 }
 
 export function IdentityCandidateCard({
@@ -197,6 +200,7 @@ export function IdentityCandidateCard({
   onConfirm,
   onReject,
   showScoreChips = true,
+  onViewEvidence,
 }: IdentityCandidateCardProps) {
   const [isRevealing, setIsRevealing] = useState(false);
   const [revealedEmail, setRevealedEmail] = useState<string | null>(null);
@@ -321,55 +325,69 @@ export function IdentityCandidateCard({
         </div>
       )}
 
-      {identity.status === 'unconfirmed' && (onRevealEmail || onConfirm || onReject) && (
-        <div className="flex flex-wrap gap-2 pt-2">
-          {hasEvidence && onRevealEmail && !revealedEmail && (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={handleReveal}
-              disabled={isRevealing}
-            >
-              {isRevealing ? (
-                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-              ) : (
-                <Mail className="h-3 w-3 mr-1" />
-              )}
-              Reveal Email
-            </Button>
-          )}
-          {onConfirm && (
-            <Button
-              size="sm"
-              variant="default"
-              onClick={handleConfirm}
-              disabled={isConfirming}
-            >
-              {isConfirming ? (
-                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-              ) : (
-                <CheckCircle2 className="h-3 w-3 mr-1" />
-              )}
-              Confirm
-            </Button>
-          )}
-          {onReject && (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={handleReject}
-              disabled={isRejecting}
-            >
-              {isRejecting ? (
-                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-              ) : (
-                <XCircle className="h-3 w-3 mr-1" />
-              )}
-              Reject
-            </Button>
-          )}
-        </div>
-      )}
+      {/* Action buttons */}
+      <div className="flex flex-wrap gap-2 pt-2">
+        {/* View Evidence button - always shown if handler provided */}
+        {onViewEvidence && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => onViewEvidence(identity)}
+          >
+            <Info className="h-3 w-3 mr-1" />
+            Evidence
+          </Button>
+        )}
+        {identity.status === 'unconfirmed' && (
+          <>
+            {hasEvidence && onRevealEmail && !revealedEmail && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleReveal}
+                disabled={isRevealing}
+              >
+                {isRevealing ? (
+                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                ) : (
+                  <Mail className="h-3 w-3 mr-1" />
+                )}
+                Reveal Email
+              </Button>
+            )}
+            {onConfirm && (
+              <Button
+                size="sm"
+                variant="default"
+                onClick={handleConfirm}
+                disabled={isConfirming}
+              >
+                {isConfirming ? (
+                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                ) : (
+                  <CheckCircle2 className="h-3 w-3 mr-1" />
+                )}
+                Confirm
+              </Button>
+            )}
+            {onReject && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleReject}
+                disabled={isRejecting}
+              >
+                {isRejecting ? (
+                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                ) : (
+                  <XCircle className="h-3 w-3 mr-1" />
+                )}
+                Reject
+              </Button>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 }

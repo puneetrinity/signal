@@ -280,6 +280,29 @@ export default function EnrichmentPage({ params }: PageProps) {
     }
   }, []);
 
+  const handleRegenerateSummary = useCallback(async () => {
+    try {
+      const response = await fetch('/api/v2/enrich/summary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ candidateId }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || 'Failed to regenerate summary');
+      }
+
+      const data = await response.json();
+      if (data.sessionId) {
+        subscribeToSummaryRegeneration(data.sessionId);
+      }
+    } catch (err) {
+      console.error('Regenerate summary error:', err);
+      setError(err instanceof Error ? err.message : 'Failed to regenerate summary');
+    }
+  }, [candidateId, subscribeToSummaryRegeneration]);
+
   const subscribeToStream = useCallback((sid: string) => {
     const eventSource = new EventSource(`/api/v2/enrich/session/stream?sessionId=${sid}`);
 
@@ -641,6 +664,7 @@ export default function EnrichmentPage({ params }: PageProps) {
                           onConfirm={ic.status === 'unconfirmed' ? handleConfirm : undefined}
                           onReject={ic.status === 'unconfirmed' ? handleReject : undefined}
                           onRevealEmail={handleRevealEmail}
+                          onViewEvidence={evidenceDrawer.openDrawer}
                         />
                       ))}
                     </CardContent>
@@ -676,6 +700,7 @@ export default function EnrichmentPage({ params }: PageProps) {
                           onConfirm={handleConfirm}
                           onReject={handleReject}
                           onRevealEmail={handleRevealEmail}
+                          onViewEvidence={evidenceDrawer.openDrawer}
                         />
                       ))}
                     </CardContent>
@@ -711,6 +736,7 @@ export default function EnrichmentPage({ params }: PageProps) {
                           onConfirm={handleConfirm}
                           onReject={handleReject}
                           onRevealEmail={handleRevealEmail}
+                          onViewEvidence={evidenceDrawer.openDrawer}
                         />
                       ))}
                     </CardContent>
@@ -740,7 +766,11 @@ export default function EnrichmentPage({ params }: PageProps) {
                   <CollapsibleContent>
                     <CardContent className="pt-0 space-y-3">
                       {groupedIdentities.rejected.map((ic) => (
-                        <IdentityCandidateCard key={ic.id} identity={ic} />
+                        <IdentityCandidateCard
+                          key={ic.id}
+                          identity={ic}
+                          onViewEvidence={evidenceDrawer.openDrawer}
+                        />
                       ))}
                     </CardContent>
                   </CollapsibleContent>
@@ -778,22 +808,34 @@ export default function EnrichmentPage({ params }: PageProps) {
                     <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
                   )}
                 </CardTitle>
-                {summaryRegenerating ? (
-                  <Badge variant="outline" className="border-blue-500 text-blue-400">
-                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                    Regenerating
-                  </Badge>
-                ) : isVerifiedSummary ? (
-                  <Badge variant="outline" className="border-green-500 text-green-400">
-                    <CheckCircle2 className="h-3 w-3 mr-1" />
-                    Verified ({confirmedCount} confirmed)
-                  </Badge>
-                ) : (
-                  <Badge variant="outline" className="border-amber-500 text-amber-400">
-                    <AlertTriangle className="h-3 w-3 mr-1" />
-                    Draft (unconfirmed sources)
-                  </Badge>
-                )}
+                <div className="flex items-center gap-2">
+                  {summaryRegenerating ? (
+                    <Badge variant="outline" className="border-blue-500 text-blue-400">
+                      <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                      Regenerating
+                    </Badge>
+                  ) : isVerifiedSummary ? (
+                    <Badge variant="outline" className="border-green-500 text-green-400">
+                      <CheckCircle2 className="h-3 w-3 mr-1" />
+                      Verified ({confirmedCount} confirmed)
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="border-amber-500 text-amber-400">
+                      <AlertTriangle className="h-3 w-3 mr-1" />
+                      Draft (unconfirmed sources)
+                    </Badge>
+                  )}
+                  {confirmedCount > 0 && !summaryRegenerating && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleRegenerateSummary}
+                    >
+                      <RefreshCw className="h-3 w-3 mr-1" />
+                      Regenerate
+                    </Button>
+                  )}
+                </div>
               </div>
             </CardHeader>
             <CardContent className="space-y-6">
