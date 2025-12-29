@@ -1,8 +1,6 @@
 "use client";
 
-import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { SearchBar } from "@/components/SearchBar";
 import Image from "next/image";
 import {
   Zap,
@@ -23,15 +21,14 @@ import {
   BookOpen,
   Award,
   Lightbulb,
+  Layers,
+  Mail,
+  Eye,
+  Sparkles,
 } from "lucide-react";
 
 export default function Home() {
   const router = useRouter();
-  const [activeTab, setActiveTab] = useState<"engineers" | "experts">("engineers");
-
-  const handleSearch = (query: string) => {
-    router.push(`/search?q=${encodeURIComponent(query)}`);
-  };
 
   return (
     <div className="min-h-screen bg-[#0D0D1A]">
@@ -65,12 +62,17 @@ export default function Home() {
               <span className="gradient-text-gold">Not Claims</span>
             </h1>
             <p className="mt-6 text-xl text-zinc-400 max-w-2xl">
-              Discover engineers and experts based on what they&apos;ve actually done — real work, real research, real impact — using live web data and explainable evidence.
+              Search for professionals in natural language. Signal discovers their identities across 20+ platforms — GitHub, Google Scholar, npm, arXiv, and more — with AI-powered summaries and confidence scoring.
             </p>
 
-            {/* Search Bar */}
-            <div className="mt-10 max-w-2xl">
-              <SearchBar onSearch={handleSearch} />
+            {/* Login Button */}
+            <div className="mt-10">
+              <button
+                onClick={() => router.push("/sign-in")}
+                className="px-8 py-4 bg-purple-600 hover:bg-purple-500 text-white font-semibold rounded-lg transition-colors text-lg"
+              >
+                Login
+              </button>
             </div>
 
             {/* CTA Links */}
@@ -86,202 +88,69 @@ export default function Home() {
         </div>
       </section>
 
-      {/* The Problem Section */}
+      {/* Platform Discovery Section */}
       <section className="py-20 border-t border-purple-500/10">
-        <div className="max-w-6xl mx-auto px-4">
-          <div className="max-w-3xl">
-            <h2 className="text-3xl sm:text-4xl font-bold text-white">
-              Titles, resumes, and profiles are easy to write.
-            </h2>
-            <p className="mt-2 text-3xl sm:text-4xl font-bold gradient-text-purple">
-              Real expertise is hard to fake.
-            </p>
-
-            <p className="mt-8 text-lg text-zinc-400">
-              Most people-search tools rely on:
-            </p>
-
-            <ul className="mt-4 space-y-3">
-              <li className="flex items-center gap-3 text-zinc-400">
-                <span className="h-2 w-2 bg-red-500/60 rounded-full" />
-                Self-reported claims
-              </li>
-              <li className="flex items-center gap-3 text-zinc-400">
-                <span className="h-2 w-2 bg-red-500/60 rounded-full" />
-                Outdated databases
-              </li>
-              <li className="flex items-center gap-3 text-zinc-400">
-                <span className="h-2 w-2 bg-red-500/60 rounded-full" />
-                Opaque scoring
-              </li>
-            </ul>
-
-            <p className="mt-6 text-lg text-zinc-300">
-              They tell you who people <span className="italic">say</span> they are — not what they&apos;ve actually <span className="text-white font-medium">done</span>.
-            </p>
-          </div>
-        </div>
-      </section>
-
-      {/* The Signal Way */}
-      <section className="py-20 bg-[#141428]/50">
         <div className="max-w-6xl mx-auto px-4">
           <div className="max-w-3xl mb-12">
             <h2 className="text-3xl sm:text-4xl font-bold text-white">
-              The Signal Way
+              Cross-Platform Identity Discovery
             </h2>
             <p className="mt-4 text-xl text-zinc-400">
-              Signal is a <span className="text-white font-medium">real-time, explainable</span> people intelligence engine.
-            </p>
-            <p className="mt-4 text-lg text-zinc-400">
-              We search the live web and verify people using evidence, not assumptions:
+              Signal searches <span className="text-white font-medium">20+ platforms</span> to build a complete picture of a person&apos;s real work.
             </p>
           </div>
 
           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
-            <div className="flex items-start gap-3">
-              <Code className="h-6 w-6 text-purple-400 mt-1 flex-shrink-0" />
-              <div>
-                <h4 className="text-white font-medium">Code and open-source contributions</h4>
-              </div>
+            {/* Engineers */}
+            <div className="bg-[#141428] border border-purple-500/20 rounded-xl p-6">
+              <Code className="h-8 w-8 text-purple-400 mb-4" />
+              <h4 className="text-white font-semibold mb-3">For Engineers</h4>
+              <ul className="space-y-2 text-sm text-zinc-400">
+                <li>GitHub & GitLab</li>
+                <li>npm & PyPI packages</li>
+                <li>Stack Overflow</li>
+                <li>Docker Hub</li>
+                <li>LeetCode</li>
+              </ul>
             </div>
-            <div className="flex items-start gap-3">
-              <FileText className="h-6 w-6 text-purple-400 mt-1 flex-shrink-0" />
-              <div>
-                <h4 className="text-white font-medium">Research papers, citations, and patents</h4>
-              </div>
+
+            {/* Researchers */}
+            <div className="bg-[#141428] border border-purple-500/20 rounded-xl p-6">
+              <GraduationCap className="h-8 w-8 text-purple-400 mb-4" />
+              <h4 className="text-white font-semibold mb-3">For Researchers</h4>
+              <ul className="space-y-2 text-sm text-zinc-400">
+                <li>Google Scholar</li>
+                <li>ORCID</li>
+                <li>arXiv & Semantic Scholar</li>
+                <li>ResearchGate</li>
+                <li>Patents (USPTO/WIPO)</li>
+              </ul>
             </div>
-            <div className="flex items-start gap-3">
-              <Lightbulb className="h-6 w-6 text-purple-400 mt-1 flex-shrink-0" />
-              <div>
-                <h4 className="text-white font-medium">Public technical work and projects</h4>
-              </div>
+
+            {/* ML/Data */}
+            <div className="bg-[#141428] border border-purple-500/20 rounded-xl p-6">
+              <Brain className="h-8 w-8 text-purple-400 mb-4" />
+              <h4 className="text-white font-semibold mb-3">For ML & Data</h4>
+              <ul className="space-y-2 text-sm text-zinc-400">
+                <li>Hugging Face</li>
+                <li>Kaggle</li>
+                <li>Papers with Code</li>
+                <li>OpenReview</li>
+              </ul>
             </div>
-            <div className="flex items-start gap-3">
-              <CheckCircle className="h-6 w-6 text-purple-400 mt-1 flex-shrink-0" />
-              <div>
-                <h4 className="text-white font-medium">Verified affiliations and activity timelines</h4>
-              </div>
+
+            {/* Content & Business */}
+            <div className="bg-[#141428] border border-purple-500/20 rounded-xl p-6">
+              <Lightbulb className="h-8 w-8 text-purple-400 mb-4" />
+              <h4 className="text-white font-semibold mb-3">Content & Business</h4>
+              <ul className="space-y-2 text-sm text-zinc-400">
+                <li>Medium & Substack</li>
+                <li>Dev.to & YouTube</li>
+                <li>Crunchbase & AngelList</li>
+                <li>SEC filings</li>
+              </ul>
             </div>
           </div>
-
-          <p className="mt-8 text-lg text-zinc-300">
-            Every result comes with <span className="text-white font-medium">clear reasoning and sources</span>.
-          </p>
-        </div>
-      </section>
-
-      {/* Who Are You Looking For? */}
-      <section className="py-20 border-t border-purple-500/10">
-        <div className="max-w-6xl mx-auto px-4">
-          <h2 className="text-3xl sm:text-4xl font-bold text-white mb-8">
-            Who Are You Looking For?
-          </h2>
-
-          {/* Tabs */}
-          <div className="flex gap-4 mb-8">
-            <button
-              onClick={() => setActiveTab("engineers")}
-              className={`px-6 py-3 rounded-lg font-medium transition-all flex items-center gap-2 ${
-                activeTab === "engineers"
-                  ? "bg-purple-600 text-white"
-                  : "bg-[#141428] text-zinc-400 hover:text-white border border-purple-500/20"
-              }`}
-            >
-              <Code className="h-5 w-5" />
-              Engineers
-            </button>
-            <button
-              onClick={() => setActiveTab("experts")}
-              className={`px-6 py-3 rounded-lg font-medium transition-all flex items-center gap-2 ${
-                activeTab === "experts"
-                  ? "bg-purple-600 text-white"
-                  : "bg-[#141428] text-zinc-400 hover:text-white border border-purple-500/20"
-              }`}
-            >
-              <Brain className="h-5 w-5" />
-              Experts
-            </button>
-          </div>
-
-          {/* Tab Content */}
-          {activeTab === "engineers" && (
-            <div className="bg-[#141428] border border-purple-500/20 rounded-2xl p-8">
-              <h3 className="text-2xl font-bold text-white mb-4">
-                Find engineers by real work, not titles
-              </h3>
-              <p className="text-zinc-400 mb-6">Signal analyzes:</p>
-              <ul className="space-y-3 mb-8">
-                <li className="flex items-center gap-3 text-zinc-300">
-                  <Github className="h-5 w-5 text-purple-400" />
-                  GitHub repositories and activity
-                </li>
-                <li className="flex items-center gap-3 text-zinc-300">
-                  <Code className="h-5 w-5 text-purple-400" />
-                  Languages, frameworks, and projects
-                </li>
-                <li className="flex items-center gap-3 text-zinc-300">
-                  <TrendingUp className="h-5 w-5 text-purple-400" />
-                  Open-source impact and consistency
-                </li>
-              </ul>
-
-              <div className="bg-[#0D0D1A] rounded-lg p-4 mb-6">
-                <p className="text-sm text-zinc-500 mb-2">Use cases:</p>
-                <ul className="space-y-1 text-sm text-zinc-400">
-                  <li>• Hiring senior engineers</li>
-                  <li>• Finding niche technical specialists</li>
-                  <li>• Evaluating hands-on experience</li>
-                </ul>
-              </div>
-
-              <button
-                onClick={() => handleSearch("Senior React engineers in SF")}
-                className="text-purple-400 hover:text-purple-300 font-medium flex items-center gap-2 transition-colors"
-              >
-                Show me engineers by real work <ArrowRight className="h-4 w-4" />
-              </button>
-            </div>
-          )}
-
-          {activeTab === "experts" && (
-            <div className="bg-[#141428] border border-purple-500/20 rounded-2xl p-8">
-              <h3 className="text-2xl font-bold text-white mb-4">
-                Discover experts by evidence, not claims
-              </h3>
-              <p className="text-zinc-400 mb-6">Signal analyzes:</p>
-              <ul className="space-y-3 mb-8">
-                <li className="flex items-center gap-3 text-zinc-300">
-                  <BookOpen className="h-5 w-5 text-purple-400" />
-                  Publications and citations
-                </li>
-                <li className="flex items-center gap-3 text-zinc-300">
-                  <GraduationCap className="h-5 w-5 text-purple-400" />
-                  Research affiliations and authority signals
-                </li>
-                <li className="flex items-center gap-3 text-zinc-300">
-                  <Award className="h-5 w-5 text-purple-400" />
-                  Patents, papers, and public contributions
-                </li>
-              </ul>
-
-              <div className="bg-[#0D0D1A] rounded-lg p-4 mb-6">
-                <p className="text-sm text-zinc-500 mb-2">Use cases:</p>
-                <ul className="space-y-1 text-sm text-zinc-400">
-                  <li>• Research and diligence</li>
-                  <li>• Advisory and expert sourcing</li>
-                  <li>• Thought leadership validation</li>
-                </ul>
-              </div>
-
-              <button
-                onClick={() => handleSearch("AI researchers publishing in NLP")}
-                className="text-purple-400 hover:text-purple-300 font-medium flex items-center gap-2 transition-colors"
-              >
-                Show me experts by evidence <ArrowRight className="h-4 w-4" />
-              </button>
-            </div>
-          )}
         </div>
       </section>
 
@@ -297,14 +166,14 @@ export default function Home() {
             <div className="bg-[#141428] border border-purple-500/20 rounded-2xl p-8">
               <div className="flex items-center gap-4 mb-4">
                 <span className="stat-number text-3xl">1</span>
-                <h3 className="text-xl font-semibold text-white">Describe who you&apos;re looking for</h3>
+                <h3 className="text-xl font-semibold text-white">Search in natural language</h3>
               </div>
               <p className="text-zinc-400 mb-4">
-                Use natural language:
+                Describe who you&apos;re looking for:
               </p>
               <div className="space-y-2 font-mono text-sm">
                 <div className="bg-[#0D0D1A] rounded-lg px-4 py-2 text-purple-300">&quot;Senior React engineers in SF&quot;</div>
-                <div className="bg-[#0D0D1A] rounded-lg px-4 py-2 text-purple-300">&quot;AI researchers in NLP&quot;</div>
+                <div className="bg-[#0D0D1A] rounded-lg px-4 py-2 text-purple-300">&quot;ML researchers publishing in NLP&quot;</div>
                 <div className="bg-[#0D0D1A] rounded-lg px-4 py-2 text-purple-300">&quot;Fintech founders with payments experience&quot;</div>
               </div>
             </div>
@@ -313,14 +182,14 @@ export default function Home() {
             <div className="bg-[#141428] border border-purple-500/20 rounded-2xl p-8">
               <div className="flex items-center gap-4 mb-4">
                 <span className="stat-number text-3xl">2</span>
-                <h3 className="text-xl font-semibold text-white">Signal searches the live web</h3>
+                <h3 className="text-xl font-semibold text-white">Get candidate results</h3>
               </div>
               <p className="text-zinc-400">
-                We discover relevant public profiles across trusted sources.
+                Signal searches the live web and returns up to 50 matching candidates with preview information.
               </p>
               <div className="mt-6 flex items-center gap-2">
                 <Globe className="h-5 w-5 text-purple-400" />
-                <span className="text-zinc-300">Real-time discovery</span>
+                <span className="text-zinc-300">Real-time web discovery</span>
               </div>
             </div>
 
@@ -328,23 +197,23 @@ export default function Home() {
             <div className="bg-[#141428] border border-purple-500/20 rounded-2xl p-8">
               <div className="flex items-center gap-4 mb-4">
                 <span className="stat-number text-3xl">3</span>
-                <h3 className="text-xl font-semibold text-white">Deep research, on demand</h3>
+                <h3 className="text-xl font-semibold text-white">Deep enrichment on click</h3>
               </div>
-              <p className="text-zinc-400">
-                Click any result to analyze:
+              <p className="text-zinc-400 mb-4">
+                Click any candidate to discover their identities across 20+ platforms:
               </p>
-              <ul className="mt-4 space-y-2 text-zinc-300">
+              <ul className="space-y-2 text-zinc-300 text-sm">
                 <li className="flex items-center gap-2">
-                  <span className="h-1.5 w-1.5 bg-purple-400 rounded-full" />
-                  Technical output
+                  <Github className="h-4 w-4 text-purple-400" />
+                  GitHub, npm, PyPI, Stack Overflow
                 </li>
                 <li className="flex items-center gap-2">
-                  <span className="h-1.5 w-1.5 bg-purple-400 rounded-full" />
-                  Research and authority
+                  <BookOpen className="h-4 w-4 text-purple-400" />
+                  Google Scholar, ORCID, arXiv
                 </li>
                 <li className="flex items-center gap-2">
-                  <span className="h-1.5 w-1.5 bg-purple-400 rounded-full" />
-                  Cross-platform verification
+                  <Layers className="h-4 w-4 text-purple-400" />
+                  Hugging Face, Kaggle, Medium, and more
                 </li>
               </ul>
             </div>
@@ -353,33 +222,74 @@ export default function Home() {
             <div className="bg-[#141428] border border-purple-500/20 rounded-2xl p-8">
               <div className="flex items-center gap-4 mb-4">
                 <span className="stat-number text-3xl">4</span>
-                <h3 className="text-xl font-semibold text-white">Clear confidence, explained</h3>
+                <h3 className="text-xl font-semibold text-white">AI summary & confidence scores</h3>
               </div>
               <p className="text-zinc-400 mb-4">
-                Every profile includes:
+                Get an AI-generated profile with:
               </p>
               <ul className="space-y-2 text-zinc-300">
                 <li className="flex items-center gap-2">
-                  <CheckCircle className="h-4 w-4 text-purple-400" />
-                  A confidence level
+                  <Sparkles className="h-4 w-4 text-purple-400" />
+                  Skills, highlights, and talking points
                 </li>
                 <li className="flex items-center gap-2">
                   <CheckCircle className="h-4 w-4 text-purple-400" />
-                  The signals used
+                  Confidence scores for each identity
                 </li>
                 <li className="flex items-center gap-2">
-                  <CheckCircle className="h-4 w-4 text-purple-400" />
-                  Links to original sources
+                  <Eye className="h-4 w-4 text-purple-400" />
+                  Links to original sources as evidence
                 </li>
               </ul>
-              <p className="mt-4 text-white font-medium">No black boxes.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Key Features */}
+      <section className="py-20 border-t border-purple-500/10">
+        <div className="max-w-6xl mx-auto px-4">
+          <h2 className="text-3xl sm:text-4xl font-bold text-white mb-12">
+            Key Features
+          </h2>
+
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
+            <div className="bg-[#141428] border border-purple-500/20 rounded-xl p-6">
+              <Search className="h-8 w-8 text-[#F59E0B] mb-4" />
+              <h4 className="text-white font-semibold mb-2">Natural Language Search</h4>
+              <p className="text-sm text-zinc-400">Search for people the way you think. AI parses your query to understand roles, skills, locations, and seniority.</p>
+            </div>
+            <div className="bg-[#141428] border border-purple-500/20 rounded-xl p-6">
+              <Layers className="h-8 w-8 text-[#F59E0B] mb-4" />
+              <h4 className="text-white font-semibold mb-2">Cross-Platform Discovery</h4>
+              <p className="text-sm text-zinc-400">Automatically discover identities across GitHub, Google Scholar, npm, Kaggle, Hugging Face, and 15+ more platforms.</p>
+            </div>
+            <div className="bg-[#141428] border border-purple-500/20 rounded-xl p-6">
+              <Sparkles className="h-8 w-8 text-[#F59E0B] mb-4" />
+              <h4 className="text-white font-semibold mb-2">AI-Powered Summaries</h4>
+              <p className="text-sm text-zinc-400">Get intelligent summaries with skills, highlights, talking points, and caveats — generated from verified evidence.</p>
+            </div>
+            <div className="bg-[#141428] border border-purple-500/20 rounded-xl p-6">
+              <CheckCircle className="h-8 w-8 text-[#F59E0B] mb-4" />
+              <h4 className="text-white font-semibold mb-2">Confidence Scoring</h4>
+              <p className="text-sm text-zinc-400">Every discovered identity has a confidence score. High, medium, and low confidence tiers help you prioritize review.</p>
+            </div>
+            <div className="bg-[#141428] border border-purple-500/20 rounded-xl p-6">
+              <Mail className="h-8 w-8 text-[#F59E0B] mb-4" />
+              <h4 className="text-white font-semibold mb-2">Email Discovery</h4>
+              <p className="text-sm text-zinc-400">Extract email addresses from GitHub commit history for confirmed identities.</p>
+            </div>
+            <div className="bg-[#141428] border border-purple-500/20 rounded-xl p-6">
+              <Eye className="h-8 w-8 text-[#F59E0B] mb-4" />
+              <h4 className="text-white font-semibold mb-2">Review Queue</h4>
+              <p className="text-sm text-zinc-400">Manage identity confirmations in a centralized queue. Confirm or reject matches with full context and evidence.</p>
             </div>
           </div>
         </div>
       </section>
 
       {/* Why Signal Is Different */}
-      <section className="py-20 border-t border-purple-500/10">
+      <section className="py-20 bg-[#141428]/50">
         <div className="max-w-6xl mx-auto px-4">
           <h2 className="text-3xl sm:text-4xl font-bold text-white mb-12">
             Why Signal Is Different
@@ -389,34 +299,34 @@ export default function Home() {
             <div className="bg-[#0D0D1A] border border-purple-500/20 rounded-xl p-6">
               <Search className="h-8 w-8 text-[#F59E0B] mb-4" />
               <h4 className="text-white font-semibold mb-2">Evidence-first</h4>
-              <p className="text-sm text-zinc-400">We verify real output, not keywords.</p>
+              <p className="text-sm text-zinc-400">We verify real output across platforms, not self-reported claims.</p>
             </div>
             <div className="bg-[#0D0D1A] border border-purple-500/20 rounded-xl p-6">
               <Zap className="h-8 w-8 text-[#F59E0B] mb-4" />
               <h4 className="text-white font-semibold mb-2">Real-time</h4>
-              <p className="text-sm text-zinc-400">No stale databases. No waiting for re-indexes.</p>
+              <p className="text-sm text-zinc-400">Live web search. No stale databases or outdated profiles.</p>
             </div>
             <div className="bg-[#0D0D1A] border border-purple-500/20 rounded-xl p-6">
               <Brain className="h-8 w-8 text-[#F59E0B] mb-4" />
               <h4 className="text-white font-semibold mb-2">Explainable</h4>
-              <p className="text-sm text-zinc-400">You always know why a person matched.</p>
+              <p className="text-sm text-zinc-400">Every match comes with reasoning, sources, and confidence scores.</p>
             </div>
             <div className="bg-[#0D0D1A] border border-purple-500/20 rounded-xl p-6">
               <Puzzle className="h-8 w-8 text-[#F59E0B] mb-4" />
               <h4 className="text-white font-semibold mb-2">Role-aware</h4>
-              <p className="text-sm text-zinc-400">Engineers, researchers, founders — each analyzed differently.</p>
+              <p className="text-sm text-zinc-400">Engineers, researchers, founders — each searched on relevant platforms.</p>
             </div>
             <div className="bg-[#0D0D1A] border border-purple-500/20 rounded-xl p-6">
               <Shield className="h-8 w-8 text-[#F59E0B] mb-4" />
-              <h4 className="text-white font-semibold mb-2">Respectful by design</h4>
-              <p className="text-sm text-zinc-400">Public data only. On-demand analysis. Transparent sources.</p>
+              <h4 className="text-white font-semibold mb-2">Privacy-respecting</h4>
+              <p className="text-sm text-zinc-400">Public data only. On-demand analysis. Human-in-the-loop confirmation.</p>
             </div>
           </div>
         </div>
       </section>
 
       {/* Who Uses Signal */}
-      <section className="py-20 bg-[#141428]/50">
+      <section className="py-20 border-t border-purple-500/10">
         <div className="max-w-6xl mx-auto px-4">
           <h2 className="text-3xl sm:text-4xl font-bold text-white mb-12">
             Who Uses Signal
@@ -425,80 +335,29 @@ export default function Home() {
           <div className="grid sm:grid-cols-2 lg:grid-cols-5 gap-6">
             <div className="group">
               <Users className="h-8 w-8 text-purple-400 mb-4 group-hover:text-purple-300 transition-colors" />
-              <h4 className="text-white font-semibold">Engineering & recruiting teams</h4>
+              <h4 className="text-white font-semibold">Recruiting teams</h4>
+              <p className="text-sm text-zinc-400 mt-2">Find engineers by actual code and contributions</p>
             </div>
             <div className="group">
               <Rocket className="h-8 w-8 text-purple-400 mb-4 group-hover:text-purple-300 transition-colors" />
-              <h4 className="text-white font-semibold">Founders building early teams</h4>
+              <h4 className="text-white font-semibold">Startup founders</h4>
+              <p className="text-sm text-zinc-400 mt-2">Build early teams with verified expertise</p>
             </div>
             <div className="group">
               <TrendingUp className="h-8 w-8 text-purple-400 mb-4 group-hover:text-purple-300 transition-colors" />
-              <h4 className="text-white font-semibold">Investors & diligence teams</h4>
+              <h4 className="text-white font-semibold">Investors</h4>
+              <p className="text-sm text-zinc-400 mt-2">Validate founder and team backgrounds</p>
             </div>
             <div className="group">
               <BookOpen className="h-8 w-8 text-purple-400 mb-4 group-hover:text-purple-300 transition-colors" />
-              <h4 className="text-white font-semibold">Researchers & analysts</h4>
+              <h4 className="text-white font-semibold">Researchers</h4>
+              <p className="text-sm text-zinc-400 mt-2">Find collaborators by publication record</p>
             </div>
             <div className="group">
-              <CheckCircle className="h-8 w-8 text-purple-400 mb-4 group-hover:text-purple-300 transition-colors" />
-              <h4 className="text-white font-semibold">Operators validating expertise</h4>
+              <Award className="h-8 w-8 text-purple-400 mb-4 group-hover:text-purple-300 transition-colors" />
+              <h4 className="text-white font-semibold">Expert networks</h4>
+              <p className="text-sm text-zinc-400 mt-2">Source advisors with proven expertise</p>
             </div>
-          </div>
-        </div>
-      </section>
-
-      {/* Example Searches */}
-      <section className="py-20 border-t border-purple-500/10">
-        <div className="max-w-6xl mx-auto px-4">
-          <h2 className="text-3xl sm:text-4xl font-bold text-white mb-8">
-            Example Searches
-          </h2>
-
-          <div className="grid sm:grid-cols-2 gap-4 max-w-3xl">
-            {[
-              "5 frontend engineers with React and WebGL",
-              "Machine learning researchers publishing in NLP",
-              "Founders with payments and fintech experience",
-              "Open-source contributors to distributed systems"
-            ].map((search) => (
-              <button
-                key={search}
-                onClick={() => handleSearch(search)}
-                className="text-left bg-[#0D0D1A] border border-purple-500/20 rounded-lg px-5 py-4 text-zinc-300 hover:border-purple-500/50 hover:text-white transition-all group"
-              >
-                <span className="text-purple-400 group-hover:text-purple-300 mr-2">→</span>
-                {search}
-              </button>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* Built for Trust */}
-      <section className="py-20 bg-[#141428]/50">
-        <div className="max-w-6xl mx-auto px-4">
-          <div className="max-w-3xl">
-            <h2 className="text-3xl sm:text-4xl font-bold text-white mb-6">
-              Built for Trust
-            </h2>
-            <p className="text-zinc-400 mb-6">Signal shows:</p>
-            <ul className="space-y-3 text-zinc-300">
-              <li className="flex items-center gap-3">
-                <span className="h-2 w-2 bg-purple-500 rounded-full" />
-                Where each insight came from
-              </li>
-              <li className="flex items-center gap-3">
-                <span className="h-2 w-2 bg-purple-500 rounded-full" />
-                When it was last verified
-              </li>
-              <li className="flex items-center gap-3">
-                <span className="h-2 w-2 bg-purple-500 rounded-full" />
-                What evidence supports it
-              </li>
-            </ul>
-            <p className="mt-6 text-zinc-400">
-              You stay in control — save profiles, revisit searches, and build your own shortlist.
-            </p>
           </div>
         </div>
       </section>
@@ -510,12 +369,17 @@ export default function Home() {
             Start Finding People by Evidence
           </h2>
           <p className="text-xl text-zinc-400 mb-10">
-            Discover professionals the way modern teams should:<br />
-            <span className="text-white">real work, real research, real impact.</span>
+            Search in natural language. Discover identities across 20+ platforms.<br />
+            <span className="text-white">Get AI summaries with confidence scores.</span>
           </p>
 
           <div className="max-w-xl mx-auto">
-            <SearchBar onSearch={handleSearch} />
+            <button
+              onClick={() => router.push("/sign-in")}
+              className="px-10 py-4 bg-gradient-to-r from-purple-600 to-purple-500 hover:from-purple-500 hover:to-purple-400 text-white font-semibold rounded-lg transition-all text-lg shadow-lg shadow-purple-500/25"
+            >
+              Try now for free
+            </button>
           </div>
         </div>
       </section>
