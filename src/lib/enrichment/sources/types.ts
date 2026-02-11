@@ -141,6 +141,8 @@ export interface PlatformDiagnostics {
   rawResultCount: number;
   /** Results after URL pattern matching */
   matchedResultCount: number;
+  /** Sample unmatched URLs (diagnostics only, max 3) */
+  unmatchedSampleUrls?: string[];
   /** Identities that passed scoring threshold */
   identitiesAboveThreshold: number;
   /** Was rate limited or blocked? */

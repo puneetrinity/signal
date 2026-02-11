@@ -201,6 +201,7 @@ export interface EnrichmentSearchResultWithMeta {
   results: EnrichmentSearchResult[];
   rawResultCount: number;
   matchedResultCount: number;
+  unmatchedSampleUrls?: string[];
   rateLimited: boolean;
   provider: string;
 }
@@ -534,13 +535,34 @@ export async function searchForPlatformWithMeta(
     const searchResponse = await searchRawWithFallback(query, maxResults * 2); // Get extra for filtering
     const { results: rawResults, providerUsed, rateLimited } = searchResponse;
     const pattern = PLATFORM_PATTERNS[platform];
+    const unmatchedSampleUrls: string[] = [];
+    const unmatchedSeen = new Set<string>();
+
+    const addUnmatchedSample = (url: string) => {
+      if (unmatchedSampleUrls.length >= 3) return;
+      let cleaned = url;
+      try {
+        const parsed = new URL(url);
+        cleaned = `${parsed.origin}${parsed.pathname}`;
+      } catch {
+        // keep original if parsing fails
+      }
+      if (unmatchedSeen.has(cleaned)) return;
+      unmatchedSeen.add(cleaned);
+      unmatchedSampleUrls.push(cleaned);
+    };
 
     if (!pattern) {
       console.warn(`[SearchExecutor] No pattern defined for platform: ${platform}`);
+      for (const result of rawResults) {
+        addUnmatchedSample(result.url);
+        if (unmatchedSampleUrls.length >= 3) break;
+      }
       return {
         results: [],
         rawResultCount: rawResults.length,
         matchedResultCount: 0,
+        unmatchedSampleUrls,
         rateLimited,
         provider: providerUsed,
       };
@@ -554,6 +576,7 @@ export async function searchForPlatformWithMeta(
     for (const result of rawResults) {
       // Check if URL matches the platform pattern
       if (!pattern.urlPattern.test(result.url)) {
+        addUnmatchedSample(result.url);
         continue;
       }
 
@@ -583,6 +606,7 @@ export async function searchForPlatformWithMeta(
       results: enrichedResults,
       rawResultCount: rawResults.length,
       matchedResultCount: matchedCount,
+      unmatchedSampleUrls,
       rateLimited,
       provider: providerUsed,
     };

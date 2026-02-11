@@ -33,6 +33,7 @@ interface PlatformAggregate {
   persisted: number;
   rateLimited: number;
   totalQueries: number;
+  unmatchedSamples: string[];
 }
 
 interface DiagnosticsSummary {
@@ -74,7 +75,12 @@ function classifySession(session: SessionItem, platformResults: Record<string, u
   if (results.length === 0) return 'no_platforms';
 
   const anyRaw = results.some((r) => (r.rawResultCount as number | undefined) && (r.rawResultCount as number) > 0);
-  const anyMatched = results.some((r) => (r.identitiesFound as number | undefined) && (r.identitiesFound as number) > 0);
+  const anyMatched = results.some((r) => {
+    const matched = r.matchedResultCount as number | undefined;
+    if (typeof matched === 'number') return matched > 0;
+    const identitiesFound = r.identitiesFound as number | undefined;
+    return typeof identitiesFound === 'number' ? identitiesFound > 0 : false;
+  });
   const anyPersisted = results.some((r) => {
     const persisted = r.identitiesPersisted as number | undefined;
     if (typeof persisted === 'number') return persisted > 0;
@@ -137,22 +143,36 @@ function buildSummary(sessions: SessionItem[]): DiagnosticsSummary {
         persisted: 0,
         rateLimited: 0,
         totalQueries: 0,
+        unmatchedSamples: [],
       };
 
       aggregate.sessions += 1;
       const rawCount = (result.rawResultCount as number | undefined) || 0;
+      const matchedCount = (result.matchedResultCount as number | undefined) || 0;
       const identitiesFound = (result.identitiesFound as number | undefined) || 0;
       const persisted = typeof result.identitiesPersisted === 'number'
         ? (result.identitiesPersisted as number)
         : identitiesFound;
       const rateLimited = result.rateLimited as boolean | undefined;
       const queriesExecuted = (result.queriesExecuted as number | undefined) || 0;
+      const unmatchedSampleUrls = Array.isArray(result.unmatchedSampleUrls)
+        ? (result.unmatchedSampleUrls as string[])
+        : [];
 
       if (rawCount > 0) aggregate.rawHits += 1;
-      if (identitiesFound > 0) aggregate.matchedHits += 1;
+      if (matchedCount > 0) aggregate.matchedHits += 1;
       if (persisted > 0) aggregate.persisted += 1;
       if (rateLimited) aggregate.rateLimited += 1;
       aggregate.totalQueries += queriesExecuted;
+      if (unmatchedSampleUrls.length > 0) {
+        const existing = new Set(aggregate.unmatchedSamples);
+        for (const url of unmatchedSampleUrls) {
+          if (aggregate.unmatchedSamples.length >= 3) break;
+          if (existing.has(url)) continue;
+          existing.add(url);
+          aggregate.unmatchedSamples.push(url);
+        }
+      }
 
       summary.platforms[platform] = aggregate;
     }
@@ -431,6 +451,28 @@ export default function EnrichmentDiagnosticsPage() {
                   </table>
                 </div>
               )}
+            </CardContent>
+          </Card>
+        )}
+
+        {!loading && !error && platformRows.some((row) => row.unmatchedSamples.length > 0) && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Unmatched URL Samples</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              {platformRows
+                .filter((row) => row.unmatchedSamples.length > 0)
+                .map((row) => (
+                  <div key={row.platform} className="space-y-1">
+                    <div className="font-medium">{row.platform}</div>
+                    <div className="text-muted-foreground">
+                      {row.unmatchedSamples.map((url) => (
+                        <div key={url}>{url}</div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
             </CardContent>
           </Card>
         )}

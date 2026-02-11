@@ -665,6 +665,8 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
     const rejectionReasons: string[] = [];
     const variantsExecuted: string[] = [];
     const variantsRejected: string[] = [];
+    const unmatchedSampleUrls: string[] = [];
+    const unmatchedSeen = new Set<string>();
     let lastProvider: string = config.primary;
 
     // Get query candidates - use new interface if available, else convert legacy
@@ -693,6 +695,7 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
           variantsRejected: [],
           rawResultCount: 0,
           matchedResultCount: 0,
+          unmatchedSampleUrls: [],
           identitiesAboveThreshold: 0,
           rateLimited: false,
           provider: config.primary,
@@ -749,6 +752,14 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
           totalMatchedResults += searchResult.matchedResultCount;
           lastProvider = searchResult.provider;
           if (searchResult.rateLimited) wasRateLimited = true;
+          if (searchResult.unmatchedSampleUrls?.length) {
+            for (const url of searchResult.unmatchedSampleUrls) {
+              if (unmatchedSampleUrls.length >= 3) break;
+              if (unmatchedSeen.has(url)) continue;
+              unmatchedSeen.add(url);
+              unmatchedSampleUrls.push(url);
+            }
+          }
 
           return searchResult;
         };
@@ -885,6 +896,7 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
       variantsRejected,
       rawResultCount: totalRawResults,
       matchedResultCount: totalMatchedResults,
+      unmatchedSampleUrls,
       identitiesAboveThreshold,
       rateLimited: wasRateLimited,
       provider: lastProvider,

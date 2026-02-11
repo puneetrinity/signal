@@ -63,6 +63,7 @@ export interface EnrichmentRunTrace {
   platformResults: Record<string, {
     queriesExecuted: number;
     rawResultCount: number;
+    matchedResultCount?: number;
     identitiesFound: number;
     /** Identities above minConfidence threshold (platform-local, added in persistResultsNode) */
     identitiesAboveMinConfidence?: number;
@@ -70,6 +71,8 @@ export interface EnrichmentRunTrace {
     identitiesPassingPersistGuard?: number;
     /** Identities successfully persisted to DB (added in persistResultsNode) */
     identitiesPersisted?: number;
+    /** Sample unmatched URLs for pattern debugging (max 3) */
+    unmatchedSampleUrls?: string[];
     bestConfidence: number | null;
     durationMs: number;
     error?: string;

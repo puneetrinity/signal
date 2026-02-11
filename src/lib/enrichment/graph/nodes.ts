@@ -103,7 +103,9 @@ function buildRunTrace(state: EnrichmentState): EnrichmentRunTrace {
     platformResults[result.platform] = {
       queriesExecuted: result.queriesExecuted,
       rawResultCount: result.diagnostics?.rawResultCount ?? 0,
+      matchedResultCount: result.diagnostics?.matchedResultCount ?? 0,
       identitiesFound: result.identities.length,
+      unmatchedSampleUrls: result.diagnostics?.unmatchedSampleUrls ?? [],
       bestConfidence,
       durationMs: result.durationMs,
       error: result.error,
