@@ -234,18 +234,19 @@ export async function loadCandidateNode(
       }
     }
 
-    // Re-derive missing hints from SERP data when nameHint is absent
+    // Re-derive missing hints from SERP data (searchTitle/searchSnippet)
     let nameHint: string | null = candidate.nameHint || null;
     let headlineHint: string | null = candidate.headlineHint || null;
     let locationHint: string | null = candidate.locationHint || null;
 
-    if (!nameHint && (candidate.searchTitle || candidate.searchSnippet)) {
+    if ((!nameHint || !headlineHint || !locationHint || !companyHint) &&
+        (candidate.searchTitle || candidate.searchSnippet)) {
       const reDerived = extractAllHints(
         candidate.linkedinId || candidate.id,
         candidate.searchTitle || '',
         candidate.searchSnippet || ''
       );
-      if (reDerived.nameHint) nameHint = reDerived.nameHint;
+      if (!nameHint && reDerived.nameHint) nameHint = reDerived.nameHint;
       if (!headlineHint && reDerived.headlineHint) headlineHint = reDerived.headlineHint;
       if (!locationHint && reDerived.locationHint) locationHint = reDerived.locationHint;
       if (!companyHint && reDerived.companyHint) companyHint = reDerived.companyHint;

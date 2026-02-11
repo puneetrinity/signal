@@ -320,7 +320,7 @@ export function classifyConfidence(score: number): ConfidenceBucket {
 
 /**
  * Get the minimum confidence threshold for storing identities
- * Configurable via ENRICHMENT_MIN_CONFIDENCE env var (default: 0.35)
+ * Configurable via ENRICHMENT_MIN_CONFIDENCE env var (default: 0.25)
  */
 function getStorageThreshold(): number {
   const envValue = process.env.ENRICHMENT_MIN_CONFIDENCE;
@@ -361,7 +361,7 @@ export function shouldPersistIdentity(breakdown: ScoreBreakdown): boolean {
 
   // Handle match: strong signal for handle-based platforms (github, npm, pypi, etc.)
   // Exact match gives handleMatch=1.0, variant match gives 0.4-0.9
-  // Allow persistence if handleMatch >= 0.25 (covers derived variants)
+  // Allow persistence if handleMatch >= 0.20 (covers derived variants)
   const hasHandleMatch = (breakdown.handleMatch ?? 0) >= 0.20;
   if (hasHandleMatch) {
     return true;

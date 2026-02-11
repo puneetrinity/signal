@@ -105,7 +105,7 @@ async function searchRawWithFallback(
   let primaryResults: RawSearchResult[] = [];
   let primaryRateLimited = false;
 
-  // Try primary provider (Brave)
+  // Try primary provider (default: Serper)
   try {
     primaryResults = await primary.searchRaw(query, maxResults);
 
