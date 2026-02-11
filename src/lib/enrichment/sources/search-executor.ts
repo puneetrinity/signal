@@ -58,7 +58,7 @@ export function getEnrichmentProviderConfig(): {
 } {
   const primary = (process.env.ENRICHMENT_SEARCH_PROVIDER?.toLowerCase() || 'serper') as SearchProviderType;
   const fallbackEnv = process.env.ENRICHMENT_SEARCH_FALLBACK_PROVIDER?.toLowerCase();
-  const minResults = parseInt(process.env.MIN_RESULTS_BEFORE_FALLBACK || '2', 10);
+  const minResults = parseInt(process.env.MIN_RESULTS_BEFORE_FALLBACK || '1', 10);
 
   // Support 'none' or empty string to disable fallback
   // This is useful when SearXNG is blocked/rate-limited
@@ -68,8 +68,8 @@ export function getEnrichmentProviderConfig(): {
       ? (fallbackEnv as SearchProviderType)
       : null;
   } else if (fallbackEnv === undefined) {
-    // Default to searxng only if not explicitly set
-    fallback = 'searxng';
+    // Default to brave only if not explicitly set
+    fallback = 'brave';
   }
 
   return {
@@ -265,9 +265,9 @@ const PLATFORM_PATTERNS: Record<
     profileUrlBuilder: (id) => `https://leetcode.com/u/${id}`,
   },
   hackerearth: {
-    urlPattern: /hackerearth\.com\/@([a-zA-Z0-9_-]+)/,
+    urlPattern: /hackerearth\.com\/(?:@|users\/)([a-zA-Z0-9_-]+)/,
     idExtractor: (url) => {
-      const match = url.match(/hackerearth\.com\/@([a-zA-Z0-9_-]+)/);
+      const match = url.match(/hackerearth\.com\/(?:@|users\/)([a-zA-Z0-9_-]+)/);
       return match?.[1] || null;
     },
     profileUrlBuilder: (id) => `https://www.hackerearth.com/@${id}`,

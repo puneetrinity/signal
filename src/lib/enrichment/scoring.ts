@@ -330,7 +330,7 @@ function getStorageThreshold(): number {
       return parsed;
     }
   }
-  return 0.35; // Default: requires name match + some secondary signal
+  return 0.25; // Default: lowered to improve persist rate for partial matches
 }
 
 /**
@@ -362,7 +362,7 @@ export function shouldPersistIdentity(breakdown: ScoreBreakdown): boolean {
   // Handle match: strong signal for handle-based platforms (github, npm, pypi, etc.)
   // Exact match gives handleMatch=1.0, variant match gives 0.4-0.9
   // Allow persistence if handleMatch >= 0.25 (covers derived variants)
-  const hasHandleMatch = (breakdown.handleMatch ?? 0) >= 0.25;
+  const hasHandleMatch = (breakdown.handleMatch ?? 0) >= 0.20;
   if (hasHandleMatch) {
     return true;
   }

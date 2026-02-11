@@ -24,6 +24,7 @@ import {
 } from './ephemeral';
 import { generateCandidateSummary } from '../summary/generate';
 import { shouldPersistIdentity, type ScoreBreakdown } from '../scoring';
+import { extractAllHints, extractNameFromSlug } from '../hint-extraction';
 import {
   type EnrichmentState,
   type PartialEnrichmentState,
@@ -46,7 +47,7 @@ function getMinConfidence(): number {
       return parsed;
     }
   }
-  return 0.35;
+  return 0.25;
 }
 
 /**
@@ -233,13 +234,35 @@ export async function loadCandidateNode(
       }
     }
 
+    // Re-derive missing hints from SERP data when nameHint is absent
+    let nameHint: string | null = candidate.nameHint || null;
+    let headlineHint: string | null = candidate.headlineHint || null;
+    let locationHint: string | null = candidate.locationHint || null;
+
+    if (!nameHint && (candidate.searchTitle || candidate.searchSnippet)) {
+      const reDerived = extractAllHints(
+        candidate.linkedinId || candidate.id,
+        candidate.searchTitle || '',
+        candidate.searchSnippet || ''
+      );
+      if (reDerived.nameHint) nameHint = reDerived.nameHint;
+      if (!headlineHint && reDerived.headlineHint) headlineHint = reDerived.headlineHint;
+      if (!locationHint && reDerived.locationHint) locationHint = reDerived.locationHint;
+      if (!companyHint && reDerived.companyHint) companyHint = reDerived.companyHint;
+    }
+
+    // Last resort: derive name from LinkedIn slug
+    if (!nameHint) {
+      nameHint = extractNameFromSlug(candidate.linkedinId || candidate.id);
+    }
+
     // Build hints from candidate data (using Prisma schema field names)
     const hints: EnrichmentHints = {
       linkedinId: candidate.linkedinId || candidate.id,
       linkedinUrl: candidate.linkedinUrl || `https://linkedin.com/in/${candidate.linkedinId}`,
-      nameHint: candidate.nameHint || null,
-      headlineHint: candidate.headlineHint || null,
-      locationHint: candidate.locationHint || null,
+      nameHint,
+      headlineHint,
+      locationHint,
       companyHint,
       roleType: (candidate.roleType as RoleType) || state.roleType || null,
     };
@@ -838,7 +861,7 @@ export async function persistResultsNode(
       if (
         i.platform === 'github' &&
         (breakdown.bridgeWeight ?? 0) === 0 &&
-        (breakdown.handleMatch ?? 0) === 0
+        (breakdown.handleMatch ?? 0) < 0.20
       ) {
         // Require company or location match for name-only GitHub matches
         const hasContextSignal =
