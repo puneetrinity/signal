@@ -5,11 +5,11 @@
  *
  * Priority order:
  * 1. GitHub API (for GitHub-specific queries) - handled separately
- * 2. Brave Search (primary) - official paid API, predictable, compliant
- * 3. SearXNG (fallback) - best-effort recall boost when Brave fails/returns 0
+ * 2. Serper.dev (primary) - Google SERP API
+ * 3. SearXNG/Brave (fallback) - best-effort recall boost when primary fails/returns 0
  *
  * Environment Variables:
- * - ENRICHMENT_SEARCH_PROVIDER: Primary provider for enrichment (default: 'brave')
+ * - ENRICHMENT_SEARCH_PROVIDER: Primary provider for enrichment (default: 'serper')
  * - ENRICHMENT_SEARCH_FALLBACK_PROVIDER: Fallback provider (default: 'searxng')
  * - MIN_RESULTS_BEFORE_FALLBACK: Minimum results before trying fallback (default: 2)
  *
@@ -56,7 +56,7 @@ export function getEnrichmentProviderConfig(): {
   fallback: SearchProviderType | null;
   minResultsBeforeFallback: number;
 } {
-  const primary = (process.env.ENRICHMENT_SEARCH_PROVIDER?.toLowerCase() || 'brave') as SearchProviderType;
+  const primary = (process.env.ENRICHMENT_SEARCH_PROVIDER?.toLowerCase() || 'serper') as SearchProviderType;
   const fallbackEnv = process.env.ENRICHMENT_SEARCH_FALLBACK_PROVIDER?.toLowerCase();
   const minResults = parseInt(process.env.MIN_RESULTS_BEFORE_FALLBACK || '2', 10);
 
@@ -73,7 +73,7 @@ export function getEnrichmentProviderConfig(): {
   }
 
   return {
-    primary: ['brave', 'searxng', 'brightdata', 'serper'].includes(primary) ? primary : 'brave',
+    primary: ['brave', 'searxng', 'brightdata', 'serper'].includes(primary) ? primary : 'serper',
     fallback,
     minResultsBeforeFallback: minResults,
   };

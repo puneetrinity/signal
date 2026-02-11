@@ -332,6 +332,21 @@ export interface AISummaryStructured {
   talkingPoints?: string[];
   caveats?: string[];
   confidence?: number;
+  contact?: ContactInfo;
+  contactRestricted?: boolean;
+  source?: 'pdl' | 'langgraph' | string;
+}
+
+export interface ContactInfoItem {
+  value: string;
+  type?: string;
+}
+
+export interface ContactInfo {
+  source: string;
+  emails: ContactInfoItem[];
+  phones: ContactInfoItem[];
+  likelihood?: number;
 }
 
 /**

@@ -13,13 +13,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { checkRedisHealth } from '@/lib/redis/health';
 import { withAuth } from '@/lib/auth';
-
-/**
- * Check if LangGraph enrichment is enabled
- */
-function isLangGraphEnabled(): boolean {
-  return process.env.USE_LANGGRAPH_ENRICHMENT === 'true';
-}
+import { getEnrichmentProviderStatus } from '@/lib/enrichment/provider';
 
 /**
  * Check if Redis URL is configured
@@ -36,7 +30,8 @@ function isRedisConfigured(): boolean {
  * - Authenticated: returns detailed breakdown
  */
 export async function GET(_request: NextRequest) {
-  const enabled = isLangGraphEnabled();
+  const providerStatus = getEnrichmentProviderStatus();
+  const enabled = providerStatus.enabled;
   const redisConfigured = isRedisConfigured();
 
   // Only ping Redis if configured (reuses existing client)
@@ -71,11 +66,12 @@ export async function GET(_request: NextRequest) {
     healthy,
     timestamp: Date.now(),
     checks: {
-      langgraph: {
+      enrichmentProvider: {
+        provider: providerStatus.provider,
         enabled,
         message: enabled
-          ? 'LangGraph enrichment is enabled'
-          : 'USE_LANGGRAPH_ENRICHMENT is not set to "true"',
+          ? `Enrichment provider ${providerStatus.provider} is enabled`
+          : providerStatus.reason || 'Enrichment provider is not enabled',
       },
       redis: {
         configured: redisConfigured,

@@ -14,13 +14,7 @@ import { withRateLimit, ENRICH_RATE_LIMIT, rateLimitHeaders } from '@/lib/rate-l
 import { withAuth, requireTenantId } from '@/lib/auth';
 import type { RoleType } from '@/types/linkedin';
 import type { EnrichmentBudget } from '@/lib/enrichment/graph/types';
-
-/**
- * Check if LangGraph enrichment is enabled
- */
-function isLangGraphEnabled(): boolean {
-  return process.env.USE_LANGGRAPH_ENRICHMENT === 'true';
-}
+import { getEnrichmentProviderStatus } from '@/lib/enrichment/provider';
 
 /**
  * POST /api/v2/enrich/async
@@ -38,12 +32,14 @@ function isLangGraphEnabled(): boolean {
  * - statusUrl: string (URL to check progress)
  */
 export async function POST(request: NextRequest) {
-  // Check feature flag
-  if (!isLangGraphEnabled()) {
+  // Check feature flag/provider readiness
+  const providerStatus = getEnrichmentProviderStatus();
+  if (!providerStatus.enabled) {
     return NextResponse.json(
       {
         success: false,
-        error: 'Async enrichment is not enabled. Set USE_LANGGRAPH_ENRICHMENT=true to enable.',
+        error: providerStatus.reason || 'Async enrichment is not enabled.',
+        provider: providerStatus.provider,
       },
       { status: 400 }
     );

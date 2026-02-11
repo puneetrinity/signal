@@ -357,6 +357,12 @@ export default function EnrichmentPage({ params }: PageProps) {
     }
   }, [startEnrichment, subscribeToStream]);
 
+  const copyToClipboard = (value: string) => {
+    if (value) {
+      navigator.clipboard.writeText(value);
+    }
+  };
+
   const copyLinkedInUrl = () => {
     if (candidate?.linkedinUrl) {
       navigator.clipboard.writeText(candidate.linkedinUrl);
@@ -414,6 +420,7 @@ export default function EnrichmentPage({ params }: PageProps) {
   const confirmedCount = identityCandidates.filter((ic) => ic.status === 'confirmed').length;
   const summaryMode = session?.runTrace?.final?.summaryMeta?.mode || 'draft';
   const isVerifiedSummary = summaryMode === 'verified';
+  const usingPdl = summary?.source === 'pdl';
 
   if (isLoading) {
     return (
@@ -784,7 +791,11 @@ export default function EnrichmentPage({ params }: PageProps) {
         {uiState === 'completed' && identityCandidates.length === 0 && (
           <Card className="mb-6">
             <CardContent className="pt-6 text-center">
-              <p className="text-muted-foreground">No identity candidates discovered.</p>
+              <p className="text-muted-foreground">
+                {usingPdl
+                  ? 'No identity candidates discovered (PDL-only enrichment).'
+                  : 'No identity candidates discovered.'}
+              </p>
               <Button variant="outline" className="mt-4" onClick={handleStartEnrichment}>
                 <RefreshCw className="mr-2 h-4 w-4" />
                 Re-enrich
@@ -843,6 +854,64 @@ export default function EnrichmentPage({ params }: PageProps) {
 
               {summary && (
                 <>
+                  {summary.contactRestricted && (
+                    <>
+                      <Separator />
+                      <div className="flex items-center gap-2 text-sm text-orange-500">
+                        <AlertTriangle className="h-4 w-4" />
+                        Contact details are restricted by tenant policy.
+                      </div>
+                    </>
+                  )}
+
+                  {summary.contact && (summary.contact.emails.length > 0 || summary.contact.phones.length > 0) && (
+                    <>
+                      <Separator />
+                      <div className="space-y-3">
+                        <div className="flex items-center gap-2 text-sm font-medium">
+                          <Zap className="h-4 w-4" />
+                          Contact Details
+                        </div>
+                        {summary.contact.emails.length > 0 && (
+                          <div className="space-y-2">
+                            <div className="text-xs text-muted-foreground">Emails</div>
+                            <div className="flex flex-wrap gap-2">
+                              {summary.contact.emails.map((email, idx) => (
+                                <Button
+                                  key={`email-${idx}`}
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => copyToClipboard(email.value)}
+                                >
+                                  {email.value}
+                                  <Copy className="ml-2 h-3 w-3" />
+                                </Button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {summary.contact.phones.length > 0 && (
+                          <div className="space-y-2">
+                            <div className="text-xs text-muted-foreground">Phones</div>
+                            <div className="flex flex-wrap gap-2">
+                              {summary.contact.phones.map((phone, idx) => (
+                                <Button
+                                  key={`phone-${idx}`}
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => copyToClipboard(phone.value)}
+                                >
+                                  {phone.value}
+                                  <Copy className="ml-2 h-3 w-3" />
+                                </Button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
+
                   {summary.skills && summary.skills.length > 0 && (
                     <div className="space-y-2">
                       <div className="flex items-center gap-2 text-sm font-medium">

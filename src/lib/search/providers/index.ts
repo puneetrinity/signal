@@ -5,7 +5,7 @@
  * fallback logic when primary provider fails or returns no results.
  *
  * Environment Variables:
- * - SEARCH_PROVIDER: 'brightdata' | 'searxng' | 'brave' | 'serper' (default: 'brightdata')
+ * - SEARCH_PROVIDER: 'brightdata' | 'searxng' | 'brave' | 'serper' (default: 'serper')
  * - SEARCH_FALLBACK_PROVIDER: Optional fallback provider
  *
  * @see docs/ARCHITECTURE_V2.1.md Section 4
@@ -43,7 +43,7 @@ function getPrimaryProvider(): SearchProviderType {
   if (env && env in providers) {
     return env as SearchProviderType;
   }
-  return 'brightdata'; // Default for backward compatibility
+  return 'serper';
 }
 
 /**

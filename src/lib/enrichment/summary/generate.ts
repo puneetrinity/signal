@@ -44,6 +44,8 @@ export interface GenerateSummaryInput {
   };
   identities: DiscoveredIdentity[];
   platformData: EphemeralPlatformDataItem[];
+  /** Optional supplemental data (e.g., PDL enrichment) */
+  supplementalData?: Record<string, unknown> | null;
   /** Summary mode - affects prompt and caveats */
   mode?: SummaryMode;
   /** Number of confirmed identities used (for verified mode) */
@@ -63,7 +65,14 @@ async function createGroqModel(apiKey: string) {
 }
 
 function buildPrompt(input: GenerateSummaryInput): string {
-  const { candidate, identities, platformData, mode = 'draft', confirmedCount = 0 } = input;
+  const {
+    candidate,
+    identities,
+    platformData,
+    supplementalData,
+    mode = 'draft',
+    confirmedCount = 0,
+  } = input;
 
   const identityLines = identities.slice(0, 25).map((i) => ({
     platform: i.platform,
@@ -114,6 +123,9 @@ ${JSON.stringify(identityLines, null, 2)}
 
 Platform data (includes languages and repos):
 ${JSON.stringify(platformDataLines, null, 2)}
+
+Supplemental data (if provided; may include enriched profile context):
+${JSON.stringify(supplementalData ?? {}, null, 2)}
 
 Return valid JSON matching schema: { summary, structured: { skills, highlights, talkingPoints }, confidence, caveats }.`;
 }
@@ -202,4 +214,3 @@ export async function generateCandidateSummary(
     },
   };
 }
-

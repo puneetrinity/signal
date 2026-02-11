@@ -19,7 +19,11 @@ import type { Prisma } from '@prisma/client';
 import type { RoleType } from '@/types/linkedin';
 import type { EnrichmentBudget, EnrichmentGraphOutput, EnrichmentRunTrace } from '../graph/types';
 import { runEnrichment } from '../graph/builder';
-import { generateCandidateSummary, type SummaryMeta } from '../summary/generate';
+import { generateCandidateSummary } from '../summary/generate';
+import { enrichWithPdl } from '../pdl';
+import { getEnrichmentProvider } from '../provider';
+import { getTenantSettings } from '@/lib/tenant/settings';
+import { logPiiAccess } from '@/lib/audit';
 import type { DiscoveredIdentity } from '../sources/types';
 
 /**
@@ -596,9 +600,200 @@ async function processSummaryOnlyJob(
 }
 
 /**
+ * Process PDL enrichment job (People Data Labs only)
+ */
+async function processPdlEnrichmentJob(
+  job: Job<EnrichmentJobData, EnrichmentJobResult>
+): Promise<EnrichmentJobResult> {
+  const { sessionId, candidateId, tenantId } = job.data;
+  const startTime = Date.now();
+
+  console.log(`[EnrichmentWorker] Processing PDL enrichment job ${job.id} for candidate ${candidateId} (tenant: ${tenantId})`);
+
+  await updateSessionStatus(sessionId, {
+    status: 'running',
+    startedAt: new Date(),
+  });
+
+  try {
+    const candidate = await prisma.candidate.findFirst({
+      where: { id: candidateId, tenantId },
+      select: {
+        linkedinId: true,
+        linkedinUrl: true,
+        nameHint: true,
+        headlineHint: true,
+        locationHint: true,
+        companyHint: true,
+        roleType: true,
+      },
+    });
+
+    if (!candidate) {
+      throw new Error(`Candidate not found or access denied: ${candidateId}`);
+    }
+
+    await job.updateProgress({ event: 'pdl_request', timestamp: new Date().toISOString() });
+
+    const pdlResult = await enrichWithPdl({
+      linkedinUrl: candidate.linkedinUrl,
+      name: candidate.nameHint,
+      company: candidate.companyHint,
+      location: candidate.locationHint,
+    });
+
+    await job.updateProgress({ event: 'pdl_response', timestamp: new Date().toISOString() });
+
+    const settings = await getTenantSettings(tenantId);
+    const allowContactStorage = settings.allowContactStorage;
+
+    const contactInfo = allowContactStorage ? pdlResult.contactInfo : null;
+    const contactRestricted = !allowContactStorage && pdlResult.contactInfo;
+
+    const { summary, evidence, model, tokens, meta } = await generateCandidateSummary({
+      candidate: {
+        linkedinId: candidate.linkedinId,
+        linkedinUrl: candidate.linkedinUrl || '',
+        nameHint: candidate.nameHint,
+        headlineHint: candidate.headlineHint,
+        locationHint: candidate.locationHint,
+        companyHint: candidate.companyHint || null,
+        roleType: candidate.roleType,
+      },
+      identities: [],
+      platformData: [],
+      supplementalData: {
+        pdl: pdlResult.summaryData,
+      },
+      mode: 'draft',
+      confirmedCount: 0,
+    });
+
+    const summaryStructured = {
+      ...summary.structured,
+      ...(contactInfo ? { contact: contactInfo } : {}),
+      ...(contactRestricted ? { contactRestricted: true } : {}),
+      source: 'pdl',
+    };
+
+    const runTrace: Partial<EnrichmentRunTrace> = {
+      input: {
+        candidateId,
+        linkedinId: candidate.linkedinId,
+        linkedinUrl: candidate.linkedinUrl || '',
+      },
+      seed: {
+        nameHint: candidate.nameHint,
+        headlineHint: candidate.headlineHint,
+        locationHint: candidate.locationHint,
+        companyHint: candidate.companyHint || null,
+        roleType: candidate.roleType,
+      },
+      platformResults: {
+        pdl: {
+          queriesExecuted: 1,
+          rawResultCount: pdlResult.data ? 1 : 0,
+          identitiesFound: 0,
+          bestConfidence: null,
+          durationMs: Date.now() - startTime,
+        },
+      },
+      final: {
+        totalQueriesExecuted: 1,
+        platformsQueried: 1,
+        platformsWithHits: pdlResult.data ? 1 : 0,
+        identitiesFoundTotal: 0,
+        identitiesAboveMinConfidence: 0,
+        identitiesPassingPersistGuard: 0,
+        identitiesPersisted: 0,
+        bestConfidence: summary.confidence ?? null,
+        durationMs: Date.now() - startTime,
+        summaryMeta: meta,
+      },
+    };
+
+    await prisma.enrichmentSession.update({
+      where: { id: sessionId },
+      data: {
+        status: 'completed',
+        sourcesExecuted: ['pdl'] as unknown as Prisma.InputJsonValue,
+        queriesExecuted: 1,
+        identitiesFound: 0,
+        finalConfidence: summary.confidence ?? null,
+        summary: summary.summary,
+        summaryStructured: summaryStructured as unknown as Prisma.InputJsonValue,
+        summaryEvidence: evidence as unknown as Prisma.InputJsonValue,
+        summaryModel: model,
+        summaryTokens: tokens,
+        summaryGeneratedAt: new Date(),
+        runTrace: runTrace as unknown as Prisma.InputJsonValue,
+        completedAt: new Date(),
+        durationMs: Date.now() - startTime,
+      },
+    });
+
+    await prisma.candidate.update({
+      where: { id: candidateId },
+      data: {
+        enrichmentStatus: 'completed',
+        lastEnrichedAt: new Date(),
+        confidenceScore: summary.confidence ?? null,
+      },
+    });
+
+    if (pdlResult.contactInfo) {
+      await logPiiAccess(
+        'enrichment_session',
+        sessionId,
+        allowContactStorage ? 'stored' : 'accessed',
+        {
+          candidateId,
+          provider: 'pdl',
+          emails: pdlResult.contactInfo.emails.length,
+          phones: pdlResult.contactInfo.phones.length,
+          contactStored: allowContactStorage,
+        }
+      );
+    }
+
+    console.log(`[EnrichmentWorker] Completed PDL enrichment job ${job.id}`);
+
+    return {
+      sessionId,
+      candidateId,
+      status: 'completed',
+      identitiesFound: 0,
+      bestConfidence: summary.confidence ?? null,
+      durationMs: Date.now() - startTime,
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+    await updateSessionStatus(sessionId, {
+      status: 'failed',
+      errorMessage,
+      completedAt: new Date(),
+      durationMs: Date.now() - startTime,
+    });
+
+    console.error(`[EnrichmentWorker] PDL enrichment job ${job.id} failed:`, errorMessage);
+
+    return {
+      sessionId,
+      candidateId,
+      status: 'failed',
+      identitiesFound: 0,
+      bestConfidence: null,
+      durationMs: 0,
+      error: errorMessage,
+    };
+  }
+}
+
+/**
  * Process enrichment job (full discovery + summary)
  */
-async function processFullEnrichmentJob(
+async function processLangGraphEnrichmentJob(
   job: Job<EnrichmentJobData, EnrichmentJobResult>
 ): Promise<EnrichmentJobResult> {
   const { sessionId, candidateId, tenantId, roleType, budget } = job.data;
@@ -691,7 +886,12 @@ async function processEnrichmentJob(
     return processSummaryOnlyJob(job);
   }
 
-  return processFullEnrichmentJob(job);
+  const provider = getEnrichmentProvider();
+  if (provider === 'pdl') {
+    return processPdlEnrichmentJob(job);
+  }
+
+  return processLangGraphEnrichmentJob(job);
 }
 
 /**
