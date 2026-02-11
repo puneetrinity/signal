@@ -143,6 +143,8 @@ export async function checkAuth(
       authorized: true,
       context: {
         authenticated: false,
+        userId: 'dev-user',
+        tenantId: 'dev-tenant', // Default tenant when auth not enforced
         roles: ['recruiter'], // Grant default role when auth not enforced
         authMethod: 'none',
       },
