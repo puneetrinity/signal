@@ -86,7 +86,7 @@ const DEFAULT_OPTIONS: Required<DiscoveryOptions> = {
   maxResults: 5,
   maxQueries: 3,
   timeout: 30000,
-  minConfidence: 0.35, // Configurable via ENRICHMENT_MIN_CONFIDENCE env var
+  minConfidence: parseFloat(process.env.ENRICHMENT_MIN_CONFIDENCE || '0.20'),
 };
 
 /**

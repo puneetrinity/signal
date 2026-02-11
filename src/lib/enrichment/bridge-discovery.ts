@@ -130,7 +130,7 @@ const ENABLE_COMMIT_EMAIL_EVIDENCE = process.env.ENABLE_COMMIT_EMAIL_EVIDENCE ==
 
 const DEFAULT_OPTIONS: Required<BridgeDiscoveryOptions> = {
   maxGitHubResults: 5,
-  confidenceThreshold: 0.35, // Configurable via ENRICHMENT_MIN_CONFIDENCE env var
+  confidenceThreshold: parseFloat(process.env.ENRICHMENT_MIN_CONFIDENCE || '0.20'),
   includeCommitEvidence: ENABLE_COMMIT_EMAIL_EVIDENCE,
   maxCommitRepos: 3,
 };
