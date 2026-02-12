@@ -1,7 +1,7 @@
 /**
  * Search Provider Abstraction Types
  *
- * Common interfaces for all search providers (BrightData, SearXNG, Brave).
+ * Common interfaces for all search providers (Serper, Brave; legacy: BrightData, SearXNG).
  * This abstraction allows switching providers via environment variables
  * while maintaining identical return types.
  *
@@ -13,7 +13,7 @@ import type { ProfileSummary } from '@/types/linkedin';
 /**
  * Supported search providers
  */
-export type SearchProviderType = 'brightdata' | 'searxng' | 'brave' | 'serper';
+export type SearchProviderType = 'serper' | 'brave' | 'brightdata' | 'searxng'; // legacy: brightdata, searxng
 
 /**
  * Raw search result from any provider (normalized)
@@ -24,7 +24,8 @@ export interface RawSearchResult {
   snippet: string;
   position: number;
   score?: number;
-  engines?: string[]; // SearXNG only - which engines returned this result
+  engines?: string[]; // legacy SearXNG only
+  providerMeta?: Record<string, unknown>;
 }
 
 /**

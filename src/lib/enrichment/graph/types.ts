@@ -24,6 +24,9 @@ export interface EnrichmentHints {
   locationHint: string | null;
   companyHint: string | null;
   roleType: RoleType | null;
+  serpTitle?: string;
+  serpSnippet?: string;
+  serpMeta?: Record<string, unknown>;
 }
 
 /**
@@ -73,6 +76,8 @@ export interface EnrichmentRunTrace {
     identitiesPersisted?: number;
     /** Sample unmatched URLs for pattern debugging (max 3) */
     unmatchedSampleUrls?: string[];
+    /** Shadow scoring diagnostics (dynamic vs static comparison) */
+    shadowScoring?: PlatformDiagnostics['shadowScoring'];
     bestConfidence: number | null;
     durationMs: number;
     error?: string;

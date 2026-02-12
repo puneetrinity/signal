@@ -154,7 +154,11 @@ const PLATFORM_HANDLE_PATTERNS: Record<string, RegExp[]> = {
   leetcode: [new RegExp(`site:leetcode\\.com/u/${HANDLE_CHAR_CLASS}`, 'i')],
   npm: [new RegExp(`site:npmjs\\.com/~${HANDLE_CHAR_CLASS}`, 'i')],
   medium: [new RegExp(`site:medium\\.com/@${HANDLE_CHAR_CLASS}`, 'i')],
-  hackerearth: [new RegExp(`site:hackerearth\\.com/@${HANDLE_CHAR_CLASS}`, 'i')],
+  hackerearth: [
+    new RegExp(`site:hackerearth\\.com/@${HANDLE_CHAR_CLASS}`, 'i'),
+    new RegExp(`site:hackerearth\\.com/users/${HANDLE_CHAR_CLASS}`, 'i'),
+    new RegExp(`site:hackerearth\\.com/people/${HANDLE_CHAR_CLASS}`, 'i'),
+  ],
   gitlab: [
     new RegExp(`site:gitlab\\.com/${HANDLE_CHAR_CLASS}$`, 'i'),
     new RegExp(`site:gitlab\\.com/users/${HANDLE_CHAR_CLASS}`, 'i'),

@@ -6,11 +6,11 @@
  * Priority order:
  * 1. GitHub API (for GitHub-specific queries) - handled separately
  * 2. Serper.dev (primary) - Google SERP API
- * 3. SearXNG/Brave (fallback) - best-effort recall boost when primary fails/returns 0
+ * 3. Brave (fallback) - best-effort recall boost when primary fails/returns 0
  *
  * Environment Variables:
  * - ENRICHMENT_SEARCH_PROVIDER: Primary provider for enrichment (default: 'serper')
- * - ENRICHMENT_SEARCH_FALLBACK_PROVIDER: Fallback provider (default: 'searxng')
+ * - ENRICHMENT_SEARCH_FALLBACK_PROVIDER: Fallback provider (default: 'brave')
  * - MIN_RESULTS_BEFORE_FALLBACK: Minimum results before trying fallback (default: 2)
  *
  * @see docs/ARCHITECTURE_V2.1.md Section 5
@@ -61,7 +61,6 @@ export function getEnrichmentProviderConfig(): {
   const minResults = parseInt(process.env.MIN_RESULTS_BEFORE_FALLBACK || '1', 10);
 
   // Support 'none' or empty string to disable fallback
-  // This is useful when SearXNG is blocked/rate-limited
   let fallback: SearchProviderType | null = null;
   if (fallbackEnv && fallbackEnv !== 'none' && fallbackEnv !== '') {
     fallback = ['brave', 'searxng', 'brightdata', 'serper'].includes(fallbackEnv)
@@ -124,7 +123,7 @@ async function searchRawWithFallback(
     }
   }
 
-  // Try fallback provider (SearXNG) if configured
+  // Try fallback provider if configured
   if (config.fallback && config.fallback !== config.primary) {
     try {
       const fallback = getProvider(config.fallback);
@@ -173,6 +172,7 @@ export async function searchRawWithEnrichmentProviders(
           title: r.title,
           snippet: r.snippet,
           position: idx + 1,
+          providerMeta: undefined,
         })),
         providerUsed: 'replay',
         rateLimited: false,
@@ -183,6 +183,53 @@ export async function searchRawWithEnrichmentProviders(
   }
 
   return searchRawWithFallback(query, maxResults);
+}
+
+/**
+ * Search both Serper + Brave in parallel and merge/dedup results by URL.
+ * Used only by URL-anchored discovery where recall matters more than cost.
+ * Keeps the result with the best (lowest) position when duplicates exist.
+ */
+export async function searchRawMergedProviders(
+  query: string,
+  maxResults: number = 10
+): Promise<RawSearchResult[]> {
+  const config = getEnrichmentProviderConfig();
+
+  // Only merge if we have two different providers
+  if (!config.fallback || config.fallback === config.primary) {
+    const result = await searchRawWithFallback(query, maxResults);
+    return result.results;
+  }
+
+  const primary = getProvider(config.primary);
+  const fallback = getProvider(config.fallback);
+
+  // Run both in parallel
+  const [primaryResults, fallbackResults] = await Promise.allSettled([
+    primary.searchRaw(query, maxResults),
+    fallback.searchRaw(query, maxResults),
+  ]);
+
+  const merged = new Map<string, RawSearchResult>();
+
+  const addResults = (results: RawSearchResult[]) => {
+    for (const r of results) {
+      const key = r.url.toLowerCase();
+      const existing = merged.get(key);
+      if (!existing || r.position < existing.position) {
+        merged.set(key, r);
+      }
+    }
+  };
+
+  if (primaryResults.status === 'fulfilled') addResults(primaryResults.value);
+  if (fallbackResults.status === 'fulfilled') addResults(fallbackResults.value);
+
+  // Sort by position and limit
+  return Array.from(merged.values())
+    .sort((a, b) => a.position - b.position)
+    .slice(0, maxResults);
 }
 
 /**
@@ -266,9 +313,9 @@ const PLATFORM_PATTERNS: Record<
     profileUrlBuilder: (id) => `https://leetcode.com/u/${id}`,
   },
   hackerearth: {
-    urlPattern: /hackerearth\.com\/(?:@|users\/)([a-zA-Z0-9_-]+)/,
+    urlPattern: /hackerearth\.com\/(?:@|users\/|people\/)([a-zA-Z0-9_.-]+)/,
     idExtractor: (url) => {
-      const match = url.match(/hackerearth\.com\/(?:@|users\/)([a-zA-Z0-9_-]+)/);
+      const match = url.match(/hackerearth\.com\/(?:@|users\/|people\/)([a-zA-Z0-9_.-]+)/);
       return match?.[1] || null;
     },
     profileUrlBuilder: (id) => `https://www.hackerearth.com/@${id}`,
@@ -521,7 +568,7 @@ const PLATFORM_PATTERNS: Record<
 
 /**
  * Execute search for a specific platform with metadata for diagnostics
- * Uses Brave as primary, SearXNG as fallback (configurable via env)
+ * Uses Serper as primary, Brave as fallback (configurable via env)
  */
 export async function searchForPlatformWithMeta(
   platform: EnrichmentPlatform,
@@ -627,7 +674,7 @@ export async function searchForPlatformWithMeta(
 
 /**
  * Execute search for a specific platform
- * Uses Brave as primary, SearXNG as fallback (configurable via env)
+ * Uses Serper as primary, Brave as fallback (configurable via env)
  */
 export async function searchForPlatform(
   platform: EnrichmentPlatform,

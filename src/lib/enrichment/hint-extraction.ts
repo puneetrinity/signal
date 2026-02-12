@@ -127,16 +127,25 @@ export function extractNameFromTitle(title: string): string | null {
       const parts = cleaned.split(delim);
       const candidate = parts[0].trim();
 
+      // "Last, First" format detection (comma delimiter only)
+      if (delim === ', ' && parts.length >= 2) {
+        const afterComma = parts[1].trim();
+        if (isLikelyName(afterComma)) {
+          const reversed = `${afterComma} ${candidate}`;
+          if (isLikelyName(reversed)) return reversed;
+        }
+      }
+
       // Validate it looks like a name (not a title/role)
       if (isLikelyName(candidate)) {
-        return candidate;
+        return normalizeCommaName(candidate);
       }
     }
   }
 
   // Strategy 2: If no delimiter, check if entire string is a name
   if (isLikelyName(cleaned)) {
-    return cleaned;
+    return normalizeCommaName(cleaned);
   }
 
   return null;
@@ -184,10 +193,16 @@ export function extractHeadlineFromTitle(title: string): string | null {
 export function extractCompanyFromHeadline(headline: string | null): string | null {
   if (!headline) return null;
 
-  // Pattern 1: "at Company" or "@ Company"
-  const atMatch = headline.match(/(?:\bat\b|@)\s+([A-Z][A-Za-z0-9\s&.,'-]+?)(?:\s*[|·\-]|$)/i);
+  // Pattern 1: "at Company" or "@ Company" (Unicode-aware, non-cased scripts)
+  const atMatch = headline.match(/(?:\bat\b|@)\s+([\p{L}][\p{L}0-9\s&.,'-]+?)(?:\s*[|·\-]|$)/iu);
   if (atMatch) {
-    return cleanCompanyName(atMatch[1]);
+    const candidate = atMatch[1].trim();
+    // Reject if it's clearly an academic institution (not a company)
+    if (/^the\s+(university|college|institute|school)\b/i.test(candidate)) {
+      // Fall through to next pattern
+    } else {
+      return cleanCompanyName(candidate);
+    }
   }
 
   // Pattern 2: Check for known company indicators after comma/pipe
@@ -199,8 +214,8 @@ export function extractCompanyFromHeadline(headline: string | null): string | nu
     }
   }
 
-  // Pattern 3: "Title - Company" (when Company starts with capital)
-  const dashMatch = headline.match(/\s-\s([A-Z][A-Za-z0-9\s&]+?)$/);
+  // Pattern 3: "Title - Company" (Unicode-aware, non-cased scripts)
+  const dashMatch = headline.match(/\s-\s([\p{L}][\p{L}0-9\s&]+?)$/u);
   if (dashMatch && isLikelyCompany(dashMatch[1])) {
     return cleanCompanyName(dashMatch[1]);
   }
@@ -219,21 +234,25 @@ export function extractCompanyFromHeadline(headline: string | null): string | nu
 export function extractLocationFromSnippet(snippet: string): string | null {
   if (!snippet) return null;
 
+  // Strip leading emoji before extraction
+  const cleaned = snippet.replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{26FF}]\s*/u, '');
+  snippet = cleaned;
+
   // Pattern 1: Explicit "Location: X"
   const locationMatch = snippet.match(/Location:\s*([^·\n]+)/i);
   if (locationMatch) {
     return locationMatch[1].trim();
   }
 
-  // Pattern 2: City/Country pattern with common separators
-  // "San Francisco, California · 500+ connections"
-  const cityMatch = snippet.match(/^([A-Z][A-Za-z\s]+(?:,\s*[A-Z][A-Za-z\s]+)?)\s*·/);
+  // Pattern 2: City/Country or City, ST pattern with common separators (Unicode-aware)
+  // "San Francisco, California · 500+ connections" or "San Francisco, CA · ..."
+  const cityMatch = snippet.match(/^([\p{L}][\p{L}\s]+(?:,\s*[\p{L}]{2,}[\p{L}\s]*)?)(?:\s*[·|])/u);
   if (cityMatch && isLikelyLocation(cityMatch[1])) {
     return cityMatch[1].trim();
   }
 
-  // Pattern 3: Split by middot and check segments
-  const segments = snippet.split(' · ');
+  // Pattern 3: Split by middot or pipe and check segments
+  const segments = snippet.split(/\s[·|]\s/);
   for (const seg of segments) {
     const cleaned = seg.trim();
     if (cleaned.length <= 50 && isLikelyLocation(cleaned)) {
@@ -241,8 +260,8 @@ export function extractLocationFromSnippet(snippet: string): string | null {
     }
   }
 
-  // Pattern 4: Common geographic patterns
-  const geoMatch = snippet.match(/(?:based in|located in|from)\s+([A-Z][A-Za-z\s,]+?)(?:\.|,|\s*·)/i);
+  // Pattern 4: Common geographic patterns (Unicode-aware)
+  const geoMatch = snippet.match(/(?:based in|located in|from)\s+([\p{L}][\p{L}\s,]+?)(?:\.|,|\s*·)/iu);
   if (geoMatch) {
     return geoMatch[1].trim();
   }
@@ -324,8 +343,8 @@ function isLikelyName(str: string): boolean {
     if (lower.includes(keyword)) return false;
   }
 
-  // First word should start with capital
-  if (!/^[A-Z]/.test(words[0])) return false;
+  // First word should start with a letter (Unicode-aware, supports non-cased scripts)
+  if (!/^\p{L}/u.test(words[0])) return false;
 
   return true;
 }
@@ -361,8 +380,8 @@ function isLikelyCompany(str: string): boolean {
     if (lower.includes(company)) return true;
   }
 
-  // Starts with capital, reasonable length, no obvious job keywords
-  if (/^[A-Z]/.test(str) && str.length >= 2 && str.length <= 40) {
+  // Starts with a letter (Unicode-aware), reasonable length, no obvious job keywords
+  if (/^\p{L}/u.test(str) && str.length >= 2 && str.length <= 40) {
     const jobKeywords = ['engineer', 'developer', 'manager', 'analyst', 'seeking', 'open to'];
     for (const kw of jobKeywords) {
       if (lower.includes(kw)) return false;
@@ -414,12 +433,23 @@ function isLikelyLocation(str: string): boolean {
     if (lower.includes(city)) return true;
   }
 
-  // Pattern: "City, State/Country"
-  if (/^[A-Z][a-z]+(?:\s[A-Z][a-z]+)*,\s*[A-Z]/.test(str)) {
+  // Pattern: "City, State/Country" (Unicode-aware)
+  if (/^\p{L}+(?:\s\p{L}+)*,\s*\p{L}/u.test(str)) {
     return true;
   }
 
   return false;
+}
+
+/**
+ * Normalize "Last, First" comma format → "First Last"
+ */
+function normalizeCommaName(name: string): string {
+  const commaMatch = name.match(/^(\p{L}+),\s+(\p{L}+(?:\s+\p{L}+)*)$/u);
+  if (commaMatch) {
+    return `${commaMatch[2]} ${commaMatch[1]}`;
+  }
+  return name;
 }
 
 /**
@@ -444,8 +474,8 @@ function calculateNameConfidence(
 
   // Title-based extraction is more reliable
   if (source === 'title') {
-    // Check if title follows clean "Name - Headline | LinkedIn" pattern
-    if (/^[A-Z][a-z]+\s+[A-Z][a-z]+\s*-\s*.+\|\s*LinkedIn$/i.test(title)) {
+    // Check if title follows clean "Name - Headline | LinkedIn" pattern (Unicode-aware)
+    if (/^\p{L}+(?:\s+\p{L}+)+\s*-\s*.+\|\s*LinkedIn$/iu.test(title)) {
       return 0.95;
     }
     // Standard pattern with delimiter
@@ -507,8 +537,8 @@ function calculateLocationConfidence(location: string | null, snippet: string): 
     return 0.95;
   }
 
-  // City, State/Country pattern
-  if (/^[A-Z][a-z]+(?:\s[A-Z][a-z]+)*,\s*[A-Z]/.test(location)) {
+  // City, State/Country pattern (Unicode-aware)
+  if (/^\p{L}+(?:\s\p{L}+)*,\s*\p{L}/u.test(location)) {
     return 0.85;
   }
 
@@ -628,6 +658,93 @@ export function getReliableHints(
   };
 }
 
+/**
+ * Merge hints from Serper KG/answerBox metadata.
+ *
+ * Precedence: KG (0.95) > answerBox (0.90) > existing hint.
+ * Only upgrades a hint when the new source has higher confidence.
+ */
+export function mergeHintsFromSerpMeta(
+  existing: EnrichedHints,
+  serpMeta?: Record<string, unknown>
+): EnrichedHints {
+  if (!serpMeta) return existing;
+
+  const result = { ...existing };
+
+  const kg = serpMeta.knowledgeGraph as
+    | { title?: string; type?: string; description?: string; attributes?: Record<string, string> }
+    | undefined;
+  const ab = serpMeta.answerBox as
+    | { title?: string; answer?: string; snippet?: string }
+    | undefined;
+
+  // KG title → nameHint (confidence 0.95)
+  if (kg?.title && kg.title.length >= 2) {
+    const kgConf = 0.95;
+    if (kgConf > existing.nameHint.confidence) {
+      result.nameHint = { value: kg.title, confidence: kgConf, source: 'serp_knowledge_graph' };
+    }
+  }
+
+  // KG description → headlineHint (confidence 0.90)
+  if (kg?.description && kg.description.length >= 3) {
+    const kgConf = 0.90;
+    if (kgConf > existing.headlineHint.confidence) {
+      result.headlineHint = { value: kg.description, confidence: kgConf, source: 'serp_knowledge_graph' };
+    }
+  }
+
+  // KG attributes → company/location (confidence 0.95)
+  if (kg?.attributes) {
+    const company = kg.attributes['Organization'] || kg.attributes['Company'] || kg.attributes['Employer'];
+    if (company && 0.95 > existing.companyHint.confidence) {
+      result.companyHint = { value: company, confidence: 0.95, source: 'serp_knowledge_graph' };
+    }
+    const location = kg.attributes['Location'] || kg.attributes['Born'] || kg.attributes['Headquarters'];
+    if (location && 0.95 > existing.locationHint.confidence) {
+      result.locationHint = { value: location, confidence: 0.95, source: 'serp_knowledge_graph' };
+    }
+  }
+
+  // answerBox fallback (only if KG didn't upgrade)
+  if (ab?.title && ab.title.length >= 2 && 0.90 > result.nameHint.confidence) {
+    result.nameHint = { value: ab.title, confidence: 0.90, source: 'serp_answer_box' };
+  }
+  if (ab?.snippet && ab.snippet.length >= 3 && 0.90 > result.headlineHint.confidence) {
+    result.headlineHint = { value: ab.snippet, confidence: 0.90, source: 'serp_answer_box' };
+  }
+
+  return result;
+}
+
+/**
+ * Apply KG/answerBox overrides to raw hint strings.
+ *
+ * Shared helper for both the graph path (loadCandidateNode) and legacy path (candidateToHints).
+ * Only upgrades hints when KG or answerBox provides a higher-confidence value.
+ */
+export function applySerpMetaOverrides(
+  rawHints: { nameHint: string | null; headlineHint: string | null; companyHint: string | null; locationHint: string | null },
+  serpMeta: Record<string, unknown>,
+  linkedinId: string,
+  linkedinUrl: string,
+  searchTitle: string,
+  searchSnippet: string,
+  roleType: string | null,
+): { nameHint: string | null; headlineHint: string | null; companyHint: string | null; locationHint: string | null } {
+  const enrichedBase = extractAllHintsWithConfidence(linkedinId, linkedinUrl, searchTitle, searchSnippet, roleType);
+  const merged = mergeHintsFromSerpMeta(enrichedBase, serpMeta);
+  const kgSources: HintSource[] = ['serp_knowledge_graph', 'serp_answer_box'];
+
+  return {
+    nameHint: kgSources.includes(merged.nameHint.source) ? (merged.nameHint.value ?? rawHints.nameHint) : rawHints.nameHint,
+    headlineHint: kgSources.includes(merged.headlineHint.source) ? (merged.headlineHint.value ?? rawHints.headlineHint) : rawHints.headlineHint,
+    companyHint: kgSources.includes(merged.companyHint.source) ? (merged.companyHint.value ?? rawHints.companyHint) : rawHints.companyHint,
+    locationHint: kgSources.includes(merged.locationHint.source) ? (merged.locationHint.value ?? rawHints.locationHint) : rawHints.locationHint,
+  };
+}
+
 export default {
   extractNameFromSlug,
   extractNameFromTitle,
@@ -638,4 +755,6 @@ export default {
   extractAllHintsWithConfidence,
   isHintReliable,
   getReliableHints,
+  mergeHintsFromSerpMeta,
+  applySerpMetaOverrides,
 };

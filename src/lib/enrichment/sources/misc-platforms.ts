@@ -40,15 +40,22 @@ class HackerEarthSource extends BaseEnrichmentSource {
   buildQueryCandidates(hints: CandidateHints, maxQueries: number = 3): QueryCandidate[] {
     const candidates: QueryCandidate[] = [];
     const variants = generateHandleVariants(hints.linkedinId, hints.nameHint, 2);
+    const allowNameQuery = Boolean(hints.nameHint);
+    const handleBudget = allowNameQuery ? Math.max(1, maxQueries - 1) : maxQueries;
+    const handlePaths = ['@', 'users', 'people'];
 
-    // HANDLE_MODE: HackerEarth URLs are handle-based: hackerearth.com/@username
+    // HANDLE_MODE: HackerEarth URLs are handle-based: hackerearth.com/@username (also /users/ or /people/)
     for (const variant of variants) {
-      if (candidates.length >= maxQueries) break;
-      candidates.push({
-        query: `site:hackerearth.com/@${variant.handle}`,
-        mode: 'handle',
-        variantId: variant.source === 'linkedinId' ? 'handle:clean' : 'handle:derived',
-      });
+      for (const path of handlePaths) {
+        if (candidates.length >= handleBudget) break;
+        const handlePath = path === '@' ? `@${variant.handle}` : `${path}/${variant.handle}`;
+        candidates.push({
+          query: `site:hackerearth.com/${handlePath}`,
+          mode: 'handle',
+          variantId: variant.source === 'linkedinId' ? 'handle:clean' : 'handle:derived',
+        });
+      }
+      if (candidates.length >= handleBudget) break;
     }
 
     // NAME_MODE: Name search

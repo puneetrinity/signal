@@ -18,8 +18,23 @@ interface SerperOrganicResult {
   position?: number;
 }
 
+interface SerperKnowledgeGraph {
+  title?: string;
+  type?: string;
+  description?: string;
+  attributes?: Record<string, string>;
+}
+
+interface SerperAnswerBox {
+  title?: string;
+  answer?: string;
+  snippet?: string;
+}
+
 interface SerperResponse {
   organic?: SerperOrganicResult[];
+  knowledgeGraph?: SerperKnowledgeGraph;
+  answerBox?: SerperAnswerBox;
 }
 
 const DEFAULT_TIMEOUT = 8000;
@@ -163,7 +178,14 @@ function extractLocationFromSnippet(snippet: string): string | undefined {
   return undefined;
 }
 
-function extractProfileSummary(result: SerperOrganicResult): ProfileSummary {
+function buildProviderMeta(response: SerperResponse): Record<string, unknown> | undefined {
+  const meta: Record<string, unknown> = {};
+  if (response.knowledgeGraph) meta.knowledgeGraph = response.knowledgeGraph;
+  if (response.answerBox) meta.answerBox = response.answerBox;
+  return Object.keys(meta).length > 0 ? meta : undefined;
+}
+
+function extractProfileSummary(result: SerperOrganicResult, providerMeta?: Record<string, unknown>): ProfileSummary {
   const url = normalizeLinkedInUrl(result.link || '');
   const linkedinId = extractLinkedInId(url) || url;
 
@@ -190,6 +212,7 @@ function extractProfileSummary(result: SerperOrganicResult): ProfileSummary {
     name,
     headline,
     location,
+    ...(providerMeta ? { providerMeta } : {}),
   };
 }
 
@@ -231,12 +254,14 @@ export const serperProvider: SearchProvider = {
         const organic = response.organic ?? [];
         if (organic.length === 0) break;
 
+        const providerMeta = buildProviderMeta(response);
+
         let addedThisPage = 0;
         for (const r of organic) {
           const link = r.link || '';
           if (!link || !isValidLinkedInProfileUrl(link)) continue;
 
-          const summary = extractProfileSummary(r);
+          const summary = extractProfileSummary(r, providerMeta);
           if (seenIds.has(summary.linkedinId)) continue;
           seenIds.add(summary.linkedinId);
           summaries.push(summary);
@@ -287,17 +312,22 @@ export const serperProvider: SearchProvider = {
       const organic = response.organic ?? [];
       if (organic.length === 0) break;
 
+      const providerMeta = buildProviderMeta(response);
+
+      const pageOffset = (page - 1) * numPerPage;
       let added = 0;
-      for (const r of organic) {
+      for (const [idx, r] of organic.entries()) {
         const url = (r.link || '').trim();
         if (!url || seenUrls.has(url)) continue;
         seenUrls.add(url);
+        const pos = pageOffset + (r.position ?? (idx + 1));
         results.push({
           url,
           title: r.title || '',
           snippet: r.snippet || '',
-          position: results.length + 1,
-          score: 1 / (results.length + 1),
+          position: pos,
+          score: 1 / pos,
+          ...(providerMeta ? { providerMeta } : {}),
         });
         added++;
         if (results.length >= maxResults) break;

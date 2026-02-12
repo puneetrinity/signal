@@ -16,6 +16,7 @@ export type BridgeSignal =
   | 'linkedin_url_in_blog'      // Platform blog/website field contains LinkedIn URL
   | 'linkedin_url_in_page'      // External page links to LinkedIn URL (reverse search)
   | 'linkedin_url_in_team_page' // LinkedIn URL found on team/about page with multiple profiles (Tier 2)
+  | 'reverse_link_hint_match'   // Reverse-link page hints corroborate candidate company/location
   | 'commit_email_domain'       // Commit email matches company domain
   | 'cross_platform_handle'     // Same handle on multiple platforms
   | 'mutual_reference'          // Both profiles reference each other
@@ -53,11 +54,13 @@ export interface BridgeDetection {
  * Hint source - where the hint came from
  */
 export type HintSource =
-  | 'serp_title'      // Parsed from SERP title
-  | 'serp_snippet'    // Parsed from SERP snippet
-  | 'url_slug'        // Derived from LinkedIn URL slug
-  | 'search_query'    // From original search query
-  | 'headline_parse'  // Parsed from headline text
+  | 'serp_title'            // Parsed from SERP title
+  | 'serp_snippet'          // Parsed from SERP snippet
+  | 'serp_knowledge_graph'  // From Serper Knowledge Graph
+  | 'serp_answer_box'       // From Serper answerBox
+  | 'url_slug'              // Derived from LinkedIn URL slug
+  | 'search_query'          // From original search query
+  | 'headline_parse'        // Parsed from headline text
   | 'unknown';
 
 /**
@@ -90,6 +93,8 @@ export type QueryType =
   | 'name_only'           // Just name
   | 'name_company'        // Name + company
   | 'name_location'       // Name + location
+  | 'company_only'        // Company-centric (when name is weak)
+  | 'company_location'    // Company + location (when name is weak)
   | 'slug_based'          // Derived from URL slug
   | 'handle_based'        // Using platform handle patterns
   | 'url_reverse'         // Searching for pages linking TO LinkedIn URL
@@ -123,6 +128,26 @@ export interface EnrichmentMetrics {
   identitiesByTier: Record<BridgeTier, number>;
   /** Whether any Tier 1 bridge was found */
   hasTier1Bridge: boolean;
+  /** Shadow scoring diagnostics (dynamic vs static comparison) */
+  shadowScoring?: ShadowScoringSummary;
+}
+
+/**
+ * Shadow scoring summary for runTrace diagnostics
+ */
+export interface ShadowScoringSummary {
+  profilesScored: number;
+  avgDelta: number;
+  bucketChanges: number;
+  details: Array<{
+    login: string;
+    staticTotal: number;
+    dynamicTotal: number;
+    delta: number;
+    staticBucket: 'auto_merge' | 'suggest' | 'low' | 'rejected';
+    dynamicBucket: 'auto_merge' | 'suggest' | 'low' | 'rejected';
+    bucketChanged: boolean;
+  }>;
 }
 
 /**
@@ -140,6 +165,7 @@ export const TIER_1_SIGNALS: BridgeSignal[] = [
  */
 export const TIER_2_SIGNALS: BridgeSignal[] = [
   'linkedin_url_in_team_page',  // Team page with multiple LinkedIn profiles
+  'reverse_link_hint_match',    // Reverse-link page corroborates company/location
   'commit_email_domain',
   'cross_platform_handle',
   'verified_domain',
@@ -210,6 +236,8 @@ export function createEmptyMetrics(): EnrichmentMetrics {
       name_only: 0,
       name_company: 0,
       name_location: 0,
+      company_only: 0,
+      company_location: 0,
       slug_based: 0,
       handle_based: 0,
       url_reverse: 0,
@@ -222,6 +250,7 @@ export function createEmptyMetrics(): EnrichmentMetrics {
       linkedin_url_in_blog: 0,
       linkedin_url_in_page: 0,
       linkedin_url_in_team_page: 0,
+      reverse_link_hint_match: 0,
       commit_email_domain: 0,
       cross_platform_handle: 0,
       mutual_reference: 0,

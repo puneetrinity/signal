@@ -25,15 +25,17 @@ import {
 } from './github';
 import {
   calculateConfidenceScore,
+  computeShadowScore,
   classifyConfidence,
   detectContradictions,
   createBridgeFromScoring,
   shouldPersistWithBridge,
   type ScoreBreakdown,
+  type ShadowScoreComparison,
   type BridgeDetection,
   type BridgeTier,
 } from './scoring';
-import { searchRawWithEnrichmentProviders } from './sources/search-executor';
+import { searchRawMergedProviders } from './sources/search-executor';
 import {
   discoverAcrossSources,
   type CandidateHints as SourceCandidateHints,
@@ -50,7 +52,9 @@ import {
   createEmptyMetrics,
 } from './bridge-types';
 import {
+  extractAllHints,
   extractAllHintsWithConfidence,
+  mergeHintsFromSerpMeta,
 } from './hint-extraction';
 
 /**
@@ -64,6 +68,9 @@ export interface CandidateHints {
   locationHint: string | null;
   roleType: string | null;
   companyHint?: string | null;
+  serpTitle?: string;
+  serpSnippet?: string;
+  serpMeta?: Record<string, unknown>;
 }
 
 /**
@@ -93,6 +100,8 @@ export interface DiscoveredIdentity {
   bridgeTier?: BridgeTier;
   /** Reason for persistence decision */
   persistReason?: string;
+  /** SERP position for tiebreaker sorting */
+  serpPosition?: number;
 }
 
 /**
@@ -231,11 +240,30 @@ function buildSearchQueries(
       addQuery(`"${hints.nameHint}" ${hints.locationHint}`, 'name_location', 'name+location');
     }
 
-    // Name + Headline keywords (for tech talent)
-    if (hints.headlineHint) {
+    // Name + Headline keywords (for tech talent — only technical roles)
+    if (hints.headlineHint && (hints.roleType === 'engineer' || hints.roleType === 'data_scientist' || hints.roleType === 'researcher')) {
       const techKeywords = extractTechKeywords(hints.headlineHint);
       if (techKeywords.length > 0) {
         addQuery(`"${hints.nameHint}" ${techKeywords.slice(0, 2).join(' ')}`, 'company_amplified', 'name+tech');
+      }
+    }
+  }
+
+  // === Phase 1.5: Company/Location-centric queries (when name is weak) ===
+  {
+    let companyHint = hints.companyHint || null;
+    if (!companyHint && hints.headlineHint) {
+      const companyMatch = hints.headlineHint.match(
+        /(?:at|@|,)\s*([A-Z][A-Za-z0-9\s&]+?)(?:\s*[-|·]|$)/
+      );
+      if (companyMatch) {
+        companyHint = companyMatch[1].trim();
+      }
+    }
+    if (companyHint && companyConfidence >= 0.85 && nameConfidence < CONFIDENCE_THRESHOLDS.MEDIUM) {
+      addQuery(`"${companyHint}" linkedin`, 'company_only', 'company_only');
+      if (hints.locationHint && locationConfidence >= CONFIDENCE_THRESHOLDS.MEDIUM) {
+        addQuery(`"${companyHint}" ${hints.locationHint}`, 'company_location', 'company+location');
       }
     }
   }
@@ -249,7 +277,9 @@ function buildSearchQueries(
     }
   }
 
-  return queries;
+  // Enforce query budget
+  const maxQueries = parseInt(process.env.ENRICHMENT_BRIDGE_QUERY_BUDGET || '8', 10);
+  return queries.slice(0, maxQueries);
 }
 
 /**
@@ -405,13 +435,17 @@ export interface UrlAnchoredResult {
   platformId: string | null;
   /** Bridge signal type */
   signal: BridgeSignal;
+  /** Optional extra signals derived from corroborating hints */
+  extraSignals?: BridgeSignal[];
+  /** SERP position from the search result */
+  serpPosition?: number;
 }
 
 /**
  * Execute URL-anchored reverse link discovery via web search
  *
  * This searches for pages that link TO the LinkedIn profile using
- * general web search providers (Brave/SearXNG), not GitHub search.
+ * general web search providers (Serper + Brave), not GitHub search.
  *
  * Returns pages that contain the LinkedIn URL, which can then be
  * parsed to extract platform identities (GitHub profiles, personal sites, etc.)
@@ -464,11 +498,8 @@ export async function discoverUrlAnchoredBridges(
 
   for (const trackedQuery of queries) {
     try {
-      // Use web search provider (Brave/SearXNG) for general web search
-      const { results: searchResults } = await searchRawWithEnrichmentProviders(
-        trackedQuery.query,
-        10
-      );
+      // Use merged Serper + Brave results for URL-anchored search (recall > cost)
+      const searchResults = await searchRawMergedProviders(trackedQuery.query, 10);
 
       for (const result of searchResults) {
         // Skip LinkedIn results (we're looking for external pages)
@@ -513,8 +544,33 @@ export async function discoverUrlAnchoredBridges(
         // Detect platform from URL
         const { platform, platformId } = detectPlatformFromUrl(result.url);
 
-        // URL-anchored reverse links imply explicit LinkedIn URL presence
-        const signal: BridgeSignal = 'linkedin_url_in_page';
+        // Assign appropriate bridge signal
+        const signal: BridgeSignal = platform === 'companyteam'
+          ? 'linkedin_url_in_team_page'
+          : 'linkedin_url_in_page';
+
+        // Corroborate company/location hints from reverse-link title/snippet
+        const pageHints = extractAllHints(hints.linkedinId, result.title || '', result.snippet || '');
+        const normalizeHint = (value: string | null | undefined) =>
+          value ? value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim() : '';
+        const hintMatches = (a: string | null | undefined, b: string | null | undefined) => {
+          const na = normalizeHint(a);
+          const nb = normalizeHint(b);
+          return Boolean(na && nb && (na.includes(nb) || nb.includes(na)));
+        };
+
+        const matchesCompany = hintMatches(hints.companyHint, pageHints.companyHint);
+        const matchesLocation = hintMatches(hints.locationHint, pageHints.locationHint);
+        const extraSignals: BridgeSignal[] = [];
+        if (matchesCompany || matchesLocation) {
+          extraSignals.push('reverse_link_hint_match');
+        }
+
+        // Skip LinkedIn-adjacent domains (lead-gen tools, not real bridges)
+        try {
+          const host = new URL(result.url).hostname.toLowerCase();
+          if (/linkedin-?leads|linkedhelper|phantombuster|dripify|expandi/i.test(host)) continue;
+        } catch { /* invalid URL, keep result */ }
 
         results.push({
           sourceUrl: result.url,
@@ -523,6 +579,8 @@ export async function discoverUrlAnchoredBridges(
           platform,
           platformId,
           signal,
+          extraSignals: extraSignals.length > 0 ? extraSignals : undefined,
+          serpPosition: result.position,
         });
         metrics.candidatesFound += 1;
 
@@ -630,15 +688,17 @@ export async function discoverGitHubIdentities(
   let tier2Count = 0;
 
   // Build enriched hints with confidence scoring
-  // Note: We use empty title/snippet since we don't have SERP data here,
-  // but we can still derive confidence from existing hints
-  const enrichedHints = extractAllHintsWithConfidence(
+  // Use real SERP title/snippet when available, fall back to parsed hints
+  const baseHints = extractAllHintsWithConfidence(
     hints.linkedinId,
     hints.linkedinUrl,
-    hints.nameHint || '',  // Use nameHint as pseudo-title
-    hints.headlineHint || '',  // Use headline as pseudo-snippet
+    hints.serpTitle || hints.nameHint || '',
+    hints.serpSnippet || hints.headlineHint || '',
     hints.roleType
   );
+
+  // Upgrade hints from KG/answerBox when available (higher confidence)
+  const enrichedHints = mergeHintsFromSerpMeta(baseHints, hints.serpMeta);
 
   // Log hint confidence for debugging
   console.log(`[BridgeDiscovery] Hint confidence for ${hints.linkedinId}: ` +
@@ -673,21 +733,37 @@ export async function discoverGitHubIdentities(
   // Track seen profiles to avoid duplicates
   const seenProfiles = new Set<string>();
 
-  const reverseBridgeMap = new Map<string, { bridgeUrl: string | null; signals: BridgeSignal[] }>();
+  // Shadow scoring: collect dynamic vs static comparisons for logging
+  const shadowScores: Array<{ login: string } & ShadowScoreComparison> = [];
+
+  const reverseBridgeMap = new Map<string, {
+    bridgeUrl: string | null;
+    signals: BridgeSignal[];
+    title?: string;
+    snippet?: string;
+    serpPosition?: number;
+  }>();
   for (const bridge of urlBridges) {
     if (bridge.platform !== 'github' || !bridge.platformId) continue;
     const loginKey = bridge.platformId.toLowerCase();
     const existing = reverseBridgeMap.get(loginKey);
+    const allSignals = [bridge.signal, ...(bridge.extraSignals || [])];
     if (existing) {
-      const mergedSignals = new Set([...existing.signals, bridge.signal]);
+      const mergedSignals = new Set([...existing.signals, ...allSignals]);
       reverseBridgeMap.set(loginKey, {
         bridgeUrl: existing.bridgeUrl || bridge.sourceUrl,
         signals: Array.from(mergedSignals),
+        title: existing.title || bridge.title,
+        snippet: existing.snippet || bridge.snippet,
+        serpPosition: existing.serpPosition ?? bridge.serpPosition,
       });
     } else {
       reverseBridgeMap.set(loginKey, {
         bridgeUrl: bridge.sourceUrl,
-        signals: [bridge.signal],
+        signals: allSignals,
+        title: bridge.title,
+        snippet: bridge.snippet,
+        serpPosition: bridge.serpPosition,
       });
     }
   }
@@ -695,7 +771,8 @@ export async function discoverGitHubIdentities(
   const processLogin = async (
     login: string,
     extraSignals: BridgeSignal[] = [],
-    bridgeUrl: string | null = null
+    bridgeUrl: string | null = null,
+    serpPosition?: number
   ) => {
     const loginKey = login.toLowerCase();
     if (seenProfiles.has(loginKey)) return;
@@ -731,11 +808,22 @@ export async function discoverGitHubIdentities(
         platformFollowers: profile.followers,
         platformRepos: profile.public_repos,
         platformBio: profile.bio,
+        // Hint confidence for dynamic scoring (shadow mode)
+        nameHintConfidence: enrichedHints.nameHint.confidence,
+        companyHintConfidence: enrichedHints.companyHint.confidence,
+        locationHintConfidence: enrichedHints.locationHint.confidence,
       };
 
       const resolvedBridgeUrl = bridgeUrl || (hasProfileLink ? profile.html_url : null);
       const bridge = createBridgeFromScoring(scoreInput, resolvedBridgeUrl, extraSignals);
       const baseScore = calculateConfidenceScore(scoreInput);
+
+      // Shadow scoring: compute dynamic score for comparison logging (no production impact)
+      const shadowComparison = computeShadowScore(scoreInput);
+      shadowScores.push({
+        login,
+        ...shadowComparison,
+      });
 
       // Apply Tier-1 boost when strict Tier-1 evidence exists (not team-page, no contradictions)
       const { hasContradiction } = detectContradictions(scoreInput);
@@ -811,6 +899,7 @@ export async function discoverGitHubIdentities(
           bridge,
           bridgeTier: bridge.tier,
           persistReason: persistResult.reason,
+          serpPosition,
         });
 
         console.log(
@@ -834,7 +923,7 @@ export async function discoverGitHubIdentities(
   };
 
   for (const [login, bridgeInfo] of reverseBridgeMap.entries()) {
-    await processLogin(login, bridgeInfo.signals, bridgeInfo.bridgeUrl);
+    await processLogin(login, bridgeInfo.signals, bridgeInfo.bridgeUrl, bridgeInfo.serpPosition);
     if (earlyStopReason) break;
   }
 
@@ -865,11 +954,13 @@ export async function discoverGitHubIdentities(
     }
   }
 
-  // Sort by bridge tier (lower is better), then by confidence
+  // Sort by bridge tier (lower is better), then confidence, then SERP position tiebreaker
   identitiesFound.sort((a, b) => {
     const tierDiff = (a.bridgeTier || 3) - (b.bridgeTier || 3);
     if (tierDiff !== 0) return tierDiff;
-    return b.confidence - a.confidence;
+    const confDiff = b.confidence - a.confidence;
+    if (Math.abs(confDiff) > 0.01) return confDiff;
+    return (a.serpPosition ?? Infinity) - (b.serpPosition ?? Infinity);
   });
 
   console.log(
@@ -878,6 +969,41 @@ export async function discoverGitHubIdentities(
 
   // Log metrics summary
   console.log(`[BridgeDiscovery] Metrics: queries=${JSON.stringify(metrics.queriesByType)}, bridges=${metrics.totalBridges}, tiers=${JSON.stringify(metrics.identitiesByTier)}`);
+
+  // Shadow scoring: log dynamic vs static comparison (no production impact)
+  if (shadowScores.length > 0) {
+    const bucketChanges = shadowScores.filter(s => s.bucketChanged);
+    const avgDelta = shadowScores.reduce((sum, s) => sum + s.delta, 0) / shadowScores.length;
+    console.log(
+      `[BridgeDiscovery] Shadow scoring for ${hints.linkedinId}: ` +
+      `${shadowScores.length} profiles scored, avg delta=${avgDelta.toFixed(4)}, ` +
+      `bucket changes=${bucketChanges.length}`
+    );
+    if (bucketChanges.length > 0) {
+      for (const change of bucketChanges) {
+        console.log(
+          `[BridgeDiscovery] Shadow bucket change: ${change.login} ` +
+          `${change.staticBucket}→${change.dynamicBucket} ` +
+          `(static=${change.staticScore.total.toFixed(3)}, dynamic=${change.dynamicScore.total.toFixed(3)})`
+        );
+      }
+    }
+    // Attach shadow scores to metrics for runTrace persistence
+    metrics.shadowScoring = {
+      profilesScored: shadowScores.length,
+      avgDelta,
+      bucketChanges: bucketChanges.length,
+      details: shadowScores.map(s => ({
+        login: s.login,
+        staticTotal: s.staticScore.total,
+        dynamicTotal: s.dynamicScore.total,
+        delta: s.delta,
+        staticBucket: s.staticBucket,
+        dynamicBucket: s.dynamicBucket,
+        bucketChanged: s.bucketChanged,
+      })),
+    };
+  }
 
   return {
     candidateId,

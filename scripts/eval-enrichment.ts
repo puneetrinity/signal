@@ -107,6 +107,10 @@ function buildHintsFromFixture(fixture: EvalFixture): CandidateHints {
     locationHint: serpHints.locationHint,
     roleType: null, // Not extracted from SERP
     companyHint: serpHints.companyHint,
+    // Pass real SERP data for hint extraction (Steps 3, 4)
+    serpTitle: fixture.serp.title,
+    serpSnippet: fixture.serp.snippet,
+    serpMeta: fixture.serp.meta,
   };
 }
 

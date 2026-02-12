@@ -126,6 +126,7 @@ model Candidate {
   // Data from search snippets (public SERP data, not scraped)
   searchTitle   String? @db.Text // Title from Google result
   searchSnippet String? @db.Text // Snippet from Google result
+  searchMeta    Json?            // KG + answerBox from Serper (providerMeta)
 
   // Parsed hints from search (not authoritative)
   nameHint     String? // Parsed from title, may be wrong
@@ -139,7 +140,7 @@ model Candidate {
   // Capture metadata
   captureSource  String  @default("search") // 'search' | 'extension' | 'import' | 'manual'
   searchQuery    String? @db.Text // Original query that found this candidate
-  searchProvider String? // 'searxng' | 'brave' | 'brightdata'
+  searchProvider String? // 'serper' | 'brave' (legacy: 'searxng' | 'brightdata')
 
   // Enrichment state
   enrichmentStatus String    @default("pending") // 'pending' | 'in_progress' | 'completed' | 'failed'
@@ -410,7 +411,7 @@ model SearchCacheV2 {
   resultCount Int
 
   // Provider info
-  provider String? // 'searxng' | 'brave' | 'brightdata'
+  provider String? // 'serper' | 'brave' (legacy: 'searxng' | 'brightdata')
 
   // TTL management
   expiresAt DateTime

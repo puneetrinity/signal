@@ -4,7 +4,7 @@
  * Abstract base class for all search-based enrichment sources.
  * Provides common functionality for:
  * - Query building from patterns
- * - Search execution via SearXNG/Brave
+ * - Search execution via Serper/Brave
  * - Identity scoring and evidence creation
  *
  * @see docs/ARCHITECTURE_V2.1.md Section 5
@@ -596,6 +596,7 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
       'linkedin_url_in_blog': 'LinkedIn URL in website',
       'linkedin_url_in_page': 'LinkedIn URL on page',
       'linkedin_url_in_team_page': 'LinkedIn URL on team page',
+      'reverse_link_hint_match': 'Reverse-link page corroborates company/location',
       'commit_email_domain': 'Commit email matches domain',
       'cross_platform_handle': 'Same username',
       'mutual_reference': 'Mutual reference',
@@ -852,6 +853,7 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
             bridgeTier: bridge.tier,
             bridgeSignals: bridge.signals,
             persistReason,
+            serpPosition: result.position,
           };
 
           identities.push(identity);
@@ -884,8 +886,12 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
       }
     }
 
-    // Sort by confidence
-    identities.sort((a, b) => b.confidence - a.confidence);
+    // Sort by confidence, then SERP position tiebreaker (0.01 epsilon)
+    identities.sort((a, b) => {
+      const confDiff = b.confidence - a.confidence;
+      if (Math.abs(confDiff) > 0.01) return confDiff;
+      return (a.serpPosition ?? Infinity) - (b.serpPosition ?? Infinity);
+    });
 
     // Build diagnostics with accurate rejection tracking and variant info
     const diagnostics: PlatformDiagnostics = {

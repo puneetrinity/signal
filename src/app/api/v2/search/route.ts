@@ -4,7 +4,7 @@
  * POST /api/v2/search
  *
  * Compliant LinkedIn discovery endpoint that:
- * - Uses provider abstraction (SearXNG/Brave/BrightData)
+ * - Uses provider abstraction (Serper/Brave)
  * - Saves results as Candidate rows (not Person)
  * - Stores only URL + SERP snippets (no scraped profile data)
  * - Uses SearchCacheV2 for DB-based caching
@@ -17,6 +17,7 @@ import { prisma } from '@/lib/prisma';
 import { parseSearchQuery } from '@/lib/search/parsers';
 import { searchLinkedInProfilesWithMeta, getProviderConfig } from '@/lib/search/providers';
 import type { ProfileSummary } from '@/types/linkedin';
+import type { Prisma } from '@prisma/client';
 import { extractAllHints, extractCompanyFromHeadline } from '@/lib/enrichment/hint-extraction';
 import crypto from 'crypto';
 import {
@@ -163,6 +164,7 @@ async function upsertCandidates(
           // Update search metadata if this is a new search
           searchTitle: result.title,
           searchSnippet: result.snippet,
+          searchMeta: (result.providerMeta ?? undefined) as Prisma.InputJsonValue | undefined,
           nameHint,
           headlineHint,
           locationHint,
@@ -177,6 +179,7 @@ async function upsertCandidates(
           linkedinId,
           searchTitle: result.title,
           searchSnippet: result.snippet,
+          searchMeta: (result.providerMeta ?? undefined) as Prisma.InputJsonValue | undefined,
           nameHint,
           headlineHint,
           locationHint,

@@ -6,7 +6,7 @@
  */
 
 import type { RoleType } from '@/types/linkedin';
-import type { BridgeSignal, BridgeTier } from '../bridge-types';
+import type { BridgeSignal, BridgeTier, ShadowScoringSummary } from '../bridge-types';
 
 /**
  * Supported enrichment platforms
@@ -121,6 +121,8 @@ export interface DiscoveredIdentity {
   bridgeSignals?: string[];
   /** Reason for persistence decision */
   persistReason?: string;
+  /** SERP position for tiebreaker sorting */
+  serpPosition?: number;
 }
 
 /**
@@ -149,6 +151,8 @@ export interface PlatformDiagnostics {
   rateLimited: boolean;
   /** Provider used */
   provider: string;
+  /** Shadow scoring diagnostics (dynamic vs static comparison) */
+  shadowScoring?: ShadowScoringSummary;
 }
 
 /**

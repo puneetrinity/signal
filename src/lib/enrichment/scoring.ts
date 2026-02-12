@@ -85,6 +85,11 @@ export interface ScoringInput {
   platformFollowers?: number;
   platformRepos?: number;
   platformBio?: string | null;
+
+  // Hint confidence from EnrichedHints (optional, for dynamic scoring)
+  nameHintConfidence?: number;
+  companyHintConfidence?: number;
+  locationHintConfidence?: number;
 }
 
 /**
@@ -305,6 +310,105 @@ export function calculateConfidenceScore(input: ScoringInput): ScoreBreakdown {
     profileCompleteness,
     activityScore,
     total: Math.min(1, total),
+  };
+}
+
+/**
+ * Shadow score comparison result
+ */
+export interface ShadowScoreComparison {
+  staticScore: ScoreBreakdown;
+  dynamicScore: ScoreBreakdown;
+  delta: number; // dynamicScore.total - staticScore.total
+  staticBucket: ConfidenceBucket;
+  dynamicBucket: ConfidenceBucket;
+  bucketChanged: boolean;
+}
+
+/**
+ * Calculate dynamic confidence score (shadow mode)
+ *
+ * Unlike the static scorer, this modulates match weights based on hint
+ * extraction confidence. Low-confidence hints get reduced weights, preventing
+ * noisy hints from inflating scores.
+ *
+ * Production scoring is NOT affected — this runs alongside for comparison.
+ */
+export function calculateDynamicConfidenceScore(input: ScoringInput): ScoreBreakdown {
+  // Bridge evidence weight (same as static — evidence is binary, not hint-dependent)
+  let bridgeWeight = 0;
+  if (input.hasProfileLink) {
+    bridgeWeight = 0.4;
+  } else if (input.hasCommitEvidence) {
+    bridgeWeight = Math.min(0.3, 0.15 + input.commitCount * 0.05);
+  }
+
+  // Hint confidence modulation factors (default to 1.0 when not provided)
+  const nameHintConf = input.nameHintConfidence ?? 1.0;
+  const companyHintConf = input.companyHintConfidence ?? 1.0;
+  const locationHintConf = input.locationHintConfidence ?? 1.0;
+
+  // Name match weight (0-0.30), modulated by hint confidence
+  // Low name hint confidence reduces the weight of the name comparison
+  const nameSimilarity = calculateNameSimilarity(
+    input.candidateName,
+    input.platformName
+  );
+  const nameMatch = nameSimilarity * 0.30 * nameHintConf;
+
+  // Company match weight (0-0.15), modulated by hint confidence
+  const companyMatchRaw = calculateCompanyMatch(
+    input.candidateHeadline,
+    input.platformCompany
+  );
+  const companyMatch = companyMatchRaw * 0.15 * companyHintConf;
+
+  // Location match weight (0-0.1), modulated by hint confidence
+  const locationMatchRaw = calculateLocationMatch(
+    input.candidateLocation,
+    input.platformLocation
+  );
+  const locationMatch = locationMatchRaw * 0.1 * locationHintConf;
+
+  // Profile completeness (unmodulated — platform data, not hint-dependent)
+  const completenessRaw = calculateProfileCompleteness(input);
+  const profileCompleteness = completenessRaw * 0.05;
+
+  const handleMatch = 0;
+  const activityScore = completenessRaw;
+
+  const total =
+    bridgeWeight + nameMatch + companyMatch + locationMatch + profileCompleteness;
+
+  return {
+    bridgeWeight,
+    nameMatch,
+    handleMatch,
+    companyMatch,
+    locationMatch,
+    profileCompleteness,
+    activityScore,
+    total: Math.min(1, total),
+  };
+}
+
+/**
+ * Compute shadow score comparison between static and dynamic scorers
+ */
+export function computeShadowScore(input: ScoringInput): ShadowScoreComparison {
+  const staticScore = calculateConfidenceScore(input);
+  const dynamicScore = calculateDynamicConfidenceScore(input);
+
+  const staticBucket = classifyConfidence(staticScore.total);
+  const dynamicBucket = classifyConfidence(dynamicScore.total);
+
+  return {
+    staticScore,
+    dynamicScore,
+    delta: dynamicScore.total - staticScore.total,
+    staticBucket,
+    dynamicBucket,
+    bucketChanged: staticBucket !== dynamicBucket,
   };
 }
 
@@ -580,6 +684,7 @@ function formatBridgeReason(bridge: BridgeDetection, score: ScoreBreakdown): str
     'linkedin_url_in_blog': 'LinkedIn URL found in website/blog field',
     'linkedin_url_in_page': 'LinkedIn URL found on external page',
     'linkedin_url_in_team_page': 'LinkedIn URL found on team page (multiple profiles)',
+    'reverse_link_hint_match': 'Reverse-link page corroborates company/location',
     'commit_email_domain': 'Commit email matches company domain',
     'cross_platform_handle': 'Same username across platforms',
     'mutual_reference': 'Both profiles reference each other',
@@ -656,6 +761,8 @@ export type { BridgeTier, BridgeSignal, BridgeDetection };
 
 export default {
   calculateConfidenceScore,
+  calculateDynamicConfidenceScore,
+  computeShadowScore,
   classifyConfidence,
   meetsStorageThreshold,
   shouldPersistIdentity,

@@ -87,6 +87,8 @@ export interface FixtureMocks {
 export interface SerpData {
   title: string;
   snippet: string;
+  /** KG/answerBox metadata from Serper.dev (optional, for KG-enriched fixtures) */
+  meta?: Record<string, unknown>;
 }
 
 /**

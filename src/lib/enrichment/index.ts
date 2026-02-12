@@ -20,6 +20,7 @@ import {
   type BridgeDiscoveryOptions,
 } from './bridge-discovery';
 import type { Candidate, EnrichmentSession, IdentityCandidate } from '@prisma/client';
+import { applySerpMetaOverrides } from './hint-extraction';
 
 // Re-export types
 export * from './github';
@@ -67,14 +68,39 @@ export interface EnrichmentResult {
  * Convert Candidate to CandidateHints for discovery
  */
 function candidateToHints(candidate: Candidate): CandidateHints {
+  let nameHint = candidate.nameHint;
+  let headlineHint = candidate.headlineHint;
+  let companyHint = candidate.companyHint;
+  let locationHint = candidate.locationHint;
+
+  // Upgrade hints from KG/answerBox when present
+  if (candidate.searchMeta) {
+    const upgraded = applySerpMetaOverrides(
+      { nameHint, headlineHint, companyHint, locationHint },
+      candidate.searchMeta as Record<string, unknown>,
+      candidate.linkedinId,
+      candidate.linkedinUrl,
+      candidate.searchTitle || '',
+      candidate.searchSnippet || '',
+      candidate.roleType || null
+    );
+    nameHint = upgraded.nameHint;
+    headlineHint = upgraded.headlineHint;
+    companyHint = upgraded.companyHint;
+    locationHint = upgraded.locationHint;
+  }
+
   return {
     linkedinId: candidate.linkedinId,
     linkedinUrl: candidate.linkedinUrl,
-    nameHint: candidate.nameHint,
-    headlineHint: candidate.headlineHint,
-    locationHint: candidate.locationHint,
-    companyHint: candidate.companyHint,
+    nameHint,
+    headlineHint,
+    locationHint,
+    companyHint,
     roleType: candidate.roleType,
+    serpTitle: candidate.searchTitle ?? undefined,
+    serpSnippet: candidate.searchSnippet ?? undefined,
+    serpMeta: (candidate.searchMeta as Record<string, unknown>) ?? undefined,
   };
 }
 

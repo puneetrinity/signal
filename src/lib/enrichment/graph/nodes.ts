@@ -24,7 +24,7 @@ import {
 } from './ephemeral';
 import { generateCandidateSummary } from '../summary/generate';
 import { shouldPersistIdentity, type ScoreBreakdown } from '../scoring';
-import { extractAllHints, extractNameFromSlug } from '../hint-extraction';
+import { extractAllHints, extractNameFromSlug, applySerpMetaOverrides } from '../hint-extraction';
 import {
   type EnrichmentState,
   type PartialEnrichmentState,
@@ -106,6 +106,7 @@ function buildRunTrace(state: EnrichmentState): EnrichmentRunTrace {
       matchedResultCount: result.diagnostics?.matchedResultCount ?? 0,
       identitiesFound: result.identities.length,
       unmatchedSampleUrls: result.diagnostics?.unmatchedSampleUrls ?? [],
+      shadowScoring: result.diagnostics?.shadowScoring,
       bestConfidence,
       durationMs: result.durationMs,
       error: result.error,
@@ -254,6 +255,23 @@ export async function loadCandidateNode(
       if (!companyHint && reDerived.companyHint) companyHint = reDerived.companyHint;
     }
 
+    // Upgrade hints from KG/answerBox when present (only overrides with higher-confidence source)
+    if (candidate.searchMeta) {
+      const upgraded = applySerpMetaOverrides(
+        { nameHint, headlineHint, companyHint, locationHint },
+        candidate.searchMeta as Record<string, unknown>,
+        candidate.linkedinId || candidate.id,
+        candidate.linkedinUrl || '',
+        candidate.searchTitle || '',
+        candidate.searchSnippet || '',
+        candidate.roleType || null
+      );
+      nameHint = upgraded.nameHint;
+      headlineHint = upgraded.headlineHint;
+      companyHint = upgraded.companyHint;
+      locationHint = upgraded.locationHint;
+    }
+
     // Last resort: derive name from LinkedIn slug
     if (!nameHint) {
       nameHint = extractNameFromSlug(candidate.linkedinId || candidate.id);
@@ -268,6 +286,9 @@ export async function loadCandidateNode(
       locationHint,
       companyHint,
       roleType: (candidate.roleType as RoleType) || state.roleType || null,
+      serpTitle: candidate.searchTitle ?? undefined,
+      serpSnippet: candidate.searchSnippet ?? undefined,
+      serpMeta: (candidate.searchMeta as Record<string, unknown>) ?? undefined,
     };
 
     // Determine role type
@@ -354,6 +375,9 @@ export async function githubBridgeNode(
       locationHint: state.hints.locationHint,
       roleType: state.hints.roleType,
       companyHint: state.hints.companyHint,
+      serpTitle: state.hints.serpTitle,
+      serpSnippet: state.hints.serpSnippet,
+      serpMeta: state.hints.serpMeta,
     };
 
     // Respect ENABLE_COMMIT_EMAIL_EVIDENCE env var (reduces API calls and compliance risk)
@@ -424,6 +448,7 @@ export async function githubBridgeNode(
         identitiesAboveThreshold: identities.length,
         rateLimited: false,
         provider: 'github_api',
+        shadowScoring: result.metrics?.shadowScoring,
       },
     };
 

@@ -130,6 +130,7 @@ export interface ProfileSummary {
   name?: string;
   headline?: string;
   location?: string;
+  providerMeta?: Record<string, unknown>;
 }
 
 /**
