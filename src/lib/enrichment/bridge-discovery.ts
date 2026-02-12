@@ -734,7 +734,7 @@ export async function discoverGitHubIdentities(
   const seenProfiles = new Set<string>();
 
   // Shadow scoring: collect dynamic vs static comparisons for logging
-  const shadowScores: Array<{ login: string } & ShadowScoreComparison> = [];
+  const shadowScores: Array<{ login: string; boostedTotal?: number } & ShadowScoreComparison> = [];
 
   const reverseBridgeMap = new Map<string, {
     bridgeUrl: string | null;
@@ -834,6 +834,12 @@ export async function discoverGitHubIdentities(
       const boostedTotal = isStrictTier1
         ? Math.min(1.0, baseScore.total + TIER_1_BOOST)
         : baseScore.total;
+
+      // Record boosted total on shadow entry for diagnostics
+      const shadowEntry = shadowScores.find(s => s.login === login);
+      if (shadowEntry && boostedTotal !== baseScore.total) {
+        shadowEntry.boostedTotal = boostedTotal;
+      }
 
       // scoreBreakdown should only contain numeric fields for scoring
       // Bridge info is stored separately on the identity (bridgeTier, bridge.signals, etc.)
@@ -996,6 +1002,7 @@ export async function discoverGitHubIdentities(
       details: shadowScores.map(s => ({
         login: s.login,
         staticTotal: s.staticScore.total,
+        ...(s.boostedTotal !== undefined ? { boostedTotal: s.boostedTotal } : {}),
         dynamicTotal: s.dynamicScore.total,
         delta: s.delta,
         staticBucket: s.staticBucket,

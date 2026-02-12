@@ -716,9 +716,12 @@ export function shouldPersistWithBridge(
 
   // Tier 1: Always persist (explicit bidirectional link)
   if (bridge.tier === 1) {
+    const autoMergeEligible = score.total >= 0.90;
     return {
       shouldPersist: true,
-      reason: `Auto-merge eligible: ${bridgeReason}`,
+      reason: autoMergeEligible
+        ? `Tier-1 bridge, auto-merge eligible (${score.total.toFixed(2)} >= 0.90): ${bridgeReason}`
+        : `Tier-1 bridge detected (${score.total.toFixed(2)} < 0.90 auto-merge threshold): ${bridgeReason}`,
       tier: 1,
     };
   }
