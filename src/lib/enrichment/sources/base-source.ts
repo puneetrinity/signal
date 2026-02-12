@@ -612,7 +612,10 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
       : this.formatScoreReason(score);
 
     if (bridge.tier === 1) {
-      return `Tier 1 (auto-merge): ${signalText}`;
+      const autoMerge = score.total >= 0.90;
+      return autoMerge
+        ? `Tier 1, auto-merge eligible (${(score.total * 100).toFixed(0)}% >= 90%): ${signalText}`
+        : `Tier 1 bridge detected (${(score.total * 100).toFixed(0)}% < 90% auto-merge): ${signalText}`;
     }
     if (bridge.tier === 2) {
       return `Tier 2 (review): ${signalText}`;
