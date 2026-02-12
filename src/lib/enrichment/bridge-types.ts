@@ -142,6 +142,7 @@ export interface ShadowScoringSummary {
   details: Array<{
     login: string;
     staticTotal: number;
+    boostedTotal?: number;
     dynamicTotal: number;
     delta: number;
     staticBucket: 'auto_merge' | 'suggest' | 'low' | 'rejected';
