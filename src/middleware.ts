@@ -58,17 +58,27 @@ export default clerkMiddleware(async (auth, req) => {
 
   // Protected API routes - require auth + org
   if (isProtectedApiRoute(req)) {
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, error: 'Authentication required' },
-        { status: 401 }
-      );
-    }
-    if (!orgId) {
-      return NextResponse.json(
-        { success: false, error: 'Organization required. Please select or create an organization.' },
-        { status: 403 }
-      );
+    const authDisabled = process.env.DISABLE_AUTH === 'true';
+
+    // Check for API key in Authorization header
+    const authHeader = req.headers.get('authorization');
+    const apiKeys = process.env.API_KEYS?.split(',').map((k) => k.trim()).filter(Boolean) ?? [];
+    const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+    const validApiKey = bearerToken && apiKeys.includes(bearerToken);
+
+    if (!authDisabled && !validApiKey) {
+      if (!userId) {
+        return NextResponse.json(
+          { success: false, error: 'Authentication required' },
+          { status: 401 }
+        );
+      }
+      if (!orgId) {
+        return NextResponse.json(
+          { success: false, error: 'Organization required. Please select or create an organization.' },
+          { status: 403 }
+        );
+      }
     }
   }
 
