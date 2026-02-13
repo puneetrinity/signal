@@ -36,6 +36,7 @@ import {
   type EnrichmentRunTrace,
   DEFAULT_BUDGET,
 } from './types';
+import type { Tier1ShadowDiagnostics, Tier1BlockReason } from '../bridge-types';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger('EnrichmentGraph');
@@ -76,6 +77,57 @@ function sanitizeSummaryMeta(value: unknown):
     ? obj.identityIds.filter((v): v is string => typeof v === 'string')
     : [];
   return { mode, confirmedCount, identityKey, identityIds };
+}
+
+/**
+ * Aggregate Tier-1 shadow diagnostics across platforms.
+ * Sums counters and concatenates samples (capped at 50 total).
+ */
+function aggregateTier1Shadow(
+  platformResults: EnrichmentRunTrace['platformResults']
+): Tier1ShadowDiagnostics | undefined {
+  const shadows = Object.values(platformResults)
+    .map(r => r.tier1Shadow)
+    .filter((s): s is Tier1ShadowDiagnostics => !!s && s.enabled);
+
+  if (shadows.length === 0) return undefined;
+
+  const first = shadows[0];
+  const result: Tier1ShadowDiagnostics = {
+    enabled: true,
+    enforce: first.enforce,
+    sampleRate: first.sampleRate,
+    totalEvaluated: 0,
+    wouldAutoMerge: 0,
+    actuallyPromoted: 0,
+    blocked: 0,
+    samples: [],
+    blockReasonCounts: {
+      no_bridge_signal: 0,
+      low_confidence: 0,
+      contradiction: 0,
+      name_mismatch: 0,
+      team_page: 0,
+      id_mismatch: 0,
+    },
+  };
+
+  for (const shadow of shadows) {
+    result.totalEvaluated += shadow.totalEvaluated;
+    result.wouldAutoMerge += shadow.wouldAutoMerge;
+    result.actuallyPromoted += shadow.actuallyPromoted;
+    result.blocked += shadow.blocked;
+    for (const [reason, count] of Object.entries(shadow.blockReasonCounts)) {
+      result.blockReasonCounts[reason as Tier1BlockReason] += count;
+    }
+    for (const sample of shadow.samples) {
+      if (result.samples.length < 50) {
+        result.samples.push(sample);
+      }
+    }
+  }
+
+  return result;
 }
 
 /**
@@ -138,6 +190,7 @@ function buildRunTrace(state: EnrichmentState): EnrichmentRunTrace {
       durationMs: result.durationMs,
       error: result.error,
       rateLimited: result.diagnostics?.rateLimited,
+      tier1Shadow: result.diagnostics?.tier1Shadow,
     };
   }
 
@@ -208,6 +261,8 @@ function buildRunTrace(state: EnrichmentState): EnrichmentRunTrace {
       variantStats,
       // Summary metadata for draft/verified tracking
       summaryMeta: sanitizeSummaryMeta(state.summaryMeta),
+      // Tier-1 shadow diagnostics (aggregated across platforms)
+      tier1Shadow: aggregateTier1Shadow(platformResults),
     },
     failureReason: state.status === 'failed' ? state.errors?.[0]?.message : undefined,
   };
@@ -419,6 +474,7 @@ export async function githubBridgeNode(
     const result = await discoverGitHubIdentities(state.candidateId, candidateHints, {
       maxGitHubResults: state.budget?.maxIdentitiesPerPlatform || 5,
       includeCommitEvidence,
+      sessionId: state.sessionId,
     });
 
     // Convert to DiscoveredIdentity format expected by state
@@ -487,6 +543,7 @@ export async function githubBridgeNode(
         scoringVersion: result.metrics?.scoringVersion,
         dynamicScoringVersion: result.metrics?.dynamicScoringVersion,
         scoringMode: result.metrics?.shadowScoring ? 'shadow' : 'static',
+        tier1Shadow: result.tier1Shadow,
       },
     };
 
