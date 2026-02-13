@@ -33,6 +33,12 @@ import {
   createBridgeDetection,
   TIER_2_CAP,
 } from './bridge-types';
+import {
+  STATIC_SCORER_VERSION,
+  DYNAMIC_SCORER_VERSION,
+  type ScoringMode,
+} from './scoring-metadata';
+import { getEnrichmentMinConfidenceThreshold } from './config';
 
 /**
  * Score breakdown for transparency
@@ -53,6 +59,8 @@ export interface ScoreBreakdown {
   profileCompleteness: number; // 0-1 based on profile data completeness
   activityScore: number; // 0-1 based on platform activity metrics
   total: number; // Sum of all weights
+  scoringVersion?: string;
+  scoringMode?: ScoringMode;
 }
 
 /**
@@ -312,6 +320,8 @@ export function calculateConfidenceScore(input: ScoringInput): ScoreBreakdown {
     profileCompleteness,
     activityScore,
     total: Math.min(1, total),
+    scoringVersion: STATIC_SCORER_VERSION,
+    scoringMode: 'static',
   };
 }
 
@@ -391,6 +401,8 @@ export function calculateDynamicConfidenceScore(input: ScoringInput): ScoreBreak
     profileCompleteness,
     activityScore,
     total: Math.min(1, total),
+    scoringVersion: DYNAMIC_SCORER_VERSION,
+    scoringMode: 'shadow',
   };
 }
 
@@ -429,14 +441,7 @@ export function classifyConfidence(score: number): ConfidenceBucket {
  * Configurable via ENRICHMENT_MIN_CONFIDENCE env var (default: 0.25)
  */
 function getStorageThreshold(): number {
-  const envValue = process.env.ENRICHMENT_MIN_CONFIDENCE;
-  if (envValue) {
-    const parsed = parseFloat(envValue);
-    if (!isNaN(parsed) && parsed >= 0 && parsed <= 1) {
-      return parsed;
-    }
-  }
-  return 0.25; // Default: lowered to improve persist rate for partial matches
+  return getEnrichmentMinConfidenceThreshold('Scoring');
 }
 
 /**

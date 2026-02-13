@@ -26,6 +26,17 @@ interface SessionItem {
   runTrace?: unknown;
 }
 
+interface SessionsApiStats {
+  shadowScoring?: {
+    sessionsWithShadow: number;
+    profilesScored: number;
+    bucketChanges: number;
+    avgDelta: number;
+  };
+  scoringVersions?: Record<string, number>;
+  dynamicScoringVersions?: Record<string, number>;
+}
+
 interface PlatformAggregate {
   sessions: number;
   rawHits: number;
@@ -184,9 +195,12 @@ function buildSummary(sessions: SessionItem[]): DiagnosticsSummary {
 export default function EnrichmentDiagnosticsPage() {
   const [limitInput, setLimitInput] = useState(String(DEFAULT_LIMIT));
   const [limit, setLimit] = useState(DEFAULT_LIMIT);
+  const [fromDate, setFromDate] = useState('');
+  const [toDate, setToDate] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'completed' | 'failed' | 'running'>('all');
   const [providerFilter, setProviderFilter] = useState<'all' | 'langgraph' | 'pdl'>('all');
   const [sessions, setSessions] = useState<SessionItem[]>([]);
+  const [apiStats, setApiStats] = useState<SessionsApiStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -198,6 +212,8 @@ export default function EnrichmentDiagnosticsPage() {
       const params = new URLSearchParams();
       params.set('limit', String(limit));
       params.set('includeTrace', 'true');
+      if (fromDate) params.set('from', fromDate);
+      if (toDate) params.set('to', toDate);
       const response = await fetch(`/api/v2/sessions?${params.toString()}`);
       if (!response.ok) {
         const data = await response.json();
@@ -205,12 +221,13 @@ export default function EnrichmentDiagnosticsPage() {
       }
       const data = await response.json();
       setSessions((data.items || []) as SessionItem[]);
+      setApiStats((data.stats || null) as SessionsApiStats | null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load sessions');
     } finally {
       setLoading(false);
     }
-  }, [limit]);
+  }, [limit, fromDate, toDate]);
 
   useEffect(() => {
     fetchSessions();
@@ -271,6 +288,18 @@ export default function EnrichmentDiagnosticsPage() {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            <Input
+              type="date"
+              value={fromDate}
+              onChange={(e) => setFromDate(e.target.value)}
+              className="w-40"
+            />
+            <Input
+              type="date"
+              value={toDate}
+              onChange={(e) => setToDate(e.target.value)}
+              className="w-40"
+            />
             <Input
               value={limitInput}
               onChange={(e) => setLimitInput(e.target.value)}
@@ -374,6 +403,72 @@ export default function EnrichmentDiagnosticsPage() {
                   Running
                 </div>
                 <div className="text-2xl font-bold text-blue-500">{summary.running}</div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+
+        {!loading && !error && (
+          <div className="grid gap-4 md:grid-cols-3">
+            <Card>
+              <CardHeader>
+                <CardTitle>Shadow Scoring</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-2 text-sm">
+                <div className="flex items-center justify-between">
+                  <span>Sessions with shadow</span>
+                  <Badge variant="outline">{apiStats?.shadowScoring?.sessionsWithShadow ?? 0}</Badge>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Profiles scored</span>
+                  <Badge variant="outline">{apiStats?.shadowScoring?.profilesScored ?? 0}</Badge>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Bucket changes</span>
+                  <Badge variant="outline">{apiStats?.shadowScoring?.bucketChanges ?? 0}</Badge>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Avg delta</span>
+                  <Badge variant="outline">
+                    {(apiStats?.shadowScoring?.avgDelta ?? 0).toFixed(4)}
+                  </Badge>
+                </div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle>Static Scorer Versions</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-2 text-sm">
+                {Object.entries(apiStats?.scoringVersions || {}).length === 0 && (
+                  <span className="text-muted-foreground">No scorer version data recorded.</span>
+                )}
+                {Object.entries(apiStats?.scoringVersions || {})
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([version, count]) => (
+                    <div key={version} className="flex items-center justify-between">
+                      <span>{version}</span>
+                      <Badge variant="outline">{count}</Badge>
+                    </div>
+                  ))}
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle>Dynamic Scorer Versions</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-2 text-sm">
+                {Object.entries(apiStats?.dynamicScoringVersions || {}).length === 0 && (
+                  <span className="text-muted-foreground">No dynamic scorer data recorded.</span>
+                )}
+                {Object.entries(apiStats?.dynamicScoringVersions || {})
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([version, count]) => (
+                    <div key={version} className="flex items-center justify-between">
+                      <span>{version}</span>
+                      <Badge variant="outline">{count}</Badge>
+                    </div>
+                  ))}
               </CardContent>
             </Card>
           </div>

@@ -177,7 +177,11 @@ export async function getRateLimitStatus(
 
   if (backend === 'redis') {
     const countStr = await redis.get(fullKey);
-    const count = countStr ? parseInt(countStr, 10) : 0;
+    const parsedCount = countStr ? Number.parseInt(countStr, 10) : 0;
+    const count =
+      Number.isFinite(parsedCount) && parsedCount >= 0
+        ? parsedCount
+        : 0;
     const ttlSeconds = await redis.ttl(fullKey);
     const safeTtl =
       ttlSeconds > 0 ? ttlSeconds : countStr ? config.windowSeconds : config.windowSeconds;

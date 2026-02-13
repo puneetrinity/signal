@@ -13,6 +13,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { withAuth, requireTenantId } from '@/lib/auth';
 
+function parseNonNegativeInt(raw: string | null, fallback: number): number {
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (Number.isFinite(parsed) && parsed >= 0) {
+    return parsed;
+  }
+  return fallback;
+}
+
 export async function GET(request: NextRequest) {
   // Auth check - recruiter role required
   const authCheck = await withAuth('recruiter');
@@ -25,8 +34,8 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
 
     // Pagination
-    const limit = Math.min(parseInt(searchParams.get('limit') || '50'), 100);
-    const offset = parseInt(searchParams.get('offset') || '0');
+    const limit = Math.min(parseNonNegativeInt(searchParams.get('limit'), 50), 100);
+    const offset = parseNonNegativeInt(searchParams.get('offset'), 0);
 
     // Filters
     const platform = searchParams.get('platform');
@@ -61,9 +70,16 @@ export async function GET(request: NextRequest) {
     }
 
     if (bridgeTier) {
+      const parsedBridgeTier = Number.parseInt(bridgeTier, 10);
+      if (![1, 2, 3].includes(parsedBridgeTier)) {
+        return NextResponse.json(
+          { success: false, error: 'bridgeTier must be one of: 1, 2, 3' },
+          { status: 400 }
+        );
+      }
       // Override the OR clause if specific tier requested
       delete where.OR;
-      where.bridgeTier = parseInt(bridgeTier);
+      where.bridgeTier = parsedBridgeTier;
     }
 
     // If roleType filter, join with candidate

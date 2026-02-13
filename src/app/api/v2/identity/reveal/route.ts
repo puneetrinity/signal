@@ -266,7 +266,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       {
         success: false,
-        error: error instanceof Error ? error.message : 'Failed to reveal email',
+        error: 'Failed to reveal email',
       },
       { status: 500 }
     );

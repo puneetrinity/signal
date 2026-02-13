@@ -79,7 +79,9 @@ async function getCachedResults(tenantId: string, queryHash: string) {
     if (cached) {
       await prisma.searchCacheV2.delete({
         where: { tenantId_queryHash: { tenantId, queryHash } },
-      }).catch(() => {});
+      }).catch((error) => {
+        console.warn('[v2/search] Failed to delete expired cache entry:', error);
+      });
     }
 
     return null;
@@ -354,7 +356,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       {
         success: false,
-        error: error instanceof Error ? error.message : 'Search failed',
+        error: 'Search failed',
       },
       { status: 500 }
     );

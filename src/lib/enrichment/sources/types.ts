@@ -7,6 +7,7 @@
 
 import type { RoleType } from '@/types/linkedin';
 import type { BridgeSignal, BridgeTier, ShadowScoringSummary } from '../bridge-types';
+import type { ScoringMode } from '../scoring-metadata';
 
 /**
  * Supported enrichment platforms
@@ -89,6 +90,8 @@ export interface ScoreBreakdown {
   profileCompleteness: number;
   activityScore: number;
   total: number;
+  scoringVersion?: string;
+  scoringMode?: ScoringMode;
 }
 
 /**
@@ -153,6 +156,12 @@ export interface PlatformDiagnostics {
   provider: string;
   /** Shadow scoring diagnostics (dynamic vs static comparison) */
   shadowScoring?: ShadowScoringSummary;
+  /** Primary scorer version used for persisted/static scores */
+  scoringVersion?: string;
+  /** Dynamic scorer version when shadow scoring is enabled */
+  dynamicScoringVersion?: string;
+  /** Scoring mode for this platform run */
+  scoringMode?: ScoringMode;
 }
 
 /**

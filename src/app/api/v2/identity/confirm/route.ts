@@ -26,6 +26,7 @@ import { logIdentityAction } from '@/lib/audit';
 import { withAuth, requireTenantId } from '@/lib/auth';
 import { createSummaryOnlySession } from '@/lib/enrichment/queue';
 import type { EnrichmentRunTrace } from '@/lib/enrichment/graph/types';
+import { getTenantSettings } from '@/lib/tenant/settings';
 
 /**
  * Confirmation method types
@@ -271,6 +272,23 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Enforce tenant-level policy before any contact extraction/storage.
+    if (storeContactInfo) {
+      const settings = await getTenantSettings(tenantId);
+      if (!settings.allowContactStorage) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'Contact storage is disabled for this tenant',
+          },
+          {
+            status: 403,
+            headers: rateLimitHeaders(rateLimitCheck.result),
+          }
+        );
+      }
+    }
+
     // Extract contact info if requested
     let contactInfo = null;
     if (storeContactInfo) {
@@ -391,7 +409,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       {
         success: false,
-        error: error instanceof Error ? error.message : 'Failed to confirm identity',
+        error: 'Failed to confirm identity',
       },
       { status: 500 }
     );
@@ -503,7 +521,7 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json(
       {
         success: false,
-        error: error instanceof Error ? error.message : 'Failed to reject identity',
+        error: 'Failed to reject identity',
       },
       { status: 500 }
     );

@@ -107,7 +107,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       {
         success: false,
-        error: error instanceof Error ? error.message : 'Failed to start async enrichment',
+        error: 'Failed to start async enrichment',
       },
       { status: 500 }
     );

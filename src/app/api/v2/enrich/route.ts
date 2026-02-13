@@ -153,7 +153,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       {
         success: false,
-        error: error instanceof Error ? error.message : 'Enrichment failed',
+        error: 'Enrichment failed',
       },
       { status: 500 }
     );
@@ -262,7 +262,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(
         {
           success: false,
-          error: error instanceof Error ? error.message : 'Failed to fetch identities',
+          error: 'Failed to fetch identities',
         },
         { status: 500 }
       );
@@ -288,10 +288,11 @@ export async function GET(request: NextRequest) {
       },
     });
   } catch (error) {
+    console.error('[v2/enrich] Health check error:', error);
     return NextResponse.json({
       version: 'v2',
       status: 'degraded',
-      error: error instanceof Error ? error.message : 'Health check failed',
+      error: 'Health check failed',
     });
   }
 }

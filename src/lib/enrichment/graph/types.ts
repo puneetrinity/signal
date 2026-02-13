@@ -78,6 +78,12 @@ export interface EnrichmentRunTrace {
     unmatchedSampleUrls?: string[];
     /** Shadow scoring diagnostics (dynamic vs static comparison) */
     shadowScoring?: PlatformDiagnostics['shadowScoring'];
+    /** Primary scorer version used for static/persisted confidence. */
+    scoringVersion?: string;
+    /** Dynamic scorer version when shadow scoring is emitted. */
+    dynamicScoringVersion?: string;
+    /** Scoring mode used by this platform run. */
+    scoringMode?: PlatformDiagnostics['scoringMode'];
     bestConfidence: number | null;
     durationMs: number;
     error?: string;
@@ -105,6 +111,10 @@ export interface EnrichmentRunTrace {
      * Counts are per-platform (not per-query).
      */
     providersUsed?: Record<string, number>;
+    /** Scorer versions observed across platform runs (counts are per-platform). */
+    scoringVersions?: Record<string, number>;
+    /** Dynamic scorer versions observed across platform runs (counts are per-platform). */
+    dynamicScoringVersions?: Record<string, number>;
     /** Providers that were rate limited during this run (best-effort). */
     rateLimitedProviders?: string[];
     /**

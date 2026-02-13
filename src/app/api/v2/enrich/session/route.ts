@@ -131,7 +131,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(
       {
         success: false,
-        error: error instanceof Error ? error.message : 'Failed to fetch session',
+        error: 'Failed to fetch session',
       },
       { status: 500 }
     );

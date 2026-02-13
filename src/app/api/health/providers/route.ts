@@ -33,7 +33,7 @@ export async function GET() {
         config: parserConfig,
       },
       environment: {
-        SEARCH_PROVIDER: process.env.SEARCH_PROVIDER || 'brightdata (default)',
+        SEARCH_PROVIDER: process.env.SEARCH_PROVIDER || 'serper (default)',
         SEARCH_FALLBACK_PROVIDER: process.env.SEARCH_FALLBACK_PROVIDER || 'none',
         PARSER_PROVIDER: process.env.PARSER_PROVIDER || 'gemini (default)',
         USE_NEW_DISCOVERY: process.env.USE_NEW_DISCOVERY || 'false',

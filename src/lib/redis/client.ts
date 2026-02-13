@@ -65,6 +65,16 @@ class NoopRedis {
 
 type RedisClient = Redis | NoopRedis;
 
+function getRedisPort(): number {
+  const raw = process.env.REDIS_PORT;
+  const parsed = Number.parseInt(raw || '6379', 10);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed;
+  }
+  console.warn(`[Redis] Invalid REDIS_PORT="${raw}", using default 6379`);
+  return 6379;
+}
+
 function createRedisClient(): RedisClient {
   // Redis with lazyConnect: true won't connect until first command
   // This is safe during build - no connection attempt is made
@@ -89,7 +99,7 @@ function createRedisClient(): RedisClient {
   if (process.env.REDIS_HOST && process.env.REDIS_PORT) {
     return new Redis({
       host: process.env.REDIS_HOST,
-      port: parseInt(process.env.REDIS_PORT || '6379', 10),
+      port: getRedisPort(),
       password: process.env.REDIS_PASSWORD,
       tls: process.env.REDIS_TLS_ENABLED === 'true' ? {} : undefined,
       maxRetriesPerRequest: 3,

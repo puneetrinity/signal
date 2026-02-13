@@ -13,6 +13,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { withAuth, requireTenantId } from '@/lib/auth';
 
+function parseDateParam(value: string | null): Date | null {
+  if (!value) return null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed;
+}
+
 export async function GET(request: NextRequest) {
   // Auth check - recruiter role required
   const authCheck = await withAuth('recruiter');
@@ -25,12 +32,29 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
 
     // Pagination
-    const limit = Math.min(parseInt(searchParams.get('limit') || '50'), 100);
-    const offset = parseInt(searchParams.get('offset') || '0');
+    const rawLimit = parseInt(searchParams.get('limit') || '50', 10);
+    const rawOffset = parseInt(searchParams.get('offset') || '0', 10);
+    const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? rawLimit : 50, 1), 500);
+    const offset = Math.max(Number.isFinite(rawOffset) ? rawOffset : 0, 0);
 
     // Filters
     const status = searchParams.get('status');
     const candidateId = searchParams.get('candidateId');
+    const from = parseDateParam(searchParams.get('from'));
+    const to = parseDateParam(searchParams.get('to'));
+
+    if (searchParams.get('from') && !from) {
+      return NextResponse.json(
+        { success: false, error: 'Invalid from date (expected ISO date)' },
+        { status: 400 }
+      );
+    }
+    if (searchParams.get('to') && !to) {
+      return NextResponse.json(
+        { success: false, error: 'Invalid to date (expected ISO date)' },
+        { status: 400 }
+      );
+    }
 
     // Build where clause
     const where: Record<string, unknown> = { tenantId };
@@ -41,6 +65,12 @@ export async function GET(request: NextRequest) {
 
     if (candidateId) {
       where.candidateId = candidateId;
+    }
+    if (from || to) {
+      where.createdAt = {
+        ...(from ? { gte: from } : {}),
+        ...(to ? { lte: to } : {}),
+      };
     }
 
     // Get sessions with candidate info
@@ -67,7 +97,7 @@ export async function GET(request: NextRequest) {
     // Get aggregate stats
     const stats = await prisma.enrichmentSession.groupBy({
       by: ['status'],
-      where: { tenantId },
+      where,
       _count: true,
     });
 
@@ -77,6 +107,47 @@ export async function GET(request: NextRequest) {
       completed: stats.find((s) => s.status === 'completed')?._count || 0,
       failed: stats.find((s) => s.status === 'failed')?._count || 0,
     };
+
+    // Shadow + scorer diagnostics aggregated from runTrace for test analysis.
+    const shadowSummary = {
+      sessionsWithShadow: 0,
+      profilesScored: 0,
+      bucketChanges: 0,
+      avgDelta: 0,
+    };
+    let totalShadowDelta = 0;
+    const scoringVersions: Record<string, number> = {};
+    const dynamicScoringVersions: Record<string, number> = {};
+
+    for (const session of sessions) {
+      const trace = (session.runTrace || {}) as Record<string, unknown>;
+      const final = (trace.final || {}) as Record<string, unknown>;
+      const platformResults = (trace.platformResults || {}) as Record<string, Record<string, unknown>>;
+
+      const staticVersions = (final.scoringVersions || {}) as Record<string, number>;
+      for (const [version, count] of Object.entries(staticVersions)) {
+        scoringVersions[version] = (scoringVersions[version] || 0) + (count || 0);
+      }
+      const dynamicVersions = (final.dynamicScoringVersions || {}) as Record<string, number>;
+      for (const [version, count] of Object.entries(dynamicVersions)) {
+        dynamicScoringVersions[version] = (dynamicScoringVersions[version] || 0) + (count || 0);
+      }
+
+      for (const result of Object.values(platformResults)) {
+        const shadow = (result.shadowScoring || null) as
+          | { profilesScored?: number; bucketChanges?: number; avgDelta?: number }
+          | null;
+        if (!shadow || typeof shadow.profilesScored !== 'number') continue;
+        shadowSummary.sessionsWithShadow += 1;
+        shadowSummary.profilesScored += shadow.profilesScored || 0;
+        shadowSummary.bucketChanges += shadow.bucketChanges || 0;
+        totalShadowDelta += (shadow.avgDelta || 0) * (shadow.profilesScored || 0);
+      }
+    }
+    shadowSummary.avgDelta =
+      shadowSummary.profilesScored > 0
+        ? totalShadowDelta / shadowSummary.profilesScored
+        : 0;
 
     // Transform for frontend
     const items = sessions.map((session) => ({
@@ -126,6 +197,10 @@ export async function GET(request: NextRequest) {
       stats: {
         statusCounts,
         totalSessions: statusCounts.pending + statusCounts.running + statusCounts.completed + statusCounts.failed,
+        shadowScoring: shadowSummary,
+        scoringVersions: Object.keys(scoringVersions).length > 0 ? scoringVersions : undefined,
+        dynamicScoringVersions:
+          Object.keys(dynamicScoringVersions).length > 0 ? dynamicScoringVersions : undefined,
       },
       timestamp: Date.now(),
     });
