@@ -158,6 +158,83 @@ export interface ShadowScoringSummary {
 }
 
 /**
+ * Tier 1 block reasons - why an identity didn't qualify for auto-merge
+ */
+export type Tier1BlockReason =
+  | 'no_bridge_signal'
+  | 'low_confidence'
+  | 'contradiction'
+  | 'name_mismatch'
+  | 'team_page'
+  | 'id_mismatch';
+
+/**
+ * Tier 1 signal sources - explicit-link signals only (no commit_email)
+ */
+export type Tier1SignalSource =
+  | 'linkedin_url_in_bio'
+  | 'linkedin_url_in_blog'
+  | 'linkedin_url_in_page'
+  | 'mutual_reference';
+
+/**
+ * Per-identity shadow sample for Tier-1 evaluation
+ */
+export interface Tier1ShadowSample {
+  platform: string;
+  platformId: string;
+  signals: Tier1SignalSource[];
+  blockReasons: Tier1BlockReason[];
+  confidenceScore: number;
+  wouldAutoMerge: boolean;
+  actuallyPromoted: boolean;
+  bridgeTier: BridgeTier;
+}
+
+/**
+ * Aggregated Tier-1 shadow diagnostics for runTrace
+ */
+export interface Tier1ShadowDiagnostics {
+  enabled: boolean;
+  enforce: boolean;
+  sampleRate: number;
+  totalEvaluated: number;
+  wouldAutoMerge: number;
+  actuallyPromoted: number;
+  blocked: number;
+  samples: Tier1ShadowSample[];
+  blockReasonCounts: Record<Tier1BlockReason, number>;
+}
+
+/**
+ * Create empty Tier-1 shadow diagnostics
+ */
+export function createEmptyTier1Shadow(
+  enabled: boolean,
+  enforce: boolean,
+  sampleRate: number
+): Tier1ShadowDiagnostics {
+  return {
+    enabled,
+    enforce,
+    sampleRate,
+    totalEvaluated: 0,
+    wouldAutoMerge: 0,
+    actuallyPromoted: 0,
+    blocked: 0,
+    samples: [],
+    blockReasonCounts: {
+      no_bridge_signal: 0,
+      low_confidence: 0,
+      contradiction: 0,
+      name_mismatch: 0,
+      team_page: 0,
+      id_mismatch: 0,
+    },
+  };
+}
+
+/**
  * Tier 1 signals - explicit bridges that support auto-merge
  */
 export const TIER_1_SIGNALS: BridgeSignal[] = [

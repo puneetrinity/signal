@@ -53,7 +53,13 @@ import {
   type BridgeSignal,
   type EnrichmentMetrics,
   type EnrichedHints,
+  type Tier1ShadowDiagnostics,
+  type Tier1ShadowSample,
+  type Tier1BlockReason,
+  type Tier1SignalSource,
   createEmptyMetrics,
+  createEmptyTier1Shadow,
+  TIER_1_SIGNALS,
 } from './bridge-types';
 import {
   extractAllHints,
@@ -126,6 +132,8 @@ export interface BridgeDiscoveryResult {
   metrics?: EnrichmentMetrics;
   /** Whether any Tier 1 bridge was found */
   hasTier1Bridge?: boolean;
+  /** Tier-1 shadow evaluation diagnostics */
+  tier1Shadow?: Tier1ShadowDiagnostics;
 }
 
 /**
@@ -136,6 +144,8 @@ export interface BridgeDiscoveryOptions {
   confidenceThreshold?: number;
   includeCommitEvidence?: boolean;
   maxCommitRepos?: number;
+  /** Session ID for deterministic Tier-1 shadow sampling */
+  sessionId?: string;
 }
 
 /**
@@ -145,6 +155,28 @@ export interface BridgeDiscoveryOptions {
  * Actual email extraction requires explicit confirmation flow.
  */
 const ENABLE_COMMIT_EMAIL_EVIDENCE = process.env.ENABLE_COMMIT_EMAIL_EVIDENCE === 'true';
+
+// Tier-1 shadow telemetry flags
+const TIER1_SHADOW = process.env.ENRICHMENT_TIER1_SHADOW !== 'false';
+const TIER1_ENFORCE = process.env.ENRICHMENT_TIER1_ENFORCE === 'true';
+const TIER1_SAMPLE_RATE = (() => {
+  const raw = parseFloat(process.env.ENRICHMENT_TIER1_SAMPLE_RATE ?? '');
+  if (!Number.isFinite(raw) || raw < 0) return 1;
+  return Math.min(raw, 1);
+})();
+
+/**
+ * Deterministic sampler: hash(sessionId + platformId) → 0..99
+ * Reproducible across reruns for the same identity.
+ */
+function deterministicSample(sessionId: string, platformId: string): number {
+  const key = `${sessionId}:${platformId}`;
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = ((hash << 5) - hash + key.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash) % 100;
+}
 
 function getBridgeQueryBudget(): number {
   const raw = process.env.ENRICHMENT_BRIDGE_QUERY_BUDGET;
@@ -162,6 +194,7 @@ const DEFAULT_OPTIONS: Required<BridgeDiscoveryOptions> = {
   confidenceThreshold: getEnrichmentMinConfidenceThreshold('BridgeDiscovery'),
   includeCommitEvidence: ENABLE_COMMIT_EMAIL_EVIDENCE,
   maxCommitRepos: 3,
+  sessionId: '',
 };
 
 /**
@@ -706,6 +739,12 @@ export async function discoverGitHubIdentities(
   metrics.scoringVersion = STATIC_SCORER_VERSION;
   metrics.dynamicScoringVersion = DYNAMIC_SCORER_VERSION;
 
+  // Initialize Tier-1 shadow diagnostics
+  const tier1Shadow = TIER1_SHADOW
+    ? createEmptyTier1Shadow(true, TIER1_ENFORCE, TIER1_SAMPLE_RATE)
+    : undefined;
+  const shadowSessionId = opts.sessionId || candidateId;
+
   // Track Tier-2 identity count (global cap, not per-platform)
   let tier2Count = 0;
 
@@ -887,6 +926,60 @@ export async function discoverGitHubIdentities(
       // Get contradiction note (hasContradiction already computed above for Tier-1 boost)
       const { note: contradictionNote } = detectContradictions(scoreInput);
 
+      // Tier-1 shadow evaluation (log-only, no behavior change)
+      if (tier1Shadow && deterministicSample(shadowSessionId, login) < TIER1_SAMPLE_RATE * 100) {
+        const tier1Signals = bridge.signals.filter(
+          (s): s is Tier1SignalSource => (TIER_1_SIGNALS as string[]).includes(s)
+        );
+        const nameMismatch =
+          !!scoreInput.candidateName &&
+          !!scoreInput.platformName &&
+          baseScore.nameMatch < 0.1;
+        const hasTeamPageSignal = bridge.signals.includes('linkedin_url_in_team_page');
+        const hasIdMismatch =
+          !!hints.linkedinId &&
+          !!linkedInId &&
+          linkedInId.toLowerCase() !== hints.linkedinId.toLowerCase();
+
+        const blockReasons: Tier1BlockReason[] = [];
+        if (tier1Signals.length === 0) blockReasons.push('no_bridge_signal');
+        if (confidence < 0.85) blockReasons.push('low_confidence');
+        if (hasContradiction) blockReasons.push('contradiction');
+        if (nameMismatch) blockReasons.push('name_mismatch');
+        if (hasTeamPageSignal) blockReasons.push('team_page');
+        if (hasIdMismatch) blockReasons.push('id_mismatch');
+
+        const wouldAutoMerge = tier1Signals.length > 0 &&
+          confidence >= 0.85 &&
+          !hasContradiction &&
+          !nameMismatch &&
+          !hasTeamPageSignal &&
+          !hasIdMismatch;
+
+        const sample: Tier1ShadowSample = {
+          platform: 'github',
+          platformId: login,
+          signals: tier1Signals,
+          blockReasons,
+          confidenceScore: confidence,
+          wouldAutoMerge,
+          actuallyPromoted: false, // Always false - this PR is log-only
+          bridgeTier: bridge.tier,
+        };
+
+        tier1Shadow.totalEvaluated++;
+        if (wouldAutoMerge) tier1Shadow.wouldAutoMerge++;
+        if (!wouldAutoMerge) {
+          tier1Shadow.blocked++;
+          for (const reason of blockReasons) {
+            tier1Shadow.blockReasonCounts[reason]++;
+          }
+        }
+        if (tier1Shadow.samples.length < 20) {
+          tier1Shadow.samples.push(sample);
+        }
+      }
+
       const persistResult = shouldPersistWithBridge(
         scoreBreakdown,
         bridge,
@@ -1053,6 +1146,17 @@ export async function discoverGitHubIdentities(
     };
   }
 
+  // Log Tier-1 shadow summary
+  if (tier1Shadow && tier1Shadow.totalEvaluated > 0) {
+    log.info({
+      linkedinId: hints.linkedinId,
+      totalEvaluated: tier1Shadow.totalEvaluated,
+      wouldAutoMerge: tier1Shadow.wouldAutoMerge,
+      blocked: tier1Shadow.blocked,
+      blockReasonCounts: tier1Shadow.blockReasonCounts,
+    }, 'Tier-1 shadow');
+  }
+
   return {
     candidateId,
     linkedinId: hints.linkedinId,
@@ -1061,6 +1165,7 @@ export async function discoverGitHubIdentities(
     earlyStopReason,
     metrics,
     hasTier1Bridge,
+    tier1Shadow,
   };
 }
 

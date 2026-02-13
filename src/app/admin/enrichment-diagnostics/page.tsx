@@ -47,6 +47,24 @@ interface PlatformAggregate {
   unmatchedSamples: string[];
 }
 
+interface Tier1ShadowAggregate {
+  totalEvaluated: number;
+  wouldAutoMerge: number;
+  actuallyPromoted: number;
+  blocked: number;
+  blockReasonCounts: Record<string, number>;
+  sessionsWithData: number;
+  samples: Array<{
+    platform: string;
+    platformId: string;
+    signals: string[];
+    blockReasons: string[];
+    confidenceScore: number;
+    wouldAutoMerge: boolean;
+    bridgeTier: number;
+  }>;
+}
+
 interface DiagnosticsSummary {
   totalSessions: number;
   completed: number;
@@ -56,6 +74,7 @@ interface DiagnosticsSummary {
   platforms: Record<string, PlatformAggregate>;
   providers: Record<string, number>;
   failureReasons: Record<string, number>;
+  tier1Shadow: Tier1ShadowAggregate;
 }
 
 const DEFAULT_LIMIT = 200;
@@ -122,6 +141,15 @@ function buildSummary(sessions: SessionItem[]): DiagnosticsSummary {
     platforms: {},
     providers: {},
     failureReasons: {},
+    tier1Shadow: {
+      totalEvaluated: 0,
+      wouldAutoMerge: 0,
+      actuallyPromoted: 0,
+      blocked: 0,
+      blockReasonCounts: {},
+      sessionsWithData: 0,
+      samples: [],
+    },
   };
 
   for (const session of sessions) {
@@ -139,6 +167,40 @@ function buildSummary(sessions: SessionItem[]): DiagnosticsSummary {
     if (session.status === 'failed') {
       const failureReason = (trace.failureReason as string | undefined) || session.errorMessage || 'Unknown failure';
       summary.failureReasons[failureReason] = (summary.failureReasons[failureReason] || 0) + 1;
+    }
+
+    // Aggregate Tier-1 shadow from trace.final
+    const tier1Shadow = final.tier1Shadow as {
+      totalEvaluated?: number;
+      wouldAutoMerge?: number;
+      actuallyPromoted?: number;
+      blocked?: number;
+      blockReasonCounts?: Record<string, number>;
+      samples?: Array<Record<string, unknown>>;
+    } | undefined;
+    if (tier1Shadow && typeof tier1Shadow.totalEvaluated === 'number' && tier1Shadow.totalEvaluated > 0) {
+      summary.tier1Shadow.sessionsWithData++;
+      summary.tier1Shadow.totalEvaluated += tier1Shadow.totalEvaluated;
+      summary.tier1Shadow.wouldAutoMerge += tier1Shadow.wouldAutoMerge ?? 0;
+      summary.tier1Shadow.actuallyPromoted += tier1Shadow.actuallyPromoted ?? 0;
+      summary.tier1Shadow.blocked += tier1Shadow.blocked ?? 0;
+      for (const [reason, count] of Object.entries(tier1Shadow.blockReasonCounts || {})) {
+        summary.tier1Shadow.blockReasonCounts[reason] =
+          (summary.tier1Shadow.blockReasonCounts[reason] || 0) + (count || 0);
+      }
+      for (const sample of (tier1Shadow.samples || []) as Array<Record<string, unknown>>) {
+        if (summary.tier1Shadow.samples.length < 50) {
+          summary.tier1Shadow.samples.push({
+            platform: (sample.platform as string) || '',
+            platformId: (sample.platformId as string) || '',
+            signals: Array.isArray(sample.signals) ? (sample.signals as string[]) : [],
+            blockReasons: Array.isArray(sample.blockReasons) ? (sample.blockReasons as string[]) : [],
+            confidenceScore: (sample.confidenceScore as number) || 0,
+            wouldAutoMerge: (sample.wouldAutoMerge as boolean) || false,
+            bridgeTier: (sample.bridgeTier as number) || 3,
+          });
+        }
+      }
     }
 
     const providersUsed = (final.providersUsed || {}) as Record<string, number>;
@@ -472,6 +534,88 @@ export default function EnrichmentDiagnosticsPage() {
               </CardContent>
             </Card>
           </div>
+        )}
+
+        {!loading && !error && summary.tier1Shadow.sessionsWithData > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Tier-1 Shadow Evaluation</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 md:grid-cols-4 text-sm">
+                <div className="flex items-center justify-between">
+                  <span>Sessions with data</span>
+                  <Badge variant="outline">{summary.tier1Shadow.sessionsWithData}</Badge>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Total evaluated</span>
+                  <Badge variant="outline">{summary.tier1Shadow.totalEvaluated}</Badge>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Would auto-merge</span>
+                  <Badge variant="outline">{summary.tier1Shadow.wouldAutoMerge}</Badge>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Blocked</span>
+                  <Badge variant="outline">{summary.tier1Shadow.blocked}</Badge>
+                </div>
+              </div>
+              {Object.keys(summary.tier1Shadow.blockReasonCounts).length > 0 && (
+                <div>
+                  <div className="text-sm font-medium mb-2">Block Reasons</div>
+                  <div className="grid gap-1 text-sm">
+                    {Object.entries(summary.tier1Shadow.blockReasonCounts)
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([reason, count]) => (
+                        <div key={reason} className="flex items-center justify-between">
+                          <span className="text-muted-foreground">{reason}</span>
+                          <Badge variant="outline">{count}</Badge>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
+              {summary.tier1Shadow.samples.length > 0 && (
+                <div>
+                  <div className="text-sm font-medium mb-2">
+                    Samples ({summary.tier1Shadow.samples.length})
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-muted-foreground border-b">
+                          <th className="py-1">Platform</th>
+                          <th className="py-1">ID</th>
+                          <th className="py-1">Tier</th>
+                          <th className="py-1">Confidence</th>
+                          <th className="py-1">Signals</th>
+                          <th className="py-1">Block Reasons</th>
+                          <th className="py-1">Would Merge</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {summary.tier1Shadow.samples.map((sample, i) => (
+                          <tr key={i} className="border-b last:border-b-0">
+                            <td className="py-1">{sample.platform}</td>
+                            <td className="py-1 font-mono text-xs">{sample.platformId}</td>
+                            <td className="py-1">{sample.bridgeTier}</td>
+                            <td className="py-1">{sample.confidenceScore.toFixed(2)}</td>
+                            <td className="py-1 text-xs">{sample.signals.join(', ') || '-'}</td>
+                            <td className="py-1 text-xs">{sample.blockReasons.join(', ') || '-'}</td>
+                            <td className="py-1">
+                              <Badge variant={sample.wouldAutoMerge ? 'default' : 'outline'}>
+                                {sample.wouldAutoMerge ? 'Yes' : 'No'}
+                              </Badge>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
         )}
 
         {!loading && !error && (
