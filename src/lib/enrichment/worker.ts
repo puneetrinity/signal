@@ -14,13 +14,27 @@
 
 import http from 'http';
 import { startEnrichmentWorker, cleanupQueue, getQueueStats } from './queue';
+import { createLogger } from '@/lib/logger';
 
-const CONCURRENCY = parseInt(process.env.ENRICHMENT_WORKER_CONCURRENCY || '3', 10);
-const HEALTH_PORT = parseInt(process.env.PORT || '8080', 10);
+const log = createLogger('EnrichmentWorker');
 
-console.log('[EnrichmentWorker] Starting worker...');
-console.log(`[EnrichmentWorker] Concurrency: ${CONCURRENCY}`);
-console.log(`[EnrichmentWorker] Redis URL: ${process.env.REDIS_URL ? 'configured' : 'not configured (using localhost)'}`);
+function parsePositiveInt(raw: string | undefined, fallback: number, envName: string): number {
+  const parsed = Number.parseInt(raw || String(fallback), 10);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed;
+  }
+  log.warn({ envName, raw, default: fallback }, 'Invalid env value, using default');
+  return fallback;
+}
+
+const CONCURRENCY = parsePositiveInt(
+  process.env.ENRICHMENT_WORKER_CONCURRENCY,
+  3,
+  'ENRICHMENT_WORKER_CONCURRENCY'
+);
+const HEALTH_PORT = parsePositiveInt(process.env.PORT, 8080, 'PORT');
+
+log.info({ concurrency: CONCURRENCY, redisConfigured: !!process.env.REDIS_URL }, 'Starting worker');
 
 // Start the worker
 const worker = startEnrichmentWorker({ concurrency: CONCURRENCY });
@@ -48,20 +62,20 @@ const healthServer = http.createServer(async (req, res) => {
 });
 
 healthServer.listen(HEALTH_PORT, () => {
-  console.log(`[EnrichmentWorker] Health server listening on port ${HEALTH_PORT}`);
+  log.info({ port: HEALTH_PORT }, 'Health server listening');
 });
 
 // Graceful shutdown
 const shutdown = async (signal: string) => {
-  console.log(`[EnrichmentWorker] Received ${signal}, shutting down gracefully...`);
+  log.info({ signal }, 'Received signal, shutting down gracefully');
 
   try {
     healthServer.close();
     await cleanupQueue();
-    console.log('[EnrichmentWorker] Cleanup complete, exiting');
+    log.info('Cleanup complete, exiting');
     process.exit(0);
   } catch (error) {
-    console.error('[EnrichmentWorker] Error during shutdown:', error);
+    log.error({ err: error }, 'Error during shutdown');
     process.exit(1);
   }
 };
@@ -70,4 +84,4 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
 // Keep process alive
-console.log('[EnrichmentWorker] Worker started and listening for jobs');
+log.info('Worker started and listening for jobs');

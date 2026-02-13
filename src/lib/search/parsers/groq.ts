@@ -16,6 +16,10 @@
 import { z } from 'zod';
 import { generateObject } from 'ai';
 import type { ParserProvider, ParsedSearchQuery, ParserProviderType } from './types';
+import { createGroqModel } from '@/lib/ai/groq';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('GroqParser');
 
 /**
  * Valid role types for enrichment source selection
@@ -96,34 +100,6 @@ EXAMPLES:
 "ML researchers at Google" → count=10, role="ML Researcher", roleType="researcher"`;
 
 /**
- * Default Groq model for query parsing
- * Can be overridden via GROQ_MODEL env var
- */
-const DEFAULT_GROQ_MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct';
-
-/**
- * Dynamically load and create Groq model
- * This keeps @ai-sdk/groq as a runtime-only dependency
- * Uses string-based import to bypass TypeScript's module resolution
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function createGroqModel(apiKey: string): Promise<any> {
-  try {
-    // Use variable to prevent TypeScript from trying to resolve the module
-    const moduleName = '@ai-sdk/groq';
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const groqSdk: any = await import(/* webpackIgnore: true */ moduleName);
-    const groq = groqSdk.createGroq({ apiKey });
-    const model = process.env.GROQ_MODEL || DEFAULT_GROQ_MODEL;
-    return groq(model);
-  } catch {
-    throw new Error(
-      'Groq parser requires @ai-sdk/groq package. Install with: npm install @ai-sdk/groq'
-    );
-  }
-}
-
-/**
  * Groq Parser Provider Implementation
  */
 export const groqParser: ParserProvider = {
@@ -138,7 +114,7 @@ export const groqParser: ParserProvider = {
 
     try {
       const startTime = Date.now();
-      const model = await createGroqModel(apiKey);
+      const { model } = await createGroqModel(apiKey);
 
       const { object } = await generateObject({
         model,
@@ -147,9 +123,7 @@ export const groqParser: ParserProvider = {
       });
 
       const latency = Date.now() - startTime;
-      console.log(
-        `[Groq Parser] Parsed in ${latency}ms: "${query}" -> role="${object.role}", count=${object.count}`
-      );
+      log.info({ latency, query, role: object.role, count: object.count }, 'Parsed query');
 
       return {
         count: object.count,
@@ -162,7 +136,7 @@ export const groqParser: ParserProvider = {
         roleType: object.roleType,
       };
     } catch (error) {
-      console.error('[Groq Parser] Error:', error);
+      log.error({ err: error }, 'Failed to parse query');
       throw new Error(
         `Failed to parse query: ${error instanceof Error ? error.message : 'Unknown error'}`
       );

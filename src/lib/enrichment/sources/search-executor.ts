@@ -18,6 +18,9 @@
 
 import { getProvider, type RawSearchResult, type SearchProviderType } from '@/lib/search/providers';
 import type { EnrichmentPlatform, CandidateHints } from './types';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('EnrichmentSearch');
 
 // Replay mode types (inline to avoid external import)
 interface MockSearchResult {
@@ -33,7 +36,7 @@ let replayModule: {
 
 async function getReplayModule() {
   if (process.env.ENRICHMENT_EVAL_REPLAY === '1' && process.env.NODE_ENV === 'production') {
-    console.error('[SearchExecutor] ENRICHMENT_EVAL_REPLAY=1 is blocked in production');
+    log.error('ENRICHMENT_EVAL_REPLAY=1 is blocked in production');
     return null;
   }
   if (!replayModule && process.env.ENRICHMENT_EVAL_REPLAY === '1') {
@@ -42,7 +45,7 @@ async function getReplayModule() {
       const mod = await import(/* webpackIgnore: true */ '../../../../eval/replay');
       replayModule = mod;
     } catch (e) {
-      console.warn('[SearchExecutor] Replay mode enabled but module not found:', e);
+      log.warn({ error: e }, 'Replay mode enabled but module not found');
       return null;
     }
   }
@@ -135,7 +138,7 @@ async function searchRawWithFallback(
   const config = getEnrichmentProviderConfig();
   const primary = getProvider(config.primary);
 
-  console.log(`[EnrichmentSearch] Primary: ${config.primary}, Fallback: ${config.fallback || 'none'}`);
+  log.info({ primary: config.primary, fallback: config.fallback || 'none' }, 'Search provider configuration');
 
   let primaryResults: RawSearchResult[] = [];
   let primaryRateLimited = false;
@@ -146,14 +149,14 @@ async function searchRawWithFallback(
     primaryResults = await primary.searchRaw(query, maxResults);
 
     if (primaryResults.length >= config.minResultsBeforeFallback) {
-      console.log(`[EnrichmentSearch] Primary (${config.primary}) returned ${primaryResults.length} results`);
+      log.info({ provider: config.primary, resultCount: primaryResults.length }, 'Primary provider returned sufficient results');
       return { results: primaryResults, providerUsed: config.primary, rateLimited: false };
     }
 
-    console.log(`[EnrichmentSearch] Primary (${config.primary}) returned only ${primaryResults.length} results (min: ${config.minResultsBeforeFallback})`);
+    log.info({ provider: config.primary, resultCount: primaryResults.length, minRequired: config.minResultsBeforeFallback }, 'Primary provider returned insufficient results');
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    console.error(`[EnrichmentSearch] Primary (${config.primary}) failed:`, errorMsg);
+    log.error({ provider: config.primary, error: errorMsg }, 'Primary provider failed');
     // Detect rate limiting
     if (isRateLimitedError(error)) {
       primaryRateLimited = true;
@@ -165,15 +168,13 @@ async function searchRawWithFallback(
   if (config.fallback && config.fallback !== config.primary) {
     try {
       const fallback = getProvider(config.fallback);
-      console.log(`[EnrichmentSearch] Trying fallback: ${config.fallback}`);
+      log.info({ provider: config.fallback }, 'Trying fallback provider');
 
       fallbackResults = await fallback.searchRaw(query, maxResults);
-      console.log(
-        `[EnrichmentSearch] Fallback (${config.fallback}) returned ${fallbackResults.length} results`
-      );
+      log.info({ provider: config.fallback, resultCount: fallbackResults.length }, 'Fallback provider returned results');
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      console.error(`[EnrichmentSearch] Fallback (${config.fallback}) failed:`, errorMsg);
+      log.error({ provider: config.fallback, error: errorMsg }, 'Fallback provider failed');
       fallbackRateLimited = isRateLimitedError(error);
     }
   }
@@ -186,9 +187,7 @@ async function searchRawWithFallback(
         : fallbackResults.length > 0 && config.fallback
           ? config.fallback
           : config.primary;
-    console.log(
-      `[EnrichmentSearch] Using merged coverage: primary=${primaryResults.length}, fallback=${fallbackResults.length}, final=${mergedResults.length}`
-    );
+    log.info({ primaryCount: primaryResults.length, fallbackCount: fallbackResults.length, finalCount: mergedResults.length }, 'Using merged coverage');
     return {
       results: mergedResults,
       providerUsed,
@@ -196,7 +195,7 @@ async function searchRawWithFallback(
     };
   }
 
-  console.log('[EnrichmentSearch] No results from any provider');
+  log.info('No results from any provider');
   return {
     results: [],
     providerUsed: config.primary,
@@ -230,7 +229,7 @@ export async function searchRawWithEnrichmentProviders(
       };
     }
     // Fall through to real search if replay module not available
-    console.warn('[SearchExecutor] Replay mode enabled but falling back to real search');
+    log.warn('Replay mode enabled but falling back to real search');
   }
 
   const mergeAllQueries = process.env.ENRICHMENT_MERGE_PROVIDERS_ALL_QUERIES !== 'false';
@@ -644,7 +643,7 @@ export async function searchForPlatformWithMeta(
   query: string,
   maxResults: number = 10
 ): Promise<EnrichmentSearchResultWithMeta> {
-  console.log(`[SearchExecutor] Searching ${platform}: "${query}"`);
+  log.info({ platform, query }, 'Searching platform');
   const config = getEnrichmentProviderConfig();
 
   try {
@@ -669,7 +668,7 @@ export async function searchForPlatformWithMeta(
     };
 
     if (!pattern) {
-      console.warn(`[SearchExecutor] No pattern defined for platform: ${platform}`);
+      log.warn({ platform }, 'No pattern defined for platform');
       for (const result of rawResults) {
         addUnmatchedSample(result.url);
         if (unmatchedSampleUrls.length >= 3) break;
@@ -714,9 +713,7 @@ export async function searchForPlatformWithMeta(
       if (enrichedResults.length >= maxResults) break;
     }
 
-    console.log(
-      `[SearchExecutor] Found ${enrichedResults.length} ${platform} results from ${rawResults.length} total (${matchedCount} matched pattern) via ${providerUsed}`
-    );
+    log.info({ platform, enrichedCount: enrichedResults.length, rawCount: rawResults.length, matchedCount, provider: providerUsed }, 'Found platform results');
 
     return {
       results: enrichedResults,
@@ -727,7 +724,7 @@ export async function searchForPlatformWithMeta(
       provider: providerUsed,
     };
   } catch (error) {
-    console.error(`[SearchExecutor] Search failed for ${platform}:`, error);
+    log.error({ platform, error }, 'Search failed for platform');
     // Detect rate limiting from error messages
     const errorMsg = error instanceof Error ? error.message : String(error);
     const isRateLimited = /rate.?limit|429|too many requests/i.test(errorMsg);

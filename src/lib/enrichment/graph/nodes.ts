@@ -25,6 +25,7 @@ import {
 import { generateCandidateSummary } from '../summary/generate';
 import { shouldPersistIdentity, type ScoreBreakdown } from '../scoring';
 import { extractAllHints, extractNameFromSlug, applySerpMetaOverrides } from '../hint-extraction';
+import { getEnrichmentMinConfidenceThreshold } from '../config';
 import {
   type EnrichmentState,
   type PartialEnrichmentState,
@@ -35,19 +36,15 @@ import {
   type EnrichmentRunTrace,
   DEFAULT_BUDGET,
 } from './types';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('EnrichmentGraph');
 
 /**
  * Get the minimum confidence threshold from env or default
  */
 function getMinConfidence(): number {
-  const envValue = process.env.ENRICHMENT_MIN_CONFIDENCE;
-  if (envValue) {
-    const parsed = parseFloat(envValue);
-    if (!isNaN(parsed) && parsed >= 0 && parsed <= 1) {
-      return parsed;
-    }
-  }
-  return 0.25;
+  return getEnrichmentMinConfidenceThreshold('GraphNodes');
 }
 
 /**
@@ -89,6 +86,8 @@ function sanitizeSummaryMeta(value: unknown):
 function buildRunTrace(state: EnrichmentState): EnrichmentRunTrace {
   const platformResults: EnrichmentRunTrace['platformResults'] = {};
   const providersUsed: Record<string, number> = {};
+  const scoringVersions: Record<string, number> = {};
+  const dynamicScoringVersions: Record<string, number> = {};
   const rateLimitedProviders = new Set<string>();
 
   // Aggregate variant IDs across all platforms
@@ -108,6 +107,14 @@ function buildRunTrace(state: EnrichmentState): EnrichmentRunTrace {
         rateLimitedProviders.add(provider);
       }
     }
+    if (result.diagnostics?.scoringVersion) {
+      const version = result.diagnostics.scoringVersion;
+      scoringVersions[version] = (scoringVersions[version] || 0) + 1;
+    }
+    if (result.diagnostics?.dynamicScoringVersion) {
+      const version = result.diagnostics.dynamicScoringVersion;
+      dynamicScoringVersions[version] = (dynamicScoringVersions[version] || 0) + 1;
+    }
 
     // Collect variant IDs for canonical aggregation
     if (result.diagnostics?.variantsExecuted) {
@@ -124,6 +131,9 @@ function buildRunTrace(state: EnrichmentState): EnrichmentRunTrace {
       identitiesFound: result.identities.length,
       unmatchedSampleUrls: result.diagnostics?.unmatchedSampleUrls ?? [],
       shadowScoring: result.diagnostics?.shadowScoring,
+      scoringVersion: result.diagnostics?.scoringVersion,
+      dynamicScoringVersion: result.diagnostics?.dynamicScoringVersion,
+      scoringMode: result.diagnostics?.scoringMode,
       bestConfidence,
       durationMs: result.durationMs,
       error: result.error,
@@ -191,6 +201,9 @@ function buildRunTrace(state: EnrichmentState): EnrichmentRunTrace {
       bestConfidence,
       durationMs,
       providersUsed: Object.keys(providersUsed).length > 0 ? providersUsed : undefined,
+      scoringVersions: Object.keys(scoringVersions).length > 0 ? scoringVersions : undefined,
+      dynamicScoringVersions:
+        Object.keys(dynamicScoringVersions).length > 0 ? dynamicScoringVersions : undefined,
       rateLimitedProviders: rateLimitedProviders.size > 0 ? [...rateLimitedProviders] : undefined,
       variantStats,
       // Summary metadata for draft/verified tracking
@@ -313,9 +326,12 @@ export async function loadCandidateNode(
         data: { enrichmentStatus: 'in_progress' },
       })
       .catch((error) => {
-        console.warn(
-          `[LoadCandidateNode] Failed to set candidate ${state.candidateId} to in_progress:`,
-          error instanceof Error ? error.message : error
+        log.warn(
+          {
+            candidateId: state.candidateId,
+            error: error instanceof Error ? error.message : error,
+          },
+          'Failed to set candidate to in_progress'
         );
       });
 
@@ -422,6 +438,8 @@ export async function githubBridgeNode(
         profileCompleteness: i.scoreBreakdown.profileCompleteness,
         activityScore: i.scoreBreakdown.activityScore ?? i.scoreBreakdown.profileCompleteness ?? 0,
         total: i.scoreBreakdown.total,
+        scoringVersion: i.scoreBreakdown.scoringVersion,
+        scoringMode: i.scoreBreakdown.scoringMode,
       },
       evidence: i.evidence?.map((e) => ({
         type: 'commit_email' as const,
@@ -466,6 +484,9 @@ export async function githubBridgeNode(
         rateLimited: false,
         provider: 'github_api',
         shadowScoring: result.metrics?.shadowScoring,
+        scoringVersion: result.metrics?.scoringVersion,
+        dynamicScoringVersion: result.metrics?.dynamicScoringVersion,
+        scoringMode: result.metrics?.shadowScoring ? 'shadow' : 'static',
       },
     };
 
@@ -1041,9 +1062,13 @@ export async function persistResultsNode(
       } catch (dbError) {
         // Track DB error but continue with other identities
         persistStats.persistErrors++;
-        console.error(
-          `[PersistResults] DB error for ${identity.platform}/${identity.platformId}:`,
-          dbError instanceof Error ? dbError.message : dbError
+        log.error(
+          {
+            platform: identity.platform,
+            platformId: identity.platformId,
+            error: dbError instanceof Error ? dbError.message : dbError,
+          },
+          'DB error during identity persist'
         );
       }
     }
@@ -1293,8 +1318,9 @@ export async function generateSummaryNode(
 
     // Skip summary generation only if no identities were found at all
     if (state.identitiesFound.length === 0) {
-      console.log(
-        `[generateSummary] Skipping summary generation - no identities found`
+      log.info(
+        { candidateId: state.candidateId },
+        'Skipping summary generation - no identities found'
       );
 
       const skipEvent: EnrichmentProgressEvent = {
@@ -1347,8 +1373,13 @@ export async function generateSummaryNode(
       clearEphemeralPlatformData(sessionId);
     }
 
-    console.log(
-      `[generateSummary] Generated draft summary from ${identities.length} identities (mode: ${meta.mode})`
+    log.info(
+      {
+        candidateId: state.candidateId,
+        identityCount: identities.length,
+        mode: meta.mode,
+      },
+      'Generated draft summary'
     );
 
     const progressComplete: EnrichmentProgressEvent = {
@@ -1421,10 +1452,11 @@ export async function persistSummaryNode(
     // Build run trace for observability (Phase A.5)
     const runTrace = buildRunTrace(state);
 
-    // Prisma client types may be stale until `prisma generate` runs in the target environment.
-    // Use a narrow `any` cast to allow compilation while keeping runtime behavior correct.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const updateData: any = {
+    type EnrichmentSessionUpdateWithSummaryGeneratedAt = Prisma.EnrichmentSessionUpdateInput & {
+      summaryGeneratedAt?: Date;
+    };
+
+    const updateData: EnrichmentSessionUpdateWithSummaryGeneratedAt = {
       summary: state.summaryText || null,
       summaryStructured: state.summaryStructured
         ? (JSON.parse(JSON.stringify(state.summaryStructured)) as Prisma.InputJsonValue)
@@ -1450,13 +1482,22 @@ export async function persistSummaryNode(
     // Log key metrics for quick debugging
     // Format: found→aboveMin→passGuard→persisted (errors if any)
     const f = runTrace.final;
-    const errorSuffix = f.persistErrors ? ` persistErrors=${f.persistErrors}` : '';
-    console.log(`[EnrichmentRunTrace] candidateId=${state.candidateId} ` +
-      `queries=${f.totalQueriesExecuted} ` +
-      `platformsQueried=${f.platformsQueried} platformsWithHits=${f.platformsWithHits} ` +
-      `identities=${f.identitiesFoundTotal}→${f.identitiesAboveMinConfidence}→${f.identitiesPassingPersistGuard}→${f.identitiesPersisted} ` +
-      `bestConfidence=${f.bestConfidence?.toFixed(2) ?? 'N/A'} ` +
-      `duration=${f.durationMs}ms${errorSuffix}`);
+    log.info(
+      {
+        candidateId: state.candidateId,
+        queries: f.totalQueriesExecuted,
+        platformsQueried: f.platformsQueried,
+        platformsWithHits: f.platformsWithHits,
+        identitiesFoundTotal: f.identitiesFoundTotal,
+        identitiesAboveMinConfidence: f.identitiesAboveMinConfidence,
+        identitiesPassingPersistGuard: f.identitiesPassingPersistGuard,
+        identitiesPersisted: f.identitiesPersisted,
+        persistErrors: f.persistErrors,
+        bestConfidence: f.bestConfidence,
+        durationMs: f.durationMs,
+      },
+      'Enrichment run trace'
+    );
 
     await prisma.candidate
       .update({
@@ -1468,9 +1509,12 @@ export async function persistSummaryNode(
         },
       })
       .catch((error) => {
-        console.warn(
-          `[PersistSummaryNode] Failed to finalize candidate ${state.candidateId} status:`,
-          error instanceof Error ? error.message : error
+        log.warn(
+          {
+            candidateId: state.candidateId,
+            error: error instanceof Error ? error.message : error,
+          },
+          'Failed to finalize candidate status'
         );
       });
 

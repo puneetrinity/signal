@@ -11,6 +11,10 @@
  * @see docs/ARCHITECTURE_V2.1.md
  */
 
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('GitHub');
+
 /**
  * GitHub user search result
  */
@@ -136,7 +140,7 @@ let replayModule: {
 
 async function getReplayModule() {
   if (process.env.ENRICHMENT_EVAL_REPLAY === '1' && process.env.NODE_ENV === 'production') {
-    console.error('[GitHub] ENRICHMENT_EVAL_REPLAY=1 is blocked in production');
+    log.error('ENRICHMENT_EVAL_REPLAY=1 is blocked in production');
     return null;
   }
   if (!replayModule && process.env.ENRICHMENT_EVAL_REPLAY === '1') {
@@ -146,7 +150,7 @@ async function getReplayModule() {
       const mod = await import(/* webpackIgnore: true */ '../../../eval/replay');
       replayModule = mod;
     } catch (e) {
-      console.warn('[GitHub] Replay mode enabled but module not found:', e);
+      log.warn({ err: e }, 'Replay mode enabled but module not found');
       return null;
     }
   }
@@ -208,9 +212,7 @@ export class GitHubClient {
       const msUntilReset = this.rateLimitReset.getTime() - Date.now();
       if (msUntilReset > 0 && msUntilReset < 60000) {
         // Wait up to 1 minute for reset
-        console.log(
-          `[GitHub] Rate limit exhausted, waiting ${Math.ceil(msUntilReset / 1000)}s for reset`
-        );
+        log.info({ waitSec: Math.ceil(msUntilReset / 1000) }, 'Rate limit exhausted, waiting for reset');
         await sleep(msUntilReset + 1000); // Add 1s buffer
       }
     }
@@ -284,9 +286,7 @@ export class GitHubClient {
             : calculateBackoff(attempt, this.retryConfig);
 
           if (attempt < this.retryConfig.maxRetries && waitMs < 60000) {
-            console.log(
-              `[GitHub] Rate limited (${response.status}), retrying in ${Math.ceil(waitMs / 1000)}s (attempt ${attempt + 1}/${this.retryConfig.maxRetries})`
-            );
+            log.info({ status: response.status, waitSec: Math.ceil(waitMs / 1000), attempt: attempt + 1, maxRetries: this.retryConfig.maxRetries }, 'Rate limited, retrying');
             await sleep(waitMs);
             continue;
           }
@@ -306,9 +306,7 @@ export class GitHubClient {
           // Retry on 5xx errors
           if (response.status >= 500 && attempt < this.retryConfig.maxRetries) {
             const waitMs = calculateBackoff(attempt, this.retryConfig);
-            console.log(
-              `[GitHub] Server error (${response.status}), retrying in ${Math.ceil(waitMs / 1000)}s (attempt ${attempt + 1}/${this.retryConfig.maxRetries})`
-            );
+            log.info({ status: response.status, waitSec: Math.ceil(waitMs / 1000), attempt: attempt + 1, maxRetries: this.retryConfig.maxRetries }, 'Server error, retrying');
             await sleep(waitMs);
             continue;
           }
@@ -323,9 +321,7 @@ export class GitHubClient {
 
         // Log warning if rate limit is getting low
         if (this.rateLimitRemaining < 100) {
-          console.warn(
-            `[GitHub] Rate limit low: ${this.rateLimitRemaining} remaining, resets at ${this.rateLimitReset?.toISOString()}`
-          );
+          log.warn({ remaining: this.rateLimitRemaining, resetAt: this.rateLimitReset?.toISOString() }, 'Rate limit low');
         }
 
         return response.json();
@@ -340,9 +336,7 @@ export class GitHubClient {
         // Retry on network errors
         if (attempt < this.retryConfig.maxRetries) {
           const waitMs = calculateBackoff(attempt, this.retryConfig);
-          console.log(
-            `[GitHub] Request failed, retrying in ${Math.ceil(waitMs / 1000)}s (attempt ${attempt + 1}/${this.retryConfig.maxRetries}): ${lastError.message}`
-          );
+          log.info({ attempt: attempt + 1, maxRetries: this.retryConfig.maxRetries, error: lastError.message }, 'Request failed, retrying');
           await sleep(waitMs);
         }
       }
@@ -495,17 +489,11 @@ export class GitHubClient {
           }
         } catch (error) {
           // Skip repos we can't access
-          console.warn(
-            `[GitHub] Failed to get commits for ${repo.full_name}:`,
-            error instanceof Error ? error.message : error
-          );
+          log.warn({ repo: repo.full_name, err: error }, 'Failed to get commits');
         }
       }
     } catch (error) {
-      console.error(
-        `[GitHub] Failed to get repos for ${username}:`,
-        error instanceof Error ? error.message : error
-      );
+      log.error({ username, err: error }, 'Failed to get repos');
     }
 
     return evidence;
@@ -528,12 +516,12 @@ export class GitHubClient {
   ): Promise<string | null> {
     // Check if email extraction is allowed
     if (process.env.DISABLE_EMAIL_EXTRACTION === 'true') {
-      console.warn('[GitHub] Email extraction disabled via DISABLE_EMAIL_EXTRACTION');
+      log.warn('Email extraction disabled via DISABLE_EMAIL_EXTRACTION');
       return null;
     }
 
     try {
-      console.log(`[GitHub] Extracting email from commit (compliance-sensitive operation)`);
+      log.info('Extracting email from commit (compliance-sensitive operation)');
 
       const commit = await this.request<GitHubCommit>(
         `/repos/${repoFullName}/commits/${commitSha}`
@@ -548,10 +536,7 @@ export class GitHubClient {
 
       return null;
     } catch (error) {
-      console.error(
-        `[GitHub] Failed to extract email from commit ${commitSha}:`,
-        error instanceof Error ? error.message : error
-      );
+      log.error({ commitSha, err: error }, 'Failed to extract email from commit');
       return null;
     }
   }
@@ -661,10 +646,7 @@ export function getGitHubClient(): GitHubClient {
     // Log warning about unauthenticated rate limits
     if (!process.env.GITHUB_TOKEN && !hasLoggedTokenWarning) {
       hasLoggedTokenWarning = true;
-      console.warn(
-        '[GitHub] ⚠️  GITHUB_TOKEN not set - using unauthenticated rate limits (60 req/hr vs 5000 req/hr with token). ' +
-        'Get a token at: https://github.com/settings/tokens'
-      );
+      log.warn('GITHUB_TOKEN not set - using unauthenticated rate limits (60 req/hr vs 5000 req/hr with token)');
     }
   }
   return githubClient;

@@ -35,6 +35,10 @@ import {
   type BridgeDetection,
   type BridgeTier,
 } from './scoring';
+import {
+  STATIC_SCORER_VERSION,
+  DYNAMIC_SCORER_VERSION,
+} from './scoring-metadata';
 import { searchRawMergedProviders } from './sources/search-executor';
 import {
   discoverAcrossSources,
@@ -56,6 +60,11 @@ import {
   extractAllHintsWithConfidence,
   mergeHintsFromSerpMeta,
 } from './hint-extraction';
+import { getEnrichmentMinConfidenceThreshold } from './config';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('BridgeDiscovery');
+const urlLog = createLogger('UrlAnchoredDiscovery');
 
 /**
  * Candidate hints from search results (NOT scraped data)
@@ -137,22 +146,20 @@ export interface BridgeDiscoveryOptions {
  */
 const ENABLE_COMMIT_EMAIL_EVIDENCE = process.env.ENABLE_COMMIT_EMAIL_EVIDENCE === 'true';
 
-function getBridgeConfidenceThreshold(): number {
-  const raw = process.env.ENRICHMENT_MIN_CONFIDENCE;
-  if (!raw) return 0.20;
-  const parsed = Number.parseFloat(raw);
-  if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 1) {
+function getBridgeQueryBudget(): number {
+  const raw = process.env.ENRICHMENT_BRIDGE_QUERY_BUDGET;
+  if (!raw) return 8;
+  const parsed = Number.parseInt(raw, 10);
+  if (Number.isFinite(parsed) && parsed > 0) {
     return parsed;
   }
-  console.warn(
-    `[BridgeDiscovery] Invalid ENRICHMENT_MIN_CONFIDENCE="${raw}", using default 0.20`
-  );
-  return 0.20;
+  log.warn({ rawValue: raw, default: 8 }, 'Invalid ENRICHMENT_BRIDGE_QUERY_BUDGET, using default 8');
+  return 8;
 }
 
 const DEFAULT_OPTIONS: Required<BridgeDiscoveryOptions> = {
   maxGitHubResults: 5,
-  confidenceThreshold: getBridgeConfidenceThreshold(),
+  confidenceThreshold: getEnrichmentMinConfidenceThreshold('BridgeDiscovery'),
   includeCommitEvidence: ENABLE_COMMIT_EMAIL_EVIDENCE,
   maxCommitRepos: 3,
 };
@@ -291,7 +298,7 @@ function buildSearchQueries(
   }
 
   // Enforce query budget
-  const maxQueries = parseInt(process.env.ENRICHMENT_BRIDGE_QUERY_BUDGET || '8', 10);
+  const maxQueries = getBridgeQueryBudget();
   return queries.slice(0, maxQueries);
 }
 
@@ -507,7 +514,7 @@ export async function discoverUrlAnchoredBridges(
     metrics.totalQueries++;
   }
 
-  console.log(`[UrlAnchoredDiscovery] Executing ${queries.length} URL-anchored queries for ${hints.linkedinId}`);
+  urlLog.info({ queryCount: queries.length, linkedinId: hints.linkedinId }, 'Executing URL-anchored queries');
 
   for (const trackedQuery of queries) {
     try {
@@ -597,17 +604,17 @@ export async function discoverUrlAnchoredBridges(
         });
         metrics.candidatesFound += 1;
 
-        console.log(`[UrlAnchoredDiscovery] Found bridge: ${result.url} (signal: ${signal}, platform: ${platform || 'unknown'})`);
+        urlLog.info({ url: result.url, signal, platform: platform || 'unknown' }, 'Found bridge');
       }
     } catch (error) {
-      console.error(
-        `[UrlAnchoredDiscovery] Query failed: "${trackedQuery.query}"`,
-        error instanceof Error ? error.message : error
+      urlLog.error(
+        { query: trackedQuery.query, error: error instanceof Error ? error.message : error },
+        'Query failed'
       );
     }
   }
 
-  console.log(`[UrlAnchoredDiscovery] Found ${results.length} URL-anchored bridges`);
+  urlLog.info({ bridgeCount: results.length }, 'Found URL-anchored bridges');
   return { results, queriesExecuted: queries.length };
 }
 
@@ -696,6 +703,8 @@ export async function discoverGitHubIdentities(
 
   // Initialize metrics
   const metrics = createEmptyMetrics();
+  metrics.scoringVersion = STATIC_SCORER_VERSION;
+  metrics.dynamicScoringVersion = DYNAMIC_SCORER_VERSION;
 
   // Track Tier-2 identity count (global cap, not per-platform)
   let tier2Count = 0;
@@ -714,10 +723,12 @@ export async function discoverGitHubIdentities(
   const enrichedHints = mergeHintsFromSerpMeta(baseHints, hints.serpMeta);
 
   // Log hint confidence for debugging
-  console.log(`[BridgeDiscovery] Hint confidence for ${hints.linkedinId}: ` +
-    `name=${enrichedHints.nameHint.confidence.toFixed(2)}, ` +
-    `company=${enrichedHints.companyHint.confidence.toFixed(2)}, ` +
-    `location=${enrichedHints.locationHint.confidence.toFixed(2)}`);
+  log.info({
+    linkedinId: hints.linkedinId,
+    nameConfidence: enrichedHints.nameHint.confidence,
+    companyConfidence: enrichedHints.companyHint.confidence,
+    locationConfidence: enrichedHints.locationHint.confidence,
+  }, 'Hint confidence');
 
   // Run URL-anchored reverse link discovery via web search
   const { results: urlBridges, queriesExecuted: urlQueriesExecuted } =
@@ -729,9 +740,7 @@ export async function discoverGitHubIdentities(
   updateQueryMetrics(metrics, queries);
 
   if (queries.length === 0 && urlBridges.length === 0) {
-    console.warn(
-      `[BridgeDiscovery] No search queries for candidate ${hints.linkedinId} (no name hint)`
-    );
+    log.warn({ linkedinId: hints.linkedinId }, 'No search queries for candidate (no name hint)');
     return {
       candidateId,
       linkedinId: hints.linkedinId,
@@ -805,7 +814,7 @@ export async function discoverGitHubIdentities(
           opts.maxCommitRepos
         );
       } else if (queriesExecuted === 0) {
-        console.log('[BridgeDiscovery] Commit email evidence disabled (set ENABLE_COMMIT_EMAIL_EVIDENCE=true to enable)');
+        log.info('Commit email evidence disabled (set ENABLE_COMMIT_EMAIL_EVIDENCE=true to enable)');
       }
 
       const scoreInput = {
@@ -921,23 +930,28 @@ export async function discoverGitHubIdentities(
           serpPosition,
         });
 
-        console.log(
-          `[BridgeDiscovery] Found match: ${login} (confidence: ${confidence.toFixed(2)}, tier: ${bridge.tier}, reason: ${persistResult.reason})`
-        );
+        log.info({
+          login,
+          confidence,
+          tier: bridge.tier,
+          reason: persistResult.reason,
+        }, 'Found match');
 
         if (bridge.tier === 1) {
           earlyStopReason = 'tier1_bridge_found';
         }
       } else {
-        console.log(
-          `[BridgeDiscovery] Skipped: ${login} (tier: ${bridge.tier}, reason: ${persistResult.reason})`
-        );
+        log.info({
+          login,
+          tier: bridge.tier,
+          reason: persistResult.reason,
+        }, 'Skipped');
       }
     } catch (error) {
-      console.warn(
-        `[BridgeDiscovery] Failed to process ${login}:`,
-        error instanceof Error ? error.message : error
-      );
+      log.warn({
+        login,
+        error: error instanceof Error ? error.message : error,
+      }, 'Failed to process');
     }
   };
 
@@ -951,9 +965,11 @@ export async function discoverGitHubIdentities(
       try {
         queriesExecuted++;
 
-        console.log(
-          `[BridgeDiscovery] Searching GitHub for: "${trackedQuery.query}" [${trackedQuery.type}] (candidate: ${hints.linkedinId})`
-        );
+        log.info({
+          query: trackedQuery.query,
+          type: trackedQuery.type,
+          linkedinId: hints.linkedinId,
+        }, 'Searching GitHub');
 
         const searchResults = await github.searchUsers(trackedQuery.query, opts.maxGitHubResults);
         metrics.candidatesFound += searchResults.length;
@@ -965,10 +981,10 @@ export async function discoverGitHubIdentities(
 
         if (earlyStopReason) break;
       } catch (error) {
-        console.error(
-          `[BridgeDiscovery] Query failed: "${trackedQuery.query}"`,
-          error instanceof Error ? error.message : error
-        );
+        log.error({
+          query: trackedQuery.query,
+          error: error instanceof Error ? error.message : error,
+        }, 'Query failed');
       }
     }
   }
@@ -982,29 +998,39 @@ export async function discoverGitHubIdentities(
     return (a.serpPosition ?? Infinity) - (b.serpPosition ?? Infinity);
   });
 
-  console.log(
-    `[BridgeDiscovery] Completed for ${hints.linkedinId}: ${identitiesFound.length} identities found, ${queriesExecuted} queries executed, hasTier1: ${hasTier1Bridge}`
-  );
+  log.info({
+    linkedinId: hints.linkedinId,
+    identitiesFound: identitiesFound.length,
+    queriesExecuted,
+    hasTier1Bridge,
+  }, 'Completed');
 
   // Log metrics summary
-  console.log(`[BridgeDiscovery] Metrics: queries=${JSON.stringify(metrics.queriesByType)}, bridges=${metrics.totalBridges}, tiers=${JSON.stringify(metrics.identitiesByTier)}`);
+  log.info({
+    queriesByType: metrics.queriesByType,
+    totalBridges: metrics.totalBridges,
+    identitiesByTier: metrics.identitiesByTier,
+  }, 'Metrics');
 
   // Shadow scoring: log dynamic vs static comparison (no production impact)
   if (shadowScores.length > 0) {
     const bucketChanges = shadowScores.filter(s => s.bucketChanged);
     const avgDelta = shadowScores.reduce((sum, s) => sum + s.delta, 0) / shadowScores.length;
-    console.log(
-      `[BridgeDiscovery] Shadow scoring for ${hints.linkedinId}: ` +
-      `${shadowScores.length} profiles scored, avg delta=${avgDelta.toFixed(4)}, ` +
-      `bucket changes=${bucketChanges.length}`
-    );
+    log.info({
+      linkedinId: hints.linkedinId,
+      profilesScored: shadowScores.length,
+      avgDelta,
+      bucketChanges: bucketChanges.length,
+    }, 'Shadow scoring');
     if (bucketChanges.length > 0) {
       for (const change of bucketChanges) {
-        console.log(
-          `[BridgeDiscovery] Shadow bucket change: ${change.login} ` +
-          `${change.staticBucket}→${change.dynamicBucket} ` +
-          `(static=${change.staticScore.total.toFixed(3)}, dynamic=${change.dynamicScore.total.toFixed(3)})`
-        );
+        log.info({
+          login: change.login,
+          staticBucket: change.staticBucket,
+          dynamicBucket: change.dynamicBucket,
+          staticScore: change.staticScore.total,
+          dynamicScore: change.dynamicScore.total,
+        }, 'Shadow bucket change');
       }
     }
     // Attach shadow scores to metrics for runTrace persistence
@@ -1012,6 +1038,8 @@ export async function discoverGitHubIdentities(
       profilesScored: shadowScores.length,
       avgDelta,
       bucketChanges: bucketChanges.length,
+      staticScoringVersion: STATIC_SCORER_VERSION,
+      dynamicScoringVersion: DYNAMIC_SCORER_VERSION,
       details: shadowScores.map(s => ({
         login: s.login,
         staticTotal: s.staticScore.total,
@@ -1184,15 +1212,15 @@ export async function discoverAllPlatformIdentities(
       searchResult = await discoverAcrossSources(toSourceHints(hints), roleType, {
         maxResults: options.maxGitHubResults || 5,
         maxQueries: 3,
-        minConfidence: options.confidenceThreshold || 0.35,
+        minConfidence:
+          options.confidenceThreshold ?? getEnrichmentMinConfidenceThreshold('BridgeDiscovery'),
         maxSources: options.maxSources || 5,
         parallelism: 3,
       });
     } catch (error) {
-      console.error(
-        '[BridgeDiscovery] Search-based discovery failed:',
-        error instanceof Error ? error.message : error
-      );
+      log.error({
+        error: error instanceof Error ? error.message : error,
+      }, 'Search-based discovery failed');
     }
   }
 
@@ -1214,9 +1242,11 @@ export async function discoverAllPlatformIdentities(
   const totalQueriesExecuted =
     githubResult.queriesExecuted + (searchResult?.totalQueriesExecuted || 0);
 
-  console.log(
-    `[BridgeDiscovery] Total: ${allIdentities.length} identities from ${1 + (searchResult?.sourcesQueried.length || 0)} platforms, ${totalQueriesExecuted} queries`
-  );
+  log.info({
+    identities: allIdentities.length,
+    platforms: 1 + (searchResult?.sourcesQueried.length || 0),
+    queries: totalQueriesExecuted,
+  }, 'Total');
 
   return {
     githubResult,

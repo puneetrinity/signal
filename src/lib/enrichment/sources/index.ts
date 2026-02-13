@@ -20,6 +20,9 @@ import type {
   DiscoveredIdentity,
 } from './types';
 import { ROLE_SOURCE_PRIORITY, getSourcesForRole } from './types';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('SourceRegistry');
 
 // Import all sources
 import { stackOverflowSource } from './stackoverflow';
@@ -178,7 +181,7 @@ export function getSourcesForRoleType(roleType: RoleType): EnrichmentSource[] {
       if (unreliablePlatforms.has(config.platform)) {
         if (skipUnreliable) {
           // Skip entirely if configured
-          console.log(`[SourceRegistry] Skipping unreliable platform: ${config.platform}`);
+          log.info({ platform: config.platform }, 'Skipping unreliable platform');
           continue;
         }
         // Deprioritize - add to end
@@ -238,8 +241,13 @@ export async function discoverAcrossSources(
   // Get sources for this role in priority order
   const sourcesToQuery = getSourcesForRoleType(roleType).slice(0, maxSources);
 
-  console.log(
-    `[SourceRegistry] Discovering for ${hints.linkedinId} (${roleType}): ${sourcesToQuery.map((s) => s.platform).join(', ')}`
+  log.info(
+    {
+      linkedinId: hints.linkedinId,
+      roleType,
+      platforms: sourcesToQuery.map((s) => s.platform),
+    },
+    'Discovering across sources'
   );
 
   const platformResults: BridgeDiscoveryResult[] = [];
@@ -257,7 +265,7 @@ export async function discoverAcrossSources(
         return { success: true as const, result, platform: source.platform };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        console.error(`[SourceRegistry] ${source.platform} failed:`, errorMessage);
+        log.error({ platform: source.platform, error: errorMessage }, 'Source discovery failed');
         return {
           success: false as const,
           platform: source.platform,
@@ -281,7 +289,7 @@ export async function discoverAcrossSources(
       r.identities.some((i) => i.confidence >= 0.9)
     );
     if (highConfidenceFound) {
-      console.log('[SourceRegistry] High confidence match found, stopping early');
+      log.info('High confidence match found, stopping early');
       break;
     }
   }
@@ -299,8 +307,14 @@ export async function discoverAcrossSources(
   const totalQueriesExecuted = platformResults.reduce((sum, r) => sum + r.queriesExecuted, 0);
   const totalDurationMs = Date.now() - startTime;
 
-  console.log(
-    `[SourceRegistry] Completed for ${hints.linkedinId}: ${allIdentities.length} identities from ${sourcesQueried.length} sources in ${totalDurationMs}ms`
+  log.info(
+    {
+      linkedinId: hints.linkedinId,
+      identitiesFound: allIdentities.length,
+      sourcesQueried: sourcesQueried.length,
+      durationMs: totalDurationMs,
+    },
+    'Discovery completed'
   );
 
   return {

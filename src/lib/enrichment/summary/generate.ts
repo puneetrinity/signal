@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import type { EphemeralPlatformDataItem } from '@/lib/enrichment/graph/ephemeral';
 import type { DiscoveredIdentity } from '@/lib/enrichment/sources/types';
+import { createGroqModel } from '@/lib/ai/groq';
 
 export const CandidateSummaryStructuredSchema = z.object({
   skills: z.array(z.string().min(1).max(60)).max(30).default([]),
@@ -52,17 +53,6 @@ export interface GenerateSummaryInput {
   confirmedCount?: number;
 }
 
-async function createGroqModel(apiKey: string) {
-  const moduleName = '@ai-sdk/groq';
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const groqSdk: any = await import(/* webpackIgnore: true */ moduleName);
-  const groq = groqSdk.createGroq({ apiKey });
-  const modelName =
-    process.env.ENRICHMENT_SUMMARY_MODEL ||
-    process.env.GROQ_MODEL ||
-    'meta-llama/llama-4-scout-17b-16e-instruct';
-  return { model: groq(modelName), modelName };
-}
 
 function buildPrompt(input: GenerateSummaryInput): string {
   const {
@@ -159,7 +149,7 @@ export async function generateCandidateSummary(
   const mode = input.mode || 'draft';
   const confirmedCount = input.confirmedCount || 0;
 
-  const { model, modelName } = await createGroqModel(apiKey);
+  const { model, modelName } = await createGroqModel(apiKey, process.env.ENRICHMENT_SUMMARY_MODEL);
   const prompt = buildPrompt(input);
 
   const { object, usage } = await generateObject({

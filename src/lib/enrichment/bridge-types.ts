@@ -130,6 +130,10 @@ export interface EnrichmentMetrics {
   hasTier1Bridge: boolean;
   /** Shadow scoring diagnostics (dynamic vs static comparison) */
   shadowScoring?: ShadowScoringSummary;
+  /** Primary scorer version used for persisted/static scores */
+  scoringVersion?: string;
+  /** Dynamic scorer version when shadow scoring is emitted */
+  dynamicScoringVersion?: string;
 }
 
 /**
@@ -139,6 +143,8 @@ export interface ShadowScoringSummary {
   profilesScored: number;
   avgDelta: number;
   bucketChanges: number;
+  staticScoringVersion?: string;
+  dynamicScoringVersion?: string;
   details: Array<{
     login: string;
     staticTotal: number;
@@ -269,6 +275,10 @@ export function createEmptyMetrics(): EnrichmentMetrics {
 /**
  * Tier 2 persistence cap (global)
  */
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('BridgeTypes');
+
 function getTier2Cap(defaultValue: number = 3): number {
   const raw = process.env.ENRICHMENT_TIER2_CAP;
   if (!raw) return defaultValue;
@@ -276,9 +286,7 @@ function getTier2Cap(defaultValue: number = 3): number {
   if (Number.isFinite(parsed) && parsed > 0) {
     return parsed;
   }
-  console.warn(
-    `[BridgeTypes] Invalid ENRICHMENT_TIER2_CAP="${raw}", using default ${defaultValue}`
-  );
+  log.warn({ raw, default: defaultValue }, 'Invalid ENRICHMENT_TIER2_CAP, using default');
   return defaultValue;
 }
 

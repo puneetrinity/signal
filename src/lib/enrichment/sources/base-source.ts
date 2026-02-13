@@ -38,6 +38,9 @@ import {
   type BridgeDetection,
   createBridgeDetection,
 } from '../bridge-types';
+import { STATIC_SCORER_VERSION } from '../scoring-metadata';
+import { getEnrichmentMinConfidenceThreshold } from '../config';
+import { createLogger } from '@/lib/logger';
 
 /** Maximum rejection reasons to store in diagnostics */
 const MAX_REJECTION_REASONS = 10;
@@ -50,19 +53,6 @@ const SEARCH_SCORE_WEIGHTS = {
   location: 0.04,
   profileActivity: 0.03,
 } as const;
-
-function getValidatedMinConfidence(defaultValue: number = 0.20): number {
-  const raw = process.env.ENRICHMENT_MIN_CONFIDENCE;
-  if (!raw) return defaultValue;
-  const parsed = Number.parseFloat(raw);
-  if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 1) {
-    return parsed;
-  }
-  console.warn(
-    `[BaseSource] Invalid ENRICHMENT_MIN_CONFIDENCE="${raw}", using default ${defaultValue}`
-  );
-  return defaultValue;
-}
 
 /**
  * Query normalization (Phase B3)
@@ -109,7 +99,7 @@ const DEFAULT_OPTIONS: Required<DiscoveryOptions> = {
   maxResults: 5,
   maxQueries: 3,
   timeout: 30000,
-  minConfidence: getValidatedMinConfidence(0.20),
+  minConfidence: getEnrichmentMinConfidenceThreshold('BaseSource'),
 };
 
 /**
@@ -255,6 +245,11 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
   abstract readonly supportedRoles: RoleType[];
   abstract readonly baseWeight: number;
   abstract readonly queryPattern: string;
+
+  private _log?: ReturnType<typeof createLogger>;
+  protected get log() {
+    return (this._log ??= createLogger(this.displayName));
+  }
 
   /**
    * Build query candidates with mode metadata (Phase B)
@@ -466,6 +461,8 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
       profileCompleteness,
       activityScore,
       total,
+      scoringVersion: STATIC_SCORER_VERSION,
+      scoringMode: 'static',
     };
   }
 
@@ -580,7 +577,7 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
         const uniqueIds = new Set(linkedinUrls.map(u => u.id));
         if (uniqueIds.size > 1) {
           // Multiple LinkedIn profiles found - likely a team page, Tier 2 (no auto-merge)
-          console.log(`[BridgeSignal] Multiple LinkedIn URLs in bio (${uniqueIds.size}), using linkedin_url_in_team_page (Tier 2)`);
+          this.log.info({ uniqueIds: uniqueIds.size, signal: 'linkedin_url_in_team_page' }, 'Multiple LinkedIn URLs in bio, using linkedin_url_in_team_page (Tier 2)');
           signals.push('linkedin_url_in_team_page');
         } else {
           signals.push('linkedin_url_in_bio');
@@ -598,7 +595,7 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
         // Check for team page (multiple different LinkedIn URLs) -> Tier 2
         const uniqueIds = new Set(linkedinUrls.map(u => u.id));
         if (uniqueIds.size > 1) {
-          console.log(`[BridgeSignal] Multiple LinkedIn URLs in snippet (${uniqueIds.size}), using linkedin_url_in_team_page (Tier 2)`);
+          this.log.info({ uniqueIds: uniqueIds.size, signal: 'linkedin_url_in_team_page' }, 'Multiple LinkedIn URLs in snippet, using linkedin_url_in_team_page (Tier 2)');
           // Team page signal - Tier 2, no auto-merge
           signals.push('linkedin_url_in_team_page');
         } else if (!signals.includes('linkedin_url_in_bio') && !signals.includes('linkedin_url_in_team_page')) {
@@ -745,7 +742,7 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
         }));
 
     if (candidates.length === 0) {
-      console.log(`[${this.displayName}] No queries to execute for ${hints.linkedinId}`);
+      this.log.info({ linkedinId: hints.linkedinId }, 'No queries to execute');
       return {
         platform: this.platform,
         identities: [],
@@ -775,9 +772,7 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
     for (const candidate of candidates) {
       // Enforce max query budget per platform (normalization may add an extra query)
       if (queriesExecuted >= opts.maxQueries) {
-        console.log(
-          `[${this.displayName}] Budget reached (${opts.maxQueries} queries), stopping for ${hints.linkedinId}`
-        );
+        this.log.info({ maxQueries: opts.maxQueries, linkedinId: hints.linkedinId }, 'Budget reached, stopping');
         break;
       }
 
@@ -793,9 +788,7 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
         if (candidate.variantId) {
           variantsRejected.push(candidate.variantId);
         }
-        console.log(
-          `[${this.displayName}] Query rejected (${candidate.mode}): "${candidate.query}" - ${validation.reason}`
-        );
+        this.log.info({ mode: candidate.mode, query: candidate.query, reason: validation.reason }, 'Query rejected');
         continue;
       }
 
@@ -806,9 +799,7 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
           mode: typeof candidate.mode
         ) => {
           if (queriesExecuted >= opts.maxQueries) {
-            console.log(
-              `[${this.displayName}] Budget exhausted before query execution, skipping "${query}"`
-            );
+            this.log.info({ query }, 'Budget exhausted before query execution, skipping');
             return {
               results: [],
               rawResultCount: 0,
@@ -822,9 +813,7 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
           searchQueries.push(query);
           if (variantId) variantsExecuted.push(variantId);
 
-          console.log(
-            `[${this.displayName}] Query ${queriesExecuted}/${opts.maxQueries}: "${query}" [${mode}]${variantId ? ` (${variantId})` : ''}`
-          );
+          this.log.info({ queriesExecuted, maxQueries: opts.maxQueries, query, mode, variantId }, 'Executing query');
 
           const searchResult = await searchForPlatformWithMeta(this.platform, query, opts.maxResults);
           totalRawResults += searchResult.rawResultCount;
@@ -900,17 +889,13 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
           // Skip if below threshold UNLESS we have strong bridge signals (Tier 1 or 2)
           const hasStrongBridgeSignals = bridge.tier === 1 || bridge.tier === 2;
           if (scoreBreakdown.total < opts.minConfidence && !hasStrongBridgeSignals) {
-            console.log(
-              `[${this.displayName}] Skipping ${result.platformId} (confidence: ${scoreBreakdown.total.toFixed(2)} < ${opts.minConfidence}, no strong bridge signals)`
-            );
+            this.log.info({ platformId: result.platformId, confidence: scoreBreakdown.total, minConfidence: opts.minConfidence }, 'Skipping, confidence below threshold with no strong bridge signals');
             continue;
           }
 
           // Log if we're keeping a low-confidence match due to bridge signals
           if (scoreBreakdown.total < opts.minConfidence && hasStrongBridgeSignals) {
-            console.log(
-              `[${this.displayName}] Keeping ${result.platformId} despite low confidence (${scoreBreakdown.total.toFixed(2)}) due to Tier-${bridge.tier} bridge signals: ${bridge.signals.join(', ')}`
-            );
+            this.log.info({ platformId: result.platformId, confidence: scoreBreakdown.total, tier: bridge.tier, signals: bridge.signals }, 'Keeping despite low confidence due to bridge signals');
           }
 
           identitiesAboveThreshold++;
@@ -939,13 +924,11 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
 
           identities.push(identity);
 
-          console.log(
-            `[${this.displayName}] Found: ${result.platformId} (confidence: ${scoreBreakdown.total.toFixed(2)}, tier: ${bridge.tier}, bucket: ${identity.confidenceBucket})`
-          );
+          this.log.info({ platformId: result.platformId, confidence: scoreBreakdown.total, tier: bridge.tier, bucket: identity.confidenceBucket }, 'Found identity');
 
           // Early stop on high confidence match
           if (scoreBreakdown.total >= 0.9) {
-            console.log(`[${this.displayName}] Early stop: high confidence match found`);
+            this.log.info('Early stop: high confidence match found');
             break;
           }
         }
@@ -955,12 +938,9 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
           break;
         }
       } catch (error) {
-        console.error(
-          `[${this.displayName}] Query failed: "${candidate.query}"`,
-          error instanceof Error ? error.message : error
-        );
-        // Check for rate limiting in error
         const errorMsg = error instanceof Error ? error.message : String(error);
+        this.log.error({ query: candidate.query, error: errorMsg }, 'Query failed');
+        // Check for rate limiting in error
         if (/rate.?limit|429|too many requests/i.test(errorMsg)) {
           wasRateLimited = true;
         }
@@ -987,6 +967,8 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
       identitiesAboveThreshold,
       rateLimited: wasRateLimited,
       provider: lastProvider,
+      scoringVersion: STATIC_SCORER_VERSION,
+      scoringMode: 'static',
     };
 
     const result: BridgeDiscoveryResult = {
@@ -998,9 +980,7 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
       diagnostics,
     };
 
-    console.log(
-      `[${this.displayName}] Completed for ${hints.linkedinId}: ${identities.length} identities, ${queriesExecuted} queries (${queriesRejected} rejected), ${result.durationMs}ms (raw: ${totalRawResults}, matched: ${totalMatchedResults})`
-    );
+    this.log.info({ linkedinId: hints.linkedinId, identities: identities.length, queriesExecuted, queriesRejected, durationMs: result.durationMs, rawResults: totalRawResults, matchedResults: totalMatchedResults }, 'Discovery completed');
 
     return result;
   }

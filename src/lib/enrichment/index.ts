@@ -11,6 +11,7 @@
  */
 
 import { prisma } from '@/lib/prisma';
+import { createLogger } from '@/lib/logger';
 import {
   discoverGitHubIdentities,
   discoverAllPlatformIdentities,
@@ -21,6 +22,8 @@ import {
 } from './bridge-discovery';
 import type { Candidate, EnrichmentSession, IdentityCandidate } from '@prisma/client';
 import { applySerpMetaOverrides } from './hint-extraction';
+
+const log = createLogger('Enrichment');
 
 // Re-export types
 export * from './github';
@@ -298,7 +301,7 @@ export async function enrichCandidate(
 
     if (enableMultiPlatform) {
       // Use new multi-platform discovery
-      console.log(`[Enrichment] Multi-platform discovery for ${candidateId} (role: ${candidate.roleType})`);
+      log.info({ candidateId, roleType: candidate.roleType }, 'Multi-platform discovery');
 
       const multiResult = await discoverAllPlatformIdentities(candidateId, hints, {
         ...options,
@@ -351,10 +354,7 @@ export async function enrichCandidate(
         );
         identitiesStored++;
       } catch (error) {
-        console.error(
-          `[Enrichment] Failed to store identity ${identity.platformId}:`,
-          error
-        );
+        log.error({ platformId: identity.platformId, error }, 'Failed to store identity');
       }
     }
     const persistErrors = allIdentities.length - identitiesStored;
@@ -488,7 +488,7 @@ export async function enrichCandidates(
       const failureStage = determineFailureStage(error);
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-      console.error(`[Enrichment] Failed to enrich ${candidateId} (${failureStage}):`, error);
+      log.error({ candidateId, failureStage, error }, 'Failed to enrich');
 
       results.push({
         candidateId,

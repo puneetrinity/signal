@@ -25,6 +25,14 @@ import { getEnrichmentProvider } from '../provider';
 import { getTenantSettings } from '@/lib/tenant/settings';
 import { logPiiAccess } from '@/lib/audit';
 import type { DiscoveredIdentity } from '../sources/types';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('EnrichmentQueue');
+
+/** Single contained cast for JSON values going into Prisma */
+function toJsonValue(value: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
 
 /**
  * Queue names
@@ -108,6 +116,46 @@ export interface EnrichmentSession {
 
   createdAt: string;
   updatedAt: string;
+}
+
+type PrismaEnrichmentSessionRecord = NonNullable<
+  Awaited<ReturnType<typeof prisma.enrichmentSession.findFirst>>
+>;
+
+function toOptionalIsoString(value: unknown): string | null {
+  return value instanceof Date ? value.toISOString() : null;
+}
+
+function mapSessionToDto(session: PrismaEnrichmentSessionRecord): EnrichmentSession {
+  const summaryGeneratedAt = toOptionalIsoString(session.summaryGeneratedAt);
+
+  return {
+    id: session.id,
+    candidateId: session.candidateId,
+    status: session.status as EnrichmentSessionStatus,
+    roleType: session.roleType as RoleType | null,
+    sourcesPlanned: session.sourcesPlanned as string[] | null,
+    sourcesExecuted: session.sourcesExecuted as string[] | null,
+    queriesPlanned: session.queriesPlanned,
+    queriesExecuted: session.queriesExecuted,
+    earlyStopReason: session.earlyStopReason,
+    identitiesFound: session.identitiesFound,
+    identitiesConfirmed: session.identitiesConfirmed,
+    finalConfidence: session.finalConfidence,
+    errorMessage: session.errorMessage,
+    errorDetails: session.errorDetails as unknown | null,
+    startedAt: session.startedAt?.toISOString() ?? null,
+    completedAt: session.completedAt?.toISOString() ?? null,
+    durationMs: session.durationMs,
+    summary: session.summary,
+    summaryStructured: session.summaryStructured as unknown | null,
+    summaryEvidence: session.summaryEvidence as unknown | null,
+    summaryModel: session.summaryModel,
+    summaryTokens: session.summaryTokens,
+    summaryGeneratedAt,
+    createdAt: session.createdAt.toISOString(),
+    updatedAt: session.updatedAt.toISOString(),
+  };
 }
 
 /**
@@ -194,7 +242,7 @@ export async function createEnrichmentSession(
         candidateId,
         status: 'queued',
         roleType: options?.roleType ?? null,
-        sourcesExecuted: [] as unknown as Prisma.InputJsonValue,
+        sourcesExecuted: toJsonValue([]),
         queriesPlanned: options?.budget?.maxQueries || null,
         queriesExecuted: 0,
         identitiesFound: 0,
@@ -203,7 +251,7 @@ export async function createEnrichmentSession(
       },
     });
   } catch (error) {
-    console.error('[EnrichmentQueue] Failed to create session:', error);
+    log.error({ error, sessionId, candidateId, tenantId }, 'Failed to create session');
     throw new Error(`Failed to create enrichment session: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 
@@ -225,9 +273,7 @@ export async function createEnrichmentSession(
     }
   );
 
-  console.log(
-    `[EnrichmentQueue] Created session ${sessionId} for candidate ${candidateId} (tenant: ${tenantId}), job ${job.id}`
-  );
+  log.info({ sessionId, candidateId, tenantId, jobId: job.id }, 'Created session');
 
   return { sessionId, jobId: job.id! };
 }
@@ -254,7 +300,7 @@ export async function createSummaryOnlySession(
         candidateId,
         status: 'queued',
         roleType: null,
-        sourcesExecuted: [] as unknown as Prisma.InputJsonValue,
+        sourcesExecuted: toJsonValue([]),
         queriesPlanned: 0,
         queriesExecuted: 0,
         identitiesFound: 0,
@@ -262,7 +308,7 @@ export async function createSummaryOnlySession(
       },
     });
   } catch (error) {
-    console.error('[EnrichmentQueue] Failed to create summary-only session:', error);
+    log.error({ error, sessionId, candidateId, tenantId }, 'Failed to create summary-only session');
     throw new Error(`Failed to create summary-only session: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 
@@ -283,9 +329,7 @@ export async function createSummaryOnlySession(
     }
   );
 
-  console.log(
-    `[EnrichmentQueue] Created summary-only session ${sessionId} for candidate ${candidateId} (tenant: ${tenantId}), job ${job.id}`
-  );
+  log.info({ sessionId, candidateId, tenantId, jobId: job.id }, 'Created summary-only session');
 
   return { sessionId, jobId: job.id! };
 }
@@ -304,20 +348,7 @@ export async function getEnrichmentSession(
     return null;
   }
 
-  // Convert Prisma dates to ISO strings
-  // Prisma client types may be stale until `prisma generate` runs in the target environment.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const sessionAny: any = session;
-  return {
-    ...sessionAny,
-    sourcesPlanned: session.sourcesPlanned as string[] | null,
-    sourcesExecuted: session.sourcesExecuted as string[] | null,
-    startedAt: session.startedAt?.toISOString() || null,
-    completedAt: session.completedAt?.toISOString() || null,
-    summaryGeneratedAt: sessionAny.summaryGeneratedAt?.toISOString?.() || null,
-    createdAt: session.createdAt.toISOString(),
-    updatedAt: session.updatedAt.toISOString(),
-  } as EnrichmentSession;
+  return mapSessionToDto(session);
 }
 
 /**
@@ -333,19 +364,7 @@ export async function getRecentSessions(
     take: limit,
   });
 
-  // Convert Prisma dates to ISO strings
-  return sessions.map((session) => ({
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ...(session as any),
-    sourcesPlanned: session.sourcesPlanned as string[] | null,
-    sourcesExecuted: session.sourcesExecuted as string[] | null,
-    startedAt: session.startedAt?.toISOString() || null,
-    completedAt: session.completedAt?.toISOString() || null,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    summaryGeneratedAt: (session as any).summaryGeneratedAt?.toISOString?.() || null,
-    createdAt: session.createdAt.toISOString(),
-    updatedAt: session.updatedAt.toISOString(),
-  })) as EnrichmentSession[];
+  return sessions.map(mapSessionToDto);
 }
 
 /**
@@ -382,13 +401,13 @@ async function updateSessionStatus(
     if (updates.completedAt !== undefined) data.completedAt = updates.completedAt;
 
     if (updates.sourcesPlanned !== undefined) {
-      data.sourcesPlanned = JSON.parse(JSON.stringify(updates.sourcesPlanned)) as Prisma.InputJsonValue;
+      data.sourcesPlanned = toJsonValue(updates.sourcesPlanned);
     }
     if (updates.sourcesExecuted !== undefined) {
-      data.sourcesExecuted = JSON.parse(JSON.stringify(updates.sourcesExecuted)) as Prisma.InputJsonValue;
+      data.sourcesExecuted = toJsonValue(updates.sourcesExecuted);
     }
     if (updates.errorDetails !== undefined) {
-      data.errorDetails = JSON.parse(JSON.stringify(updates.errorDetails)) as Prisma.InputJsonValue;
+      data.errorDetails = toJsonValue(updates.errorDetails);
     }
 
     await prisma.enrichmentSession.update({
@@ -396,7 +415,7 @@ async function updateSessionStatus(
       data,
     });
   } catch (error) {
-    console.error('[EnrichmentQueue] Failed to update session:', error);
+    log.error({ error, sessionId, updates }, 'Failed to update session');
   }
 }
 
@@ -410,7 +429,7 @@ async function processSummaryOnlyJob(
   const { sessionId, candidateId, tenantId } = job.data;
   const startTime = Date.now();
 
-  console.log(`[EnrichmentWorker] Processing summary-only job ${job.id} for candidate ${candidateId} (tenant: ${tenantId})`);
+  log.info({ jobId: job.id, candidateId, tenantId, sessionId }, 'Processing summary-only job');
 
   // Update session to running
   await updateSessionStatus(sessionId, {
@@ -513,9 +532,7 @@ async function processSummaryOnlyJob(
       confirmedCount: confirmedIdentities.length,
     });
 
-    console.log(
-      `[EnrichmentWorker] Generated verified summary from ${confirmedIdentities.length} confirmed identities`
-    );
+    log.info({ confirmedIdentitiesCount: confirmedIdentities.length }, 'Generated verified summary');
 
     // Build runTrace with summary metadata
     const runTrace: Partial<EnrichmentRunTrace> = {
@@ -552,20 +569,18 @@ async function processSummaryOnlyJob(
       data: {
         status: 'completed',
         summary: summary.summary,
-        summaryStructured: summary.structured as unknown as Prisma.InputJsonValue,
-        summaryEvidence: evidence as unknown as Prisma.InputJsonValue,
+        summaryStructured: toJsonValue(summary.structured),
+        summaryEvidence: toJsonValue(evidence),
         summaryModel: model,
         summaryTokens: tokens,
         summaryGeneratedAt: new Date(),
-        runTrace: runTrace as unknown as Prisma.InputJsonValue,
+        runTrace: toJsonValue(runTrace),
         completedAt: new Date(),
         durationMs: Date.now() - startTime,
       },
     });
 
-    console.log(
-      `[EnrichmentWorker] Completed summary-only job ${job.id}: verified summary persisted`
-    );
+    log.info({ jobId: job.id, sessionId }, 'Completed summary-only job');
 
     return {
       sessionId,
@@ -585,7 +600,7 @@ async function processSummaryOnlyJob(
       durationMs: Date.now() - startTime,
     });
 
-    console.error(`[EnrichmentWorker] Summary-only job ${job.id} failed:`, errorMessage);
+    log.error({ jobId: job.id, sessionId, error: errorMessage }, 'Summary-only job failed');
 
     return {
       sessionId,
@@ -608,7 +623,7 @@ async function processPdlEnrichmentJob(
   const { sessionId, candidateId, tenantId } = job.data;
   const startTime = Date.now();
 
-  console.log(`[EnrichmentWorker] Processing PDL enrichment job ${job.id} for candidate ${candidateId} (tenant: ${tenantId})`);
+  log.info({ jobId: job.id, candidateId, tenantId, sessionId }, 'Processing PDL enrichment job');
 
   await updateSessionStatus(sessionId, {
     status: 'running',
@@ -716,17 +731,17 @@ async function processPdlEnrichmentJob(
       where: { id: sessionId },
       data: {
         status: 'completed',
-        sourcesExecuted: ['pdl'] as unknown as Prisma.InputJsonValue,
+        sourcesExecuted: toJsonValue(['pdl']),
         queriesExecuted: 1,
         identitiesFound: 0,
         finalConfidence: summary.confidence ?? null,
         summary: summary.summary,
-        summaryStructured: summaryStructured as unknown as Prisma.InputJsonValue,
-        summaryEvidence: evidence as unknown as Prisma.InputJsonValue,
+        summaryStructured: toJsonValue(summaryStructured),
+        summaryEvidence: toJsonValue(evidence),
         summaryModel: model,
         summaryTokens: tokens,
         summaryGeneratedAt: new Date(),
-        runTrace: runTrace as unknown as Prisma.InputJsonValue,
+        runTrace: toJsonValue(runTrace),
         completedAt: new Date(),
         durationMs: Date.now() - startTime,
       },
@@ -756,7 +771,7 @@ async function processPdlEnrichmentJob(
       );
     }
 
-    console.log(`[EnrichmentWorker] Completed PDL enrichment job ${job.id}`);
+    log.info({ jobId: job.id, sessionId }, 'Completed PDL enrichment job');
 
     return {
       sessionId,
@@ -776,7 +791,7 @@ async function processPdlEnrichmentJob(
       durationMs: Date.now() - startTime,
     });
 
-    console.error(`[EnrichmentWorker] PDL enrichment job ${job.id} failed:`, errorMessage);
+    log.error({ jobId: job.id, sessionId, error: errorMessage }, 'PDL enrichment job failed');
 
     return {
       sessionId,
@@ -799,7 +814,7 @@ async function processLangGraphEnrichmentJob(
   const { sessionId, candidateId, tenantId, roleType, budget } = job.data;
   const startTime = Date.now();
 
-  console.log(`[EnrichmentWorker] Processing full enrichment job ${job.id} for candidate ${candidateId} (tenant: ${tenantId})`);
+  log.info({ jobId: job.id, candidateId, tenantId, sessionId, roleType }, 'Processing full enrichment job');
 
   // Update session to running
   await updateSessionStatus(sessionId, {
@@ -837,9 +852,7 @@ async function processLangGraphEnrichmentJob(
       durationMs: Date.now() - startTime,
     });
 
-    console.log(
-      `[EnrichmentWorker] Completed full enrichment job ${job.id}: ${result.identitiesFound.length} identities found`
-    );
+    log.info({ jobId: job.id, sessionId, identitiesFound: result.identitiesFound.length }, 'Completed full enrichment job');
 
     return {
       sessionId,
@@ -860,7 +873,7 @@ async function processLangGraphEnrichmentJob(
       durationMs: Date.now() - startTime,
     });
 
-    console.error(`[EnrichmentWorker] Full enrichment job ${job.id} failed:`, errorMessage);
+    log.error({ jobId: job.id, sessionId, error: errorMessage }, 'Full enrichment job failed');
 
     return {
       sessionId,
@@ -919,20 +932,18 @@ export function startEnrichmentWorker(options?: {
   );
 
   enrichmentWorker.on('completed', (job, result) => {
-    console.log(
-      `[EnrichmentWorker] Job ${job.id} completed: ${result.identitiesFound} identities`
-    );
+    log.info({ jobId: job.id, identitiesFound: result.identitiesFound }, 'Job completed');
   });
 
   enrichmentWorker.on('failed', (job, error) => {
-    console.error(`[EnrichmentWorker] Job ${job?.id} failed:`, error.message);
+    log.error({ jobId: job?.id, error: error.message }, 'Job failed');
   });
 
   enrichmentWorker.on('error', (error) => {
-    console.error('[EnrichmentWorker] Worker error:', error);
+    log.error({ error }, 'Worker error');
   });
 
-  console.log('[EnrichmentWorker] Worker started');
+  log.info('Worker started');
 
   return enrichmentWorker;
 }
@@ -944,7 +955,7 @@ export async function stopEnrichmentWorker(): Promise<void> {
   if (enrichmentWorker) {
     await enrichmentWorker.close();
     enrichmentWorker = null;
-    console.log('[EnrichmentWorker] Worker stopped');
+    log.info('Worker stopped');
   }
 }
 
@@ -991,7 +1002,7 @@ export async function cleanupQueue(): Promise<void> {
     redisConnection = null;
   }
 
-  console.log('[EnrichmentQueue] Cleaned up');
+  log.info('Cleaned up');
 }
 
 export default {

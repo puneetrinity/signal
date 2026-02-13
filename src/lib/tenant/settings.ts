@@ -32,6 +32,10 @@
 import { prisma } from '@/lib/prisma';
 import type { TenantSettings, Prisma } from '@prisma/client';
 
+function toJsonValue(value: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
+
 /**
  * Tenant settings with parsed features
  */
@@ -168,9 +172,8 @@ export async function upsertTenantSettings(
   tenantId: string,
   updates: Partial<Omit<TenantSettingsWithFeatures, 'tenantId'>>
 ): Promise<TenantSettingsWithFeatures> {
-  // Cast features to Prisma-compatible JSON type
-  const createFeatures = (updates.features ?? DEFAULT_SETTINGS.features) as unknown as Prisma.InputJsonValue;
-  const updateFeatures = updates.features as unknown as Prisma.InputJsonValue | undefined;
+  const createFeatures = toJsonValue(updates.features ?? DEFAULT_SETTINGS.features);
+  const updateFeatures = updates.features ? toJsonValue(updates.features) : undefined;
 
   const record = await prisma.tenantSettings.upsert({
     where: { tenantId },

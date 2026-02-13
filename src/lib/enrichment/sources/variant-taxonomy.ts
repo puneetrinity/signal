@@ -15,6 +15,10 @@
  * @see docs/ARCHITECTURE_V2.1.md
  */
 
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('VariantTaxonomy');
+
 /**
  * Canonical variant types for metrics aggregation
  */
@@ -116,7 +120,7 @@ export function canonicalizeVariant(rawVariantId: string): CanonicalVariant {
   }
 
   // Legacy/unknown → default to name:full
-  console.warn(`[variant-taxonomy] Unknown variantId: ${rawVariantId}, defaulting to name:full`);
+  log.warn({ rawVariantId }, 'Unknown variantId, defaulting to name:full');
   return 'name:full';
 }
 

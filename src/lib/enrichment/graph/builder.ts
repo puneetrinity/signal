@@ -9,6 +9,7 @@
 
 import { StateGraph, END } from '@langchain/langgraph';
 import { v4 as uuidv4 } from 'uuid';
+import { createLogger } from '@/lib/logger';
 import {
   EnrichmentStateAnnotation,
   type EnrichmentState,
@@ -27,6 +28,8 @@ import {
   persistSummaryNode,
   shouldContinueSearching,
 } from './nodes';
+
+const log = createLogger('EnrichmentGraph');
 
 /**
  * Node names in the graph
@@ -162,7 +165,7 @@ export async function runEnrichment(
   if (useCheckpointer && connectionString) {
     // Use graph with checkpointer for resumability
     if (!compiledGraphWithCheckpointer) {
-      console.log('[runEnrichment] Initializing graph with Postgres checkpointer');
+      log.info('Initializing graph with Postgres checkpointer');
       compiledGraphWithCheckpointer = await buildEnrichmentGraphWithCheckpointer(connectionString);
     }
     graph = compiledGraphWithCheckpointer;
@@ -227,11 +230,8 @@ export async function buildEnrichmentGraphWithCheckpointer(
   // Dynamic import (non-literal) to avoid TS module resolution errors when the optional
   // dependency isn't installed in all environments.
   const moduleName = '@langchain/langgraph-checkpoint-postgres';
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call
   const { PostgresSaver } = await import(moduleName);
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call
   const checkpointer = PostgresSaver.fromConnString(connectionString);
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call
   await checkpointer.setup();
 
   const graph = new StateGraph(EnrichmentStateAnnotation)
@@ -258,7 +258,6 @@ export async function buildEnrichmentGraphWithCheckpointer(
     .addEdge(NODES.GENERATE_SUMMARY, NODES.PERSIST_SUMMARY)
     .addEdge(NODES.PERSIST_SUMMARY, END);
 
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
   return graph.compile({ checkpointer });
 }
 
