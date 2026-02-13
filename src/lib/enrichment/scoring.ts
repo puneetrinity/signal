@@ -75,7 +75,8 @@ export interface ScoringInput {
   // Evidence
   hasCommitEvidence: boolean;
   commitCount: number;
-  hasProfileLink: boolean; // LinkedIn link in GitHub bio
+  hasProfileLink: boolean; // LinkedIn link in GitHub bio/blog
+  profileLinkSource?: 'bio' | 'blog';  // where the LinkedIn URL was found
 
   // Name comparison
   candidateName: string | null;
@@ -564,7 +565,9 @@ export function detectBridgeSignals(input: ScoringInput): BridgeSignal[] {
 
   // Tier 1 signals (explicit links)
   if (input.hasProfileLink) {
-    signals.push('linkedin_url_in_bio');
+    signals.push(
+      input.profileLinkSource === 'blog' ? 'linkedin_url_in_blog' : 'linkedin_url_in_bio'
+    );
   }
 
   // Tier 2 signals (strong unidirectional)

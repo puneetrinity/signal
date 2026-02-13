@@ -200,23 +200,91 @@ const DEFAULT_OPTIONS: Required<BridgeDiscoveryOptions> = {
 /**
  * Check if GitHub profile links to LinkedIn
  */
-function extractLinkedInFromProfile(profile: GitHubUserProfile): string | null {
+function extractLinkedInFromProfile(
+  profile: GitHubUserProfile
+): { blogId: string | null; bioId: string | null } {
+  let blogId: string | null = null;
+  let bioId: string | null = null;
+
   // Check blog field
   if (profile.blog) {
     const blogLower = profile.blog.toLowerCase();
     if (blogLower.includes('linkedin.com/in/')) {
       const match = profile.blog.match(/linkedin\.com\/in\/([^/?\s]+)/i);
-      if (match) return match[1];
+      if (match) blogId = match[1];
     }
   }
 
   // Check bio
   if (profile.bio) {
     const match = profile.bio.match(/linkedin\.com\/in\/([^/?\s]+)/i);
-    if (match) return match[1];
+    if (match) bioId = match[1];
   }
 
-  return null;
+  return { blogId, bioId };
+}
+
+/**
+ * Normalize LinkedIn slug for comparison: lowercase, trim trailing slash,
+ * decode %xx, strip query/fragment.
+ */
+function canonicalizeLinkedInSlug(raw: string): string {
+  try {
+    let slug = decodeURIComponent(raw);
+    slug = slug.toLowerCase().replace(/\/+$/, '');
+    slug = slug.split('?')[0].split('#')[0];
+    return slug;
+  } catch {
+    return raw.toLowerCase().replace(/\/+$/, '');
+  }
+}
+
+const GITHUB_RESERVED_PATHS = new Set([
+  'about',
+  'features',
+  'pricing',
+  'enterprise',
+  'topics',
+  'collections',
+  'trending',
+  'events',
+  'sponsors',
+  'settings',
+  'marketplace',
+  'explore',
+  'notifications',
+  'issues',
+  'pulls',
+  'discussions',
+  'codespaces',
+  'orgs',
+  'login',
+  'signup',
+  'apps',
+  'organizations',
+  'new',
+  'search',
+  'site',
+  'readme',
+  'contact',
+  'customer-stories',
+]);
+
+function isGitHubProfileUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    if (host !== 'github.com' && host !== 'www.github.com') {
+      return false;
+    }
+    const segments = parsed.pathname.split('/').filter(Boolean);
+    if (segments.length !== 1) {
+      return false;
+    }
+    return !GITHUB_RESERVED_PATHS.has(segments[0].toLowerCase());
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -598,9 +666,15 @@ export async function discoverUrlAnchoredBridges(
         const { platform, platformId } = detectPlatformFromUrl(result.url);
 
         // Assign appropriate bridge signal
-        const signal: BridgeSignal = platform === 'companyteam'
-          ? 'linkedin_url_in_team_page'
-          : 'linkedin_url_in_page';
+        // - GitHub reverse links on repo/org/team pages are downgraded to team-page signal.
+        // - Only profile-level URLs can emit linkedin_url_in_page.
+        const isProfileLevelUrl =
+          platform === 'github'
+            ? isGitHubProfileUrl(result.url)
+            : platform !== null && platform !== 'companyteam';
+        const signal: BridgeSignal = isProfileLevelUrl
+          ? 'linkedin_url_in_page'
+          : 'linkedin_url_in_team_page';
 
         // Corroborate company/location hints from reverse-link title/snippet
         const pageHints = extractAllHints(hints.linkedinId, result.title || '', result.snippet || '');
@@ -658,7 +732,7 @@ function escapeRegExp(value: string): string {
 /**
  * Detect platform and extract ID from a URL
  */
-function detectPlatformFromUrl(url: string): { platform: string | null; platformId: string | null } {
+export function detectPlatformFromUrl(url: string): { platform: string | null; platformId: string | null } {
   try {
     const parsed = new URL(url);
     const host = parsed.hostname.toLowerCase();
@@ -667,9 +741,9 @@ function detectPlatformFromUrl(url: string): { platform: string | null; platform
 
     // GitHub
     if (host === 'github.com' || host === 'www.github.com') {
-      if (segments.length === 1) {
+      if (segments.length >= 1) {
         const handle = segments[0];
-        if (!['about', 'features', 'pricing', 'enterprise', 'topics', 'collections', 'trending', 'events', 'sponsors', 'settings', 'marketplace', 'explore', 'notifications', 'issues', 'pulls', 'discussions', 'codespaces', 'orgs'].includes(handle)) {
+        if (!GITHUB_RESERVED_PATHS.has(handle.toLowerCase())) {
           return { platform: 'github', platformId: handle };
         }
       }
@@ -842,9 +916,25 @@ export async function discoverGitHubIdentities(
     try {
       const profile = await github.getUser(login);
 
-      const linkedInId = extractLinkedInFromProfile(profile);
-      const hasProfileLink =
-        linkedInId?.toLowerCase() === hints.linkedinId.toLowerCase();
+      const linkedInResult = extractLinkedInFromProfile(profile);
+      const candidateLinkedInId = hints.linkedinId ? canonicalizeLinkedInSlug(hints.linkedinId) : null;
+      const blogLinkedInId = linkedInResult.blogId
+        ? canonicalizeLinkedInSlug(linkedInResult.blogId)
+        : null;
+      const bioLinkedInId = linkedInResult.bioId
+        ? canonicalizeLinkedInSlug(linkedInResult.bioId)
+        : null;
+      const matchedBlog = !!candidateLinkedInId && blogLinkedInId === candidateLinkedInId;
+      const matchedBio = !!candidateLinkedInId && bioLinkedInId === candidateLinkedInId;
+      const hasProfileLink = matchedBlog || matchedBio;
+      const profileLinkSource: 'blog' | 'bio' | undefined = matchedBlog
+        ? 'blog'
+        : matchedBio
+          ? 'bio'
+          : undefined;
+      const linkedInId = hasProfileLink
+        ? (matchedBlog ? linkedInResult.blogId : linkedInResult.bioId)
+        : (linkedInResult.bioId || linkedInResult.blogId || null);
 
       let commitEvidence: CommitEmailEvidence[] = [];
       if (opts.includeCommitEvidence) {
@@ -860,6 +950,7 @@ export async function discoverGitHubIdentities(
         hasCommitEvidence: commitEvidence.length > 0,
         commitCount: commitEvidence.length,
         hasProfileLink,
+        profileLinkSource,
         candidateName: hints.nameHint,
         platformName: profile.name,
         candidateHeadline: hints.headlineHint,
