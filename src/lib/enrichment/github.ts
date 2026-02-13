@@ -135,6 +135,10 @@ let replayModule: {
 } | null = null;
 
 async function getReplayModule() {
+  if (process.env.ENRICHMENT_EVAL_REPLAY === '1' && process.env.NODE_ENV === 'production') {
+    console.error('[GitHub] ENRICHMENT_EVAL_REPLAY=1 is blocked in production');
+    return null;
+  }
   if (!replayModule && process.env.ENRICHMENT_EVAL_REPLAY === '1') {
     try {
       // Dynamic import only when replay mode is enabled

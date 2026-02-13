@@ -137,9 +137,22 @@ export interface BridgeDiscoveryOptions {
  */
 const ENABLE_COMMIT_EMAIL_EVIDENCE = process.env.ENABLE_COMMIT_EMAIL_EVIDENCE === 'true';
 
+function getBridgeConfidenceThreshold(): number {
+  const raw = process.env.ENRICHMENT_MIN_CONFIDENCE;
+  if (!raw) return 0.20;
+  const parsed = Number.parseFloat(raw);
+  if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 1) {
+    return parsed;
+  }
+  console.warn(
+    `[BridgeDiscovery] Invalid ENRICHMENT_MIN_CONFIDENCE="${raw}", using default 0.20`
+  );
+  return 0.20;
+}
+
 const DEFAULT_OPTIONS: Required<BridgeDiscoveryOptions> = {
   maxGitHubResults: 5,
-  confidenceThreshold: parseFloat(process.env.ENRICHMENT_MIN_CONFIDENCE || '0.20'),
+  confidenceThreshold: getBridgeConfidenceThreshold(),
   includeCommitEvidence: ENABLE_COMMIT_EMAIL_EVIDENCE,
   maxCommitRepos: 3,
 };
@@ -217,7 +230,7 @@ function buildSearchQueries(
     let companyHint = hints.companyHint || null;
     if (!companyHint && hints.headlineHint) {
       const companyMatch = hints.headlineHint.match(
-        /(?:at|@|,)\s*([A-Z][A-Za-z0-9\s&]+?)(?:\s*[-|·]|$)/
+        /(?:at|@|,)\s*([\p{L}\p{N}][\p{L}\p{N}\s&.,'-]+?)(?:\s*[-|·]|$)/u
       );
       if (companyMatch) {
         companyHint = companyMatch[1].trim();
@@ -254,7 +267,7 @@ function buildSearchQueries(
     let companyHint = hints.companyHint || null;
     if (!companyHint && hints.headlineHint) {
       const companyMatch = hints.headlineHint.match(
-        /(?:at|@|,)\s*([A-Z][A-Za-z0-9\s&]+?)(?:\s*[-|·]|$)/
+        /(?:at|@|,)\s*([\p{L}\p{N}][\p{L}\p{N}\s&.,'-]+?)(?:\s*[-|·]|$)/u
       );
       if (companyMatch) {
         companyHint = companyMatch[1].trim();

@@ -101,7 +101,9 @@ function normalize(str: string | null | undefined): string {
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '') // Remove diacritics
-    .replace(/[^a-z0-9\s]/g, '') // Remove special chars
+    // Keep all Unicode letters/numbers so non-Latin names are comparable.
+    .replace(/[^\p{L}\p{N}\s]/gu, '')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 

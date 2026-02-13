@@ -64,6 +64,23 @@ const NODE_PROGRESS: Record<string, number> = {
   persistSummary: 100,
 };
 
+function sanitizeSummaryMeta(value: unknown):
+  | { mode: 'draft' | 'verified'; confirmedCount: number; identityKey: string; identityIds: string[] }
+  | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const obj = value as Record<string, unknown>;
+  const mode = obj.mode === 'verified' ? 'verified' : 'draft';
+  const confirmedCount =
+    typeof obj.confirmedCount === 'number' && Number.isFinite(obj.confirmedCount)
+      ? Math.max(0, Math.floor(obj.confirmedCount))
+      : 0;
+  const identityKey = typeof obj.identityKey === 'string' ? obj.identityKey : '';
+  const identityIds = Array.isArray(obj.identityIds)
+    ? obj.identityIds.filter((v): v is string => typeof v === 'string')
+    : [];
+  return { mode, confirmedCount, identityKey, identityIds };
+}
+
 /**
  * Build run trace from state for observability
  * Phase A.5: Per-platform diagnostics for debugging 0-hit enrichments
@@ -177,12 +194,7 @@ function buildRunTrace(state: EnrichmentState): EnrichmentRunTrace {
       rateLimitedProviders: rateLimitedProviders.size > 0 ? [...rateLimitedProviders] : undefined,
       variantStats,
       // Summary metadata for draft/verified tracking
-      summaryMeta: state.summaryMeta ? {
-        mode: (state.summaryMeta as { mode?: string }).mode as 'draft' | 'verified' || 'draft',
-        confirmedCount: (state.summaryMeta as { confirmedCount?: number }).confirmedCount || 0,
-        identityKey: (state.summaryMeta as { identityKey?: string }).identityKey || '',
-        identityIds: (state.summaryMeta as { identityIds?: string[] }).identityIds || [],
-      } : undefined,
+      summaryMeta: sanitizeSummaryMeta(state.summaryMeta),
     },
     failureReason: state.status === 'failed' ? state.errors?.[0]?.message : undefined,
   };
@@ -300,7 +312,12 @@ export async function loadCandidateNode(
         where: { id: state.candidateId },
         data: { enrichmentStatus: 'in_progress' },
       })
-      .catch(() => {});
+      .catch((error) => {
+        console.warn(
+          `[LoadCandidateNode] Failed to set candidate ${state.candidateId} to in_progress:`,
+          error instanceof Error ? error.message : error
+        );
+      });
 
     // Get platforms for this role (excluding github which is handled separately)
     const allPlatforms = getSourcesForRoleType(roleType).map((s) => s.platform);
@@ -721,7 +738,12 @@ export async function searchPlatformsBatchNode(
       totalQueriesExecuted += result.queriesExecuted;
 
       // Track "persistable" identities (approximation of identitiesPersisted)
+      // Keep strong bridge signals (Tier 1/2) even when score-only guards are weak.
       for (const identity of result.identities) {
+        if (identity.bridgeTier === 1 || identity.bridgeTier === 2) {
+          persistableCount++;
+          continue;
+        }
         if (identity.scoreBreakdown) {
           if (shouldPersistIdentity(identity.scoreBreakdown as ScoreBreakdown)) {
             persistableCount++;
@@ -870,11 +892,15 @@ export async function persistResultsNode(
     const minConfidence = getMinConfidence();
     const allIdentities = state.identitiesFound;
 
-    // Stage 1: Count identities above minConfidence
-    const aboveMinConfidence = allIdentities.filter((i) => i.confidence >= minConfidence);
+    // Stage 1: Keep identities above minConfidence OR with strong bridge signals (Tier 1/2)
+    // This keeps evidence-first matches from being dropped by a pure score threshold.
+    const aboveMinConfidence = allIdentities.filter(
+      (i) => i.confidence >= minConfidence || i.bridgeTier === 1 || i.bridgeTier === 2
+    );
 
-    // Stage 2: Count identities passing shouldPersistIdentity (before platform guards)
+    // Stage 2: Count identities passing persist guard (bridge-aware)
     const passingPersistGuard = aboveMinConfidence.filter((i) => {
+      if (i.bridgeTier === 1 || i.bridgeTier === 2) return true;
       if (!i.scoreBreakdown) return true; // No breakdown = use minConfidence only
       return shouldPersistIdentity(i.scoreBreakdown as ScoreBreakdown);
     });
@@ -1441,7 +1467,12 @@ export async function persistSummaryNode(
           lastEnrichedAt: new Date(),
         },
       })
-      .catch(() => {});
+      .catch((error) => {
+        console.warn(
+          `[PersistSummaryNode] Failed to finalize candidate ${state.candidateId} status:`,
+          error instanceof Error ? error.message : error
+        );
+      });
 
     const progressComplete: EnrichmentProgressEvent = {
       type: 'node_complete',

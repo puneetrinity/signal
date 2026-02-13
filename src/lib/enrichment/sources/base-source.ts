@@ -35,11 +35,34 @@ import { checkProvidersHealth } from '@/lib/search/providers';
 import { validateQuery, generateHandleVariants } from './handle-variants';
 import {
   type BridgeSignal,
+  type BridgeDetection,
   createBridgeDetection,
 } from '../bridge-types';
 
 /** Maximum rejection reasons to store in diagnostics */
 const MAX_REJECTION_REASONS = 10;
+const TIER_1_SCORE_BOOST = 0.08;
+const SEARCH_SCORE_WEIGHTS = {
+  bridge: 0.40,
+  name: 0.22,
+  handle: 0.18,
+  company: 0.08,
+  location: 0.04,
+  profileActivity: 0.03,
+} as const;
+
+function getValidatedMinConfidence(defaultValue: number = 0.20): number {
+  const raw = process.env.ENRICHMENT_MIN_CONFIDENCE;
+  if (!raw) return defaultValue;
+  const parsed = Number.parseFloat(raw);
+  if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 1) {
+    return parsed;
+  }
+  console.warn(
+    `[BaseSource] Invalid ENRICHMENT_MIN_CONFIDENCE="${raw}", using default ${defaultValue}`
+  );
+  return defaultValue;
+}
 
 /**
  * Query normalization (Phase B3)
@@ -86,7 +109,7 @@ const DEFAULT_OPTIONS: Required<DiscoveryOptions> = {
   maxResults: 5,
   maxQueries: 3,
   timeout: 30000,
-  minConfidence: parseFloat(process.env.ENRICHMENT_MIN_CONFIDENCE || '0.20'),
+  minConfidence: getValidatedMinConfidence(0.20),
 };
 
 /**
@@ -94,7 +117,13 @@ const DEFAULT_OPTIONS: Required<DiscoveryOptions> = {
  */
 function normalizeString(str: string | null): string {
   if (!str) return '';
-  return str.toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+  return str
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function calculateNameSimilarity(name1: string | null, name2: string | null): number {
@@ -173,8 +202,20 @@ const GENERIC_HANDLES = new Set([
  * Check if a handle is too generic to be a reliable cross-platform signal
  */
 function isGenericHandle(handle: string): boolean {
-  const normalized = handle.toLowerCase().replace(/[-_\d]/g, '');
-  return GENERIC_HANDLES.has(normalized) || normalized.length < 4;
+  const lower = handle.toLowerCase();
+  const normalized = lower.replace(/[-_\d]/g, '');
+  if (GENERIC_HANDLES.has(normalized) || normalized.length < 4) return true;
+
+  // Treat compound common-name handles like "john-smith" as generic.
+  const parts = lower
+    .split(/[-_]/)
+    .map((p) => p.replace(/\d+/g, ''))
+    .filter((p) => p.length > 0);
+  if (parts.length >= 2 && parts.every((p) => GENERIC_HANDLES.has(p) || p.length <= 4)) {
+    return true;
+  }
+
+  return false;
 }
 
 /**
@@ -336,7 +377,9 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
     // Extract company from headline if not in hints
     let companyHint = hints.companyHint;
     if (!companyHint && hints.headlineHint) {
-      const match = hints.headlineHint.match(/(?:at|@|,)\s*([A-Z][A-Za-z0-9\s&]+?)(?:\s*[-|·]|$)/);
+      const match = hints.headlineHint.match(
+        /(?:at|@|,)\s*([\p{L}\p{N}][\p{L}\p{N}\s&.,'-]+?)(?:\s*[-|·]|$)/u
+      );
       if (match) companyHint = match[1].trim();
     }
 
@@ -398,16 +441,15 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
     // Bridge weight (profile link to LinkedIn is strongest signal)
     const bridgeWeight = hasBridgeEvidence ? 0.4 : 0;
 
-    // Calculate base score from signals
-    // handleMatch provides strong signal for handle-based platforms when name matching fails
-    // Exact handle match (0.35) reliably clears 0.35 threshold
+    // Calculate base score from signals.
+    // Weights are calibrated so max base score is <= 0.95 before platform bonus.
     const baseScore =
       bridgeWeight +
-      nameMatch * 0.25 +
-      handleMatch * 0.35 +
-      companyMatch * 0.10 +
-      locationMatch * 0.05 +
-      (profileCompleteness * 0.5 + activityScore * 0.5) * 0.05;
+      nameMatch * SEARCH_SCORE_WEIGHTS.name +
+      handleMatch * SEARCH_SCORE_WEIGHTS.handle +
+      companyMatch * SEARCH_SCORE_WEIGHTS.company +
+      locationMatch * SEARCH_SCORE_WEIGHTS.location +
+      (profileCompleteness * 0.5 + activityScore * 0.5) * SEARCH_SCORE_WEIGHTS.profileActivity;
 
     // Platform weight is used as a small bonus for more reliable platforms, not a multiplier
     // This ensures name matches can still reach threshold regardless of platform
@@ -425,6 +467,26 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
       activityScore,
       total,
     };
+  }
+
+  /**
+   * Apply bridge tier score adjustments so search-based scoring matches GitHub path.
+   * - Tier 1 strict boost (+0.08) when no contradictions and not team-page downgraded.
+   * - Confidence floor from bridge tier is always applied.
+   */
+  protected applyBridgeScoreAdjustments(
+    score: ScoreBreakdown,
+    bridge: BridgeDetection,
+    hasContradiction: boolean
+  ): ScoreBreakdown {
+    const strictTier1 = bridge.tier === 1 &&
+      !bridge.signals.includes('linkedin_url_in_team_page') &&
+      !hasContradiction;
+    const boosted = strictTier1
+      ? Math.min(1.0, score.total + TIER_1_SCORE_BOOST)
+      : score.total;
+    const adjustedTotal = Math.max(boosted, bridge.confidenceFloor);
+    return { ...score, total: adjustedTotal };
   }
 
   /**
@@ -743,6 +805,19 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
           variantId: string | undefined,
           mode: typeof candidate.mode
         ) => {
+          if (queriesExecuted >= opts.maxQueries) {
+            console.log(
+              `[${this.displayName}] Budget exhausted before query execution, skipping "${query}"`
+            );
+            return {
+              results: [],
+              rawResultCount: 0,
+              matchedResultCount: 0,
+              unmatchedSampleUrls: [],
+              rateLimited: false,
+              provider: lastProvider,
+            };
+          }
           queriesExecuted++;
           searchQueries.push(query);
           if (variantId) variantsExecuted.push(variantId);
@@ -808,13 +883,19 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
           // Extract profile info
           const profileInfo = this.extractProfileInfo(result);
 
-          // Calculate score
-          const scoreBreakdown = this.calculateScore(hints, result, profileInfo);
-
           // Detect bridge signals BEFORE applying minConfidence filter
           // Tier-1/Tier-2 signals can override the confidence threshold
           const bridgeSignals = this.detectBridgeSignals(hints, result, profileInfo);
           const bridge = createBridgeDetection(bridgeSignals, result.url);
+          const contradictions = this.detectContradictions(hints, profileInfo);
+
+          // Calculate score and then apply bridge-tier adjustments (boost/floor).
+          const rawScore = this.calculateScore(hints, result, profileInfo);
+          const scoreBreakdown = this.applyBridgeScoreAdjustments(
+            rawScore,
+            bridge,
+            contradictions.hasContradiction
+          );
 
           // Skip if below threshold UNLESS we have strong bridge signals (Tier 1 or 2)
           const hasStrongBridgeSignals = bridge.tier === 1 || bridge.tier === 2;
@@ -833,9 +914,6 @@ export abstract class BaseEnrichmentSource implements EnrichmentSource {
           }
 
           identitiesAboveThreshold++;
-
-          // Detect contradictions
-          const contradictions = this.detectContradictions(hints, profileInfo);
 
           // Generate human-readable persist reason
           const persistReason = this.formatPersistReason(bridge, scoreBreakdown);

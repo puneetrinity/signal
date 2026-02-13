@@ -32,6 +32,10 @@ let replayModule: {
 } | null = null;
 
 async function getReplayModule() {
+  if (process.env.ENRICHMENT_EVAL_REPLAY === '1' && process.env.NODE_ENV === 'production') {
+    console.error('[SearchExecutor] ENRICHMENT_EVAL_REPLAY=1 is blocked in production');
+    return null;
+  }
   if (!replayModule && process.env.ENRICHMENT_EVAL_REPLAY === '1') {
     try {
       // Dynamic import only when replay mode is enabled
@@ -58,7 +62,10 @@ export function getEnrichmentProviderConfig(): {
 } {
   const primary = (process.env.ENRICHMENT_SEARCH_PROVIDER?.toLowerCase() || 'serper') as SearchProviderType;
   const fallbackEnv = process.env.ENRICHMENT_SEARCH_FALLBACK_PROVIDER?.toLowerCase();
-  const minResults = parseInt(process.env.MIN_RESULTS_BEFORE_FALLBACK || '1', 10);
+  const minResultsRaw = process.env.MIN_RESULTS_BEFORE_FALLBACK;
+  const parsedMinResults = Number.parseInt(minResultsRaw || '1', 10);
+  const minResults =
+    Number.isFinite(parsedMinResults) && parsedMinResults >= 0 ? parsedMinResults : 1;
 
   // Support 'none' or empty string to disable fallback
   let fallback: SearchProviderType | null = null;
@@ -87,9 +94,38 @@ export interface RawSearchWithProvider {
   rateLimited: boolean;
 }
 
+function isRateLimitedError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  return /rate.?limit|429|too many requests/i.test(msg);
+}
+
+function mergeRawResults(
+  primaryResults: RawSearchResult[],
+  fallbackResults: RawSearchResult[],
+  maxResults: number
+): RawSearchResult[] {
+  const merged = new Map<string, RawSearchResult>();
+  const add = (results: RawSearchResult[]) => {
+    for (const result of results) {
+      const key = result.url.toLowerCase();
+      const existing = merged.get(key);
+      if (!existing || result.position < existing.position) {
+        merged.set(key, result);
+      }
+    }
+  };
+
+  add(primaryResults);
+  add(fallbackResults);
+
+  return Array.from(merged.values())
+    .sort((a, b) => a.position - b.position)
+    .slice(0, maxResults);
+}
+
 /**
  * Execute raw search with enrichment-specific fallback logic
- * IMPORTANT: Preserves partial primary results when fallback fails/returns fewer
+ * IMPORTANT: Preserves partial primary results and merges with fallback coverage.
  * Returns provider attribution for diagnostics
  */
 async function searchRawWithFallback(
@@ -103,6 +139,7 @@ async function searchRawWithFallback(
 
   let primaryResults: RawSearchResult[] = [];
   let primaryRateLimited = false;
+  let fallbackRateLimited = false;
 
   // Try primary provider (default: Serper)
   try {
@@ -118,39 +155,53 @@ async function searchRawWithFallback(
     const errorMsg = error instanceof Error ? error.message : String(error);
     console.error(`[EnrichmentSearch] Primary (${config.primary}) failed:`, errorMsg);
     // Detect rate limiting
-    if (/rate.?limit|429|too many requests/i.test(errorMsg)) {
+    if (isRateLimitedError(error)) {
       primaryRateLimited = true;
     }
   }
 
   // Try fallback provider if configured
+  let fallbackResults: RawSearchResult[] = [];
   if (config.fallback && config.fallback !== config.primary) {
     try {
       const fallback = getProvider(config.fallback);
       console.log(`[EnrichmentSearch] Trying fallback: ${config.fallback}`);
 
-      const fallbackResults = await fallback.searchRaw(query, maxResults);
-
-      if (fallbackResults.length > primaryResults.length) {
-        console.log(`[EnrichmentSearch] Fallback (${config.fallback}) returned ${fallbackResults.length} results (better than primary's ${primaryResults.length})`);
-        return { results: fallbackResults, providerUsed: config.fallback, rateLimited: false };
-      }
-
-      console.log(`[EnrichmentSearch] Fallback (${config.fallback}) returned ${fallbackResults.length} results (not better than primary's ${primaryResults.length})`);
+      fallbackResults = await fallback.searchRaw(query, maxResults);
+      console.log(
+        `[EnrichmentSearch] Fallback (${config.fallback}) returned ${fallbackResults.length} results`
+      );
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error(`[EnrichmentSearch] Fallback (${config.fallback}) failed:`, errorMsg);
+      fallbackRateLimited = isRateLimitedError(error);
     }
   }
 
-  // Return whatever we have from primary (even if partial)
-  if (primaryResults.length > 0) {
-    console.log(`[EnrichmentSearch] Using partial primary results: ${primaryResults.length}`);
-    return { results: primaryResults, providerUsed: config.primary, rateLimited: primaryRateLimited };
+  const mergedResults = mergeRawResults(primaryResults, fallbackResults, maxResults);
+  if (mergedResults.length > 0) {
+    const providerUsed =
+      primaryResults.length > 0 && fallbackResults.length > 0
+        ? `merged:${config.primary}+${config.fallback}`
+        : fallbackResults.length > 0 && config.fallback
+          ? config.fallback
+          : config.primary;
+    console.log(
+      `[EnrichmentSearch] Using merged coverage: primary=${primaryResults.length}, fallback=${fallbackResults.length}, final=${mergedResults.length}`
+    );
+    return {
+      results: mergedResults,
+      providerUsed,
+      rateLimited: primaryRateLimited || fallbackRateLimited,
+    };
   }
 
   console.log('[EnrichmentSearch] No results from any provider');
-  return { results: [], providerUsed: config.primary, rateLimited: primaryRateLimited };
+  return {
+    results: [],
+    providerUsed: config.primary,
+    rateLimited: primaryRateLimited || fallbackRateLimited,
+  };
 }
 
 /**
@@ -182,7 +233,39 @@ export async function searchRawWithEnrichmentProviders(
     console.warn('[SearchExecutor] Replay mode enabled but falling back to real search');
   }
 
-  return searchRawWithFallback(query, maxResults);
+  const mergeAllQueries = process.env.ENRICHMENT_MERGE_PROVIDERS_ALL_QUERIES !== 'false';
+  if (!mergeAllQueries) {
+    return searchRawWithFallback(query, maxResults);
+  }
+
+  const config = getEnrichmentProviderConfig();
+  if (!config.fallback || config.fallback === config.primary) {
+    return searchRawWithFallback(query, maxResults);
+  }
+
+  const primary = getProvider(config.primary);
+  const fallback = getProvider(config.fallback);
+
+  const [primaryResults, fallbackResults] = await Promise.allSettled([
+    primary.searchRaw(query, maxResults),
+    fallback.searchRaw(query, maxResults),
+  ]);
+
+  const mergedResults = mergeRawResults(
+    primaryResults.status === 'fulfilled' ? primaryResults.value : [],
+    fallbackResults.status === 'fulfilled' ? fallbackResults.value : [],
+    maxResults
+  );
+
+  const rateLimited = [primaryResults, fallbackResults].some(
+    (r) => r.status === 'rejected' && isRateLimitedError(r.reason)
+  );
+
+  return {
+    results: mergedResults,
+    providerUsed: `merged:${config.primary}+${config.fallback}`,
+    rateLimited,
+  };
 }
 
 /**
@@ -211,25 +294,11 @@ export async function searchRawMergedProviders(
     fallback.searchRaw(query, maxResults),
   ]);
 
-  const merged = new Map<string, RawSearchResult>();
-
-  const addResults = (results: RawSearchResult[]) => {
-    for (const r of results) {
-      const key = r.url.toLowerCase();
-      const existing = merged.get(key);
-      if (!existing || r.position < existing.position) {
-        merged.set(key, r);
-      }
-    }
-  };
-
-  if (primaryResults.status === 'fulfilled') addResults(primaryResults.value);
-  if (fallbackResults.status === 'fulfilled') addResults(fallbackResults.value);
-
-  // Sort by position and limit
-  return Array.from(merged.values())
-    .sort((a, b) => a.position - b.position)
-    .slice(0, maxResults);
+  return mergeRawResults(
+    primaryResults.status === 'fulfilled' ? primaryResults.value : [],
+    fallbackResults.status === 'fulfilled' ? fallbackResults.value : [],
+    maxResults
+  );
 }
 
 /**
@@ -579,7 +648,7 @@ export async function searchForPlatformWithMeta(
   const config = getEnrichmentProviderConfig();
 
   try {
-    const searchResponse = await searchRawWithFallback(query, maxResults * 2); // Get extra for filtering
+    const searchResponse = await searchRawWithEnrichmentProviders(query, maxResults * 2); // Get extra for filtering
     const { results: rawResults, providerUsed, rateLimited } = searchResponse;
     const pattern = PLATFORM_PATTERNS[platform];
     const unmatchedSampleUrls: string[] = [];
@@ -698,7 +767,7 @@ export function buildQueryFromPattern(
   let company = hints.companyHint;
   if (!company && hints.headlineHint) {
     const companyMatch = hints.headlineHint.match(
-      /(?:at|@|,)\s*([A-Z][A-Za-z0-9\s&]+?)(?:\s*[-|·]|$)/
+      /(?:at|@|,)\s*([\p{L}\p{N}][\p{L}\p{N}\s&.,'-]+?)(?:\s*[-|·]|$)/u
     );
     if (companyMatch) {
       company = companyMatch[1].trim();

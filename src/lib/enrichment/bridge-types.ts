@@ -269,7 +269,20 @@ export function createEmptyMetrics(): EnrichmentMetrics {
 /**
  * Tier 2 persistence cap (global)
  */
-export const TIER_2_CAP = parseInt(process.env.ENRICHMENT_TIER2_CAP || '3', 10);
+function getTier2Cap(defaultValue: number = 3): number {
+  const raw = process.env.ENRICHMENT_TIER2_CAP;
+  if (!raw) return defaultValue;
+  const parsed = Number.parseInt(raw, 10);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed;
+  }
+  console.warn(
+    `[BridgeTypes] Invalid ENRICHMENT_TIER2_CAP="${raw}", using default ${defaultValue}`
+  );
+  return defaultValue;
+}
+
+export const TIER_2_CAP = getTier2Cap(3);
 
 export default {
   determineBridgeTier,

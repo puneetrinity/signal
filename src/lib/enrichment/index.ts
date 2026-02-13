@@ -357,6 +357,7 @@ export async function enrichCandidate(
         );
       }
     }
+    const persistErrors = allIdentities.length - identitiesStored;
 
     // Calculate best confidence score
     const bestConfidence =
@@ -373,6 +374,18 @@ export async function enrichCandidate(
       identitiesConfirmed: 0, // Confirmation happens separately
       finalConfidence: bestConfidence,
       earlyStopReason,
+      errorMessage:
+        persistErrors > 0
+          ? `Partial persistence failure: stored ${identitiesStored}/${allIdentities.length} identities`
+          : undefined,
+      errorDetails:
+        persistErrors > 0
+          ? {
+              persistErrors,
+              identitiesStored,
+              identitiesFound: allIdentities.length,
+            }
+          : undefined,
       durationMs: Date.now() - startTime,
     });
 
