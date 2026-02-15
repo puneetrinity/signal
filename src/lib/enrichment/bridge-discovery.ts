@@ -57,7 +57,12 @@ import {
   type Tier1ShadowSample,
   type Tier1BlockReason,
   type Tier1SignalSource,
+  type Tier1GapDiagnostics,
+  type Tier1GapSample,
+  type Tier1GapDeficit,
+  type Tier1GapComponent,
   createEmptyMetrics,
+  createEmptyTier1Gap,
   createEmptyTier1Shadow,
   TIER_1_SIGNALS,
 } from './bridge-types';
@@ -134,6 +139,8 @@ export interface BridgeDiscoveryResult {
   hasTier1Bridge?: boolean;
   /** Tier-1 shadow evaluation diagnostics */
   tier1Shadow?: Tier1ShadowDiagnostics;
+  /** Tier-1 near-pass diagnostics */
+  tier1Gap?: Tier1GapDiagnostics;
 }
 
 /**
@@ -164,6 +171,13 @@ const TIER1_SAMPLE_RATE = (() => {
   if (!Number.isFinite(raw) || raw < 0) return 1;
   return Math.min(raw, 1);
 })();
+const TIER1_GAP_DIAGNOSTICS = process.env.ENRICHMENT_TIER1_GAP_DIAGNOSTICS !== 'false';
+const TIER1_GAP_SAMPLE_RATE = (() => {
+  const raw = parseFloat(process.env.ENRICHMENT_TIER1_GAP_SAMPLE_RATE ?? '');
+  if (!Number.isFinite(raw) || raw < 0) return 1;
+  return Math.min(raw, 1);
+})();
+const TIER1_AUTO_MERGE_THRESHOLD = 0.85;
 
 /**
  * Deterministic sampler: hash(sessionId + platformId) → 0..99
@@ -176,6 +190,25 @@ function deterministicSample(sessionId: string, platformId: string): number {
     hash = ((hash << 5) - hash + key.charCodeAt(i)) | 0;
   }
   return Math.abs(hash) % 100;
+}
+
+const TIER1_GAP_COMPONENT_MAX: Record<Tier1GapComponent, number> = {
+  bridgeWeight: 0.4,
+  nameMatch: 0.3,
+  companyMatch: 0.15,
+  locationMatch: 0.1,
+  profileCompleteness: 0.05,
+};
+
+function buildTier1GapDeficits(score: ScoreBreakdown): Tier1GapDeficit[] {
+  return (Object.keys(TIER1_GAP_COMPONENT_MAX) as Tier1GapComponent[])
+    .map((component) => {
+      const current = score[component];
+      const max = TIER1_GAP_COMPONENT_MAX[component];
+      const deficit = Math.max(0, max - current);
+      return { component, current, max, deficit };
+    })
+    .sort((a, b) => b.deficit - a.deficit);
 }
 
 function getBridgeQueryBudget(): number {
@@ -817,6 +850,9 @@ export async function discoverGitHubIdentities(
   const tier1Shadow = TIER1_SHADOW
     ? createEmptyTier1Shadow(true, TIER1_ENFORCE, TIER1_SAMPLE_RATE)
     : undefined;
+  const tier1Gap = TIER1_GAP_DIAGNOSTICS
+    ? createEmptyTier1Gap(true, TIER1_GAP_SAMPLE_RATE, TIER1_AUTO_MERGE_THRESHOLD)
+    : undefined;
   const shadowSessionId = opts.sessionId || candidateId;
 
   // Track Tier-2 identity count (global cap, not per-platform)
@@ -862,6 +898,8 @@ export async function discoverGitHubIdentities(
       earlyStopReason: 'no_search_queries',
       metrics,
       hasTier1Bridge: false,
+      tier1Shadow,
+      tier1Gap,
     };
   }
 
@@ -1017,36 +1055,35 @@ export async function discoverGitHubIdentities(
       // Get contradiction note (hasContradiction already computed above for Tier-1 boost)
       const { note: contradictionNote } = detectContradictions(scoreInput);
 
+      // Shared Tier-1 gating variables for shadow + near-pass diagnostics
+      const tier1Signals = bridge.signals.filter(
+        (s): s is Tier1SignalSource => (TIER_1_SIGNALS as string[]).includes(s)
+      );
+      const nameMismatch =
+        !!scoreInput.candidateName &&
+        !!scoreInput.platformName &&
+        baseScore.nameMatch < 0.1;
+      const hasTeamPageSignal = bridge.signals.includes('linkedin_url_in_team_page');
+      const hasIdMismatch =
+        !!candidateLinkedInId &&
+        !!linkedInId &&
+        canonicalizeLinkedInSlug(linkedInId) !== candidateLinkedInId;
+      const blockReasons: Tier1BlockReason[] = [];
+      if (tier1Signals.length === 0) blockReasons.push('no_bridge_signal');
+      if (confidence < TIER1_AUTO_MERGE_THRESHOLD) blockReasons.push('low_confidence');
+      if (hasContradiction) blockReasons.push('contradiction');
+      if (nameMismatch) blockReasons.push('name_mismatch');
+      if (hasTeamPageSignal) blockReasons.push('team_page');
+      if (hasIdMismatch) blockReasons.push('id_mismatch');
+      const wouldAutoMerge = tier1Signals.length > 0 &&
+        confidence >= TIER1_AUTO_MERGE_THRESHOLD &&
+        !hasContradiction &&
+        !nameMismatch &&
+        !hasTeamPageSignal &&
+        !hasIdMismatch;
+
       // Tier-1 shadow evaluation (log-only, no behavior change)
       if (tier1Shadow && deterministicSample(shadowSessionId, login) < TIER1_SAMPLE_RATE * 100) {
-        const tier1Signals = bridge.signals.filter(
-          (s): s is Tier1SignalSource => (TIER_1_SIGNALS as string[]).includes(s)
-        );
-        const nameMismatch =
-          !!scoreInput.candidateName &&
-          !!scoreInput.platformName &&
-          baseScore.nameMatch < 0.1;
-        const hasTeamPageSignal = bridge.signals.includes('linkedin_url_in_team_page');
-        const hasIdMismatch =
-          !!hints.linkedinId &&
-          !!linkedInId &&
-          linkedInId.toLowerCase() !== hints.linkedinId.toLowerCase();
-
-        const blockReasons: Tier1BlockReason[] = [];
-        if (tier1Signals.length === 0) blockReasons.push('no_bridge_signal');
-        if (confidence < 0.85) blockReasons.push('low_confidence');
-        if (hasContradiction) blockReasons.push('contradiction');
-        if (nameMismatch) blockReasons.push('name_mismatch');
-        if (hasTeamPageSignal) blockReasons.push('team_page');
-        if (hasIdMismatch) blockReasons.push('id_mismatch');
-
-        const wouldAutoMerge = tier1Signals.length > 0 &&
-          confidence >= 0.85 &&
-          !hasContradiction &&
-          !nameMismatch &&
-          !hasTeamPageSignal &&
-          !hasIdMismatch;
-
         const sample: Tier1ShadowSample = {
           platform: 'github',
           platformId: login,
@@ -1068,6 +1105,46 @@ export async function discoverGitHubIdentities(
         }
         if (tier1Shadow.samples.length < 20) {
           tier1Shadow.samples.push(sample);
+        }
+      }
+
+      // Tier-1 near-pass diagnostics (telemetry-only)
+      if (tier1Gap && deterministicSample(`${shadowSessionId}:gap`, login) < TIER1_GAP_SAMPLE_RATE * 100) {
+        if (tier1Signals.length > 0) {
+          tier1Gap.totalSignalCandidates++;
+          if (confidence < TIER1_AUTO_MERGE_THRESHOLD) {
+            const distanceToThreshold = TIER1_AUTO_MERGE_THRESHOLD - confidence;
+            tier1Gap.belowThreshold++;
+            tier1Gap.avgDistanceToThreshold =
+              ((tier1Gap.avgDistanceToThreshold * (tier1Gap.belowThreshold - 1)) + distanceToThreshold) /
+              tier1Gap.belowThreshold;
+            const deficits = buildTier1GapDeficits(scoreBreakdown);
+            for (const deficit of deficits) {
+              tier1Gap.componentDeficitTotals[deficit.component] += deficit.deficit;
+            }
+            if (tier1Gap.samples.length < 30) {
+              const sample: Tier1GapSample = {
+                platform: 'github',
+                platformId: login,
+                bridgeTier: bridge.tier,
+                signals: tier1Signals,
+                blockReasons,
+                confidenceScore: confidence,
+                threshold: TIER1_AUTO_MERGE_THRESHOLD,
+                distanceToThreshold,
+                scoreBreakdown: {
+                  bridgeWeight: scoreBreakdown.bridgeWeight,
+                  nameMatch: scoreBreakdown.nameMatch,
+                  companyMatch: scoreBreakdown.companyMatch,
+                  locationMatch: scoreBreakdown.locationMatch,
+                  profileCompleteness: scoreBreakdown.profileCompleteness,
+                  total: scoreBreakdown.total,
+                },
+                topDeficits: deficits.slice(0, 3),
+              };
+              tier1Gap.samples.push(sample);
+            }
+          }
         }
       }
 
@@ -1248,6 +1325,16 @@ export async function discoverGitHubIdentities(
     }, 'Tier-1 shadow');
   }
 
+  if (tier1Gap && tier1Gap.totalSignalCandidates > 0) {
+    log.info({
+      linkedinId: hints.linkedinId,
+      totalSignalCandidates: tier1Gap.totalSignalCandidates,
+      belowThreshold: tier1Gap.belowThreshold,
+      avgDistanceToThreshold: Number(tier1Gap.avgDistanceToThreshold.toFixed(4)),
+      componentDeficitTotals: tier1Gap.componentDeficitTotals,
+    }, 'Tier-1 gap diagnostics');
+  }
+
   return {
     candidateId,
     linkedinId: hints.linkedinId,
@@ -1257,6 +1344,7 @@ export async function discoverGitHubIdentities(
     metrics,
     hasTier1Bridge,
     tier1Shadow,
+    tier1Gap,
   };
 }
 

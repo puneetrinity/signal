@@ -36,7 +36,12 @@ import {
   type EnrichmentRunTrace,
   DEFAULT_BUDGET,
 } from './types';
-import type { Tier1ShadowDiagnostics, Tier1BlockReason } from '../bridge-types';
+import type {
+  Tier1ShadowDiagnostics,
+  Tier1BlockReason,
+  Tier1GapDiagnostics,
+  Tier1GapComponent,
+} from '../bridge-types';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger('EnrichmentGraph');
@@ -131,6 +136,56 @@ function aggregateTier1Shadow(
 }
 
 /**
+ * Aggregate Tier-1 near-pass diagnostics across platforms.
+ */
+function aggregateTier1Gap(
+  platformResults: EnrichmentRunTrace['platformResults']
+): Tier1GapDiagnostics | undefined {
+  const gaps = Object.values(platformResults)
+    .map(r => r.tier1Gap)
+    .filter((g): g is Tier1GapDiagnostics => !!g && g.enabled);
+
+  if (gaps.length === 0) return undefined;
+
+  const first = gaps[0];
+  const result: Tier1GapDiagnostics = {
+    enabled: true,
+    sampleRate: first.sampleRate,
+    threshold: first.threshold,
+    totalSignalCandidates: 0,
+    belowThreshold: 0,
+    avgDistanceToThreshold: 0,
+    componentDeficitTotals: {
+      bridgeWeight: 0,
+      nameMatch: 0,
+      companyMatch: 0,
+      locationMatch: 0,
+      profileCompleteness: 0,
+    },
+    samples: [],
+  };
+
+  let distanceSum = 0;
+  for (const gap of gaps) {
+    result.totalSignalCandidates += gap.totalSignalCandidates;
+    result.belowThreshold += gap.belowThreshold;
+    distanceSum += gap.avgDistanceToThreshold * gap.belowThreshold;
+    for (const [component, total] of Object.entries(gap.componentDeficitTotals)) {
+      result.componentDeficitTotals[component as Tier1GapComponent] += total;
+    }
+    for (const sample of gap.samples) {
+      if (result.samples.length < 50) {
+        result.samples.push(sample);
+      }
+    }
+  }
+  result.avgDistanceToThreshold =
+    result.belowThreshold > 0 ? distanceSum / result.belowThreshold : 0;
+
+  return result;
+}
+
+/**
  * Build run trace from state for observability
  * Phase A.5: Per-platform diagnostics for debugging 0-hit enrichments
  * Phase B: Canonical variant stats for metrics aggregation
@@ -191,6 +246,7 @@ function buildRunTrace(state: EnrichmentState): EnrichmentRunTrace {
       error: result.error,
       rateLimited: result.diagnostics?.rateLimited,
       tier1Shadow: result.diagnostics?.tier1Shadow,
+      tier1Gap: result.diagnostics?.tier1Gap,
     };
   }
 
@@ -263,6 +319,8 @@ function buildRunTrace(state: EnrichmentState): EnrichmentRunTrace {
       summaryMeta: sanitizeSummaryMeta(state.summaryMeta),
       // Tier-1 shadow diagnostics (aggregated across platforms)
       tier1Shadow: aggregateTier1Shadow(platformResults),
+      // Tier-1 near-pass diagnostics (aggregated across platforms)
+      tier1Gap: aggregateTier1Gap(platformResults),
     },
     failureReason: state.status === 'failed' ? state.errors?.[0]?.message : undefined,
   };
@@ -544,6 +602,7 @@ export async function githubBridgeNode(
         dynamicScoringVersion: result.metrics?.dynamicScoringVersion,
         scoringMode: result.metrics?.shadowScoring ? 'shadow' : 'static',
         tier1Shadow: result.tier1Shadow,
+        tier1Gap: result.tier1Gap,
       },
     };
 

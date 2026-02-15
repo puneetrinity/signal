@@ -65,6 +65,29 @@ interface Tier1ShadowAggregate {
   }>;
 }
 
+interface Tier1GapAggregate {
+  sessionsWithData: number;
+  totalSignalCandidates: number;
+  belowThreshold: number;
+  avgDistanceToThreshold: number;
+  componentDeficitTotals: Record<string, number>;
+  samples: Array<{
+    platform: string;
+    platformId: string;
+    bridgeTier: number;
+    confidenceScore: number;
+    threshold: number;
+    distanceToThreshold: number;
+    signals: string[];
+    topDeficits: Array<{
+      component: string;
+      current: number;
+      max: number;
+      deficit: number;
+    }>;
+  }>;
+}
+
 interface DiagnosticsSummary {
   totalSessions: number;
   completed: number;
@@ -75,6 +98,7 @@ interface DiagnosticsSummary {
   providers: Record<string, number>;
   failureReasons: Record<string, number>;
   tier1Shadow: Tier1ShadowAggregate;
+  tier1Gap: Tier1GapAggregate;
 }
 
 const DEFAULT_LIMIT = 200;
@@ -150,6 +174,14 @@ function buildSummary(sessions: SessionItem[]): DiagnosticsSummary {
       sessionsWithData: 0,
       samples: [],
     },
+    tier1Gap: {
+      sessionsWithData: 0,
+      totalSignalCandidates: 0,
+      belowThreshold: 0,
+      avgDistanceToThreshold: 0,
+      componentDeficitTotals: {},
+      samples: [],
+    },
   };
 
   for (const session of sessions) {
@@ -198,6 +230,54 @@ function buildSummary(sessions: SessionItem[]): DiagnosticsSummary {
             confidenceScore: (sample.confidenceScore as number) || 0,
             wouldAutoMerge: (sample.wouldAutoMerge as boolean) || false,
             bridgeTier: (sample.bridgeTier as number) || 3,
+          });
+        }
+      }
+    }
+
+    // Aggregate Tier-1 near-pass diagnostics from trace.final
+    const tier1Gap = final.tier1Gap as {
+      totalSignalCandidates?: number;
+      belowThreshold?: number;
+      avgDistanceToThreshold?: number;
+      componentDeficitTotals?: Record<string, number>;
+      samples?: Array<Record<string, unknown>>;
+    } | undefined;
+    if (tier1Gap && typeof tier1Gap.totalSignalCandidates === 'number' && tier1Gap.totalSignalCandidates > 0) {
+      summary.tier1Gap.sessionsWithData++;
+      summary.tier1Gap.totalSignalCandidates += tier1Gap.totalSignalCandidates;
+      const below = tier1Gap.belowThreshold ?? 0;
+      summary.tier1Gap.belowThreshold += below;
+      const currentAvg = summary.tier1Gap.avgDistanceToThreshold;
+      const prevCount = summary.tier1Gap.belowThreshold - below;
+      const weightedPrev = currentAvg * prevCount;
+      const weightedNext = (tier1Gap.avgDistanceToThreshold ?? 0) * below;
+      summary.tier1Gap.avgDistanceToThreshold =
+        summary.tier1Gap.belowThreshold > 0
+          ? (weightedPrev + weightedNext) / summary.tier1Gap.belowThreshold
+          : 0;
+      for (const [component, total] of Object.entries(tier1Gap.componentDeficitTotals || {})) {
+        summary.tier1Gap.componentDeficitTotals[component] =
+          (summary.tier1Gap.componentDeficitTotals[component] || 0) + (total || 0);
+      }
+      for (const sample of (tier1Gap.samples || []) as Array<Record<string, unknown>>) {
+        if (summary.tier1Gap.samples.length < 50) {
+          summary.tier1Gap.samples.push({
+            platform: (sample.platform as string) || '',
+            platformId: (sample.platformId as string) || '',
+            bridgeTier: (sample.bridgeTier as number) || 3,
+            confidenceScore: (sample.confidenceScore as number) || 0,
+            threshold: (sample.threshold as number) || 0.85,
+            distanceToThreshold: (sample.distanceToThreshold as number) || 0,
+            signals: Array.isArray(sample.signals) ? (sample.signals as string[]) : [],
+            topDeficits: Array.isArray(sample.topDeficits)
+              ? (sample.topDeficits as Array<Record<string, unknown>>).map((d) => ({
+                  component: (d.component as string) || '',
+                  current: (d.current as number) || 0,
+                  max: (d.max as number) || 0,
+                  deficit: (d.deficit as number) || 0,
+                }))
+              : [],
           });
         }
       }
@@ -606,6 +686,94 @@ export default function EnrichmentDiagnosticsPage() {
                               <Badge variant={sample.wouldAutoMerge ? 'default' : 'outline'}>
                                 {sample.wouldAutoMerge ? 'Yes' : 'No'}
                               </Badge>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
+        {!loading && !error && summary.tier1Gap.sessionsWithData > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Tier-1 Near-Pass Diagnostics</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 md:grid-cols-5 text-sm">
+                <div className="flex items-center justify-between">
+                  <span>Sessions with data</span>
+                  <Badge variant="outline">{summary.tier1Gap.sessionsWithData}</Badge>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Signal candidates</span>
+                  <Badge variant="outline">{summary.tier1Gap.totalSignalCandidates}</Badge>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Below 0.85</span>
+                  <Badge variant="outline">{summary.tier1Gap.belowThreshold}</Badge>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Avg distance to 0.85</span>
+                  <Badge variant="outline">{summary.tier1Gap.avgDistanceToThreshold.toFixed(3)}</Badge>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Near-pass rate</span>
+                  <Badge variant="outline">
+                    {formatPct(summary.tier1Gap.belowThreshold, summary.tier1Gap.totalSignalCandidates)}
+                  </Badge>
+                </div>
+              </div>
+              {Object.keys(summary.tier1Gap.componentDeficitTotals).length > 0 && (
+                <div>
+                  <div className="text-sm font-medium mb-2">Top Deficit Components</div>
+                  <div className="grid gap-1 text-sm">
+                    {Object.entries(summary.tier1Gap.componentDeficitTotals)
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([component, total]) => (
+                        <div key={component} className="flex items-center justify-between">
+                          <span className="text-muted-foreground">{component}</span>
+                          <Badge variant="outline">{total.toFixed(2)}</Badge>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
+              {summary.tier1Gap.samples.length > 0 && (
+                <div>
+                  <div className="text-sm font-medium mb-2">
+                    Near-pass Samples ({summary.tier1Gap.samples.length})
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-muted-foreground border-b">
+                          <th className="py-1">Platform</th>
+                          <th className="py-1">ID</th>
+                          <th className="py-1">Tier</th>
+                          <th className="py-1">Confidence</th>
+                          <th className="py-1">Gap to 0.85</th>
+                          <th className="py-1">Signals</th>
+                          <th className="py-1">Top Deficits</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {summary.tier1Gap.samples.map((sample, i) => (
+                          <tr key={i} className="border-b last:border-b-0">
+                            <td className="py-1">{sample.platform}</td>
+                            <td className="py-1 font-mono text-xs">{sample.platformId}</td>
+                            <td className="py-1">{sample.bridgeTier}</td>
+                            <td className="py-1">{sample.confidenceScore.toFixed(2)}</td>
+                            <td className="py-1">{sample.distanceToThreshold.toFixed(3)}</td>
+                            <td className="py-1 text-xs">{sample.signals.join(', ') || '-'}</td>
+                            <td className="py-1 text-xs">
+                              {sample.topDeficits
+                                .map((d) => `${d.component}:${d.deficit.toFixed(2)}`)
+                                .join(', ') || '-'}
                             </td>
                           </tr>
                         ))}

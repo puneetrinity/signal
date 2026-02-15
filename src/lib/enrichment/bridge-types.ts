@@ -207,6 +207,63 @@ export interface Tier1ShadowDiagnostics {
 }
 
 /**
+ * Tier-1 gap components used for near-pass diagnostics.
+ */
+export type Tier1GapComponent =
+  | 'bridgeWeight'
+  | 'nameMatch'
+  | 'companyMatch'
+  | 'locationMatch'
+  | 'profileCompleteness';
+
+/**
+ * Per-component deficit for a near-pass Tier-1 candidate.
+ */
+export interface Tier1GapDeficit {
+  component: Tier1GapComponent;
+  current: number;
+  max: number;
+  deficit: number;
+}
+
+/**
+ * Near-pass sample for Tier-1 introspection (telemetry-only).
+ */
+export interface Tier1GapSample {
+  platform: string;
+  platformId: string;
+  bridgeTier: BridgeTier;
+  signals: Tier1SignalSource[];
+  blockReasons: Tier1BlockReason[];
+  confidenceScore: number;
+  threshold: number;
+  distanceToThreshold: number;
+  scoreBreakdown: {
+    bridgeWeight: number;
+    nameMatch: number;
+    companyMatch: number;
+    locationMatch: number;
+    profileCompleteness: number;
+    total: number;
+  };
+  topDeficits: Tier1GapDeficit[];
+}
+
+/**
+ * Aggregated near-pass diagnostics for Tier-1 candidates.
+ */
+export interface Tier1GapDiagnostics {
+  enabled: boolean;
+  sampleRate: number;
+  threshold: number;
+  totalSignalCandidates: number;
+  belowThreshold: number;
+  avgDistanceToThreshold: number;
+  componentDeficitTotals: Record<Tier1GapComponent, number>;
+  samples: Tier1GapSample[];
+}
+
+/**
  * Create empty Tier-1 shadow diagnostics
  */
 export function createEmptyTier1Shadow(
@@ -231,6 +288,32 @@ export function createEmptyTier1Shadow(
       team_page: 0,
       id_mismatch: 0,
     },
+  };
+}
+
+/**
+ * Create empty Tier-1 gap diagnostics.
+ */
+export function createEmptyTier1Gap(
+  enabled: boolean,
+  sampleRate: number,
+  threshold: number
+): Tier1GapDiagnostics {
+  return {
+    enabled,
+    sampleRate,
+    threshold,
+    totalSignalCandidates: 0,
+    belowThreshold: 0,
+    avgDistanceToThreshold: 0,
+    componentDeficitTotals: {
+      bridgeWeight: 0,
+      nameMatch: 0,
+      companyMatch: 0,
+      locationMatch: 0,
+      profileCompleteness: 0,
+    },
+    samples: [],
   };
 }
 
@@ -374,6 +457,7 @@ export default {
   getConfidenceFloor,
   createBridgeDetection,
   createEmptyMetrics,
+  createEmptyTier1Gap,
   TIER_1_SIGNALS,
   TIER_2_SIGNALS,
   TIER_2_CAP,
