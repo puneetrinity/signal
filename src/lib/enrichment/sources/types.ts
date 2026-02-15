@@ -6,7 +6,13 @@
  */
 
 import type { RoleType } from '@/types/linkedin';
-import type { BridgeSignal, BridgeTier, ShadowScoringSummary, Tier1ShadowDiagnostics } from '../bridge-types';
+import type {
+  BridgeSignal,
+  BridgeTier,
+  ShadowScoringSummary,
+  Tier1ShadowDiagnostics,
+  Tier1GapDiagnostics,
+} from '../bridge-types';
 import type { ScoringMode } from '../scoring-metadata';
 
 /**
@@ -164,6 +170,8 @@ export interface PlatformDiagnostics {
   scoringMode?: ScoringMode;
   /** Tier-1 shadow evaluation diagnostics */
   tier1Shadow?: Tier1ShadowDiagnostics;
+  /** Tier-1 near-pass diagnostics (distance-to-threshold introspection) */
+  tier1Gap?: Tier1GapDiagnostics;
 }
 
 /**

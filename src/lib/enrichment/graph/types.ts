@@ -9,7 +9,7 @@
 import { Annotation } from '@langchain/langgraph';
 import type { RoleType } from '@/types/linkedin';
 import type { EnrichmentPlatform, DiscoveredIdentity, ScoreBreakdown, PlatformDiagnostics } from '../sources/types';
-import type { Tier1ShadowDiagnostics } from '../bridge-types';
+import type { Tier1ShadowDiagnostics, Tier1GapDiagnostics } from '../bridge-types';
 
 // Re-export for convenience
 export type { PlatformDiagnostics };
@@ -91,6 +91,8 @@ export interface EnrichmentRunTrace {
     rateLimited?: boolean;
     /** Tier-1 shadow evaluation diagnostics */
     tier1Shadow?: Tier1ShadowDiagnostics;
+    /** Tier-1 near-pass diagnostics */
+    tier1Gap?: Tier1GapDiagnostics;
   }>;
   /** Final aggregated results */
   final: {
@@ -146,6 +148,8 @@ export interface EnrichmentRunTrace {
     };
     /** Tier-1 shadow evaluation diagnostics (aggregated across platforms) */
     tier1Shadow?: Tier1ShadowDiagnostics;
+    /** Tier-1 near-pass diagnostics (aggregated across platforms) */
+    tier1Gap?: Tier1GapDiagnostics;
   };
   /** Failure reason if any */
   failureReason?: string;
