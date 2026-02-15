@@ -7,8 +7,6 @@
 
 import type { RoleType } from '@/types/linkedin';
 import type {
-  BridgeSignal,
-  BridgeTier,
   ShadowScoringSummary,
   Tier1ShadowDiagnostics,
   Tier1GapDiagnostics,
@@ -132,6 +130,8 @@ export interface DiscoveredIdentity {
   persistReason?: string;
   /** SERP position for tiebreaker sorting */
   serpPosition?: number;
+  /** Whether this identity was auto-confirmed via strict Tier-1 enforce */
+  tier1AutoConfirmed?: boolean;
 }
 
 /**

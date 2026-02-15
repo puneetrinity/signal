@@ -50,9 +50,12 @@ interface PlatformAggregate {
 interface Tier1ShadowAggregate {
   totalEvaluated: number;
   wouldAutoMerge: number;
+  tier1Enforced: number;
   actuallyPromoted: number;
+  enforceThreshold: number;
   blocked: number;
   blockReasonCounts: Record<string, number>;
+  enforceReasonCounts: Record<string, number>;
   sessionsWithData: number;
   samples: Array<{
     platform: string;
@@ -61,6 +64,9 @@ interface Tier1ShadowAggregate {
     blockReasons: string[];
     confidenceScore: number;
     wouldAutoMerge: boolean;
+    tier1Enforced: boolean;
+    enforceReason: string;
+    enforceThreshold: number;
     bridgeTier: number;
   }>;
 }
@@ -168,9 +174,12 @@ function buildSummary(sessions: SessionItem[]): DiagnosticsSummary {
     tier1Shadow: {
       totalEvaluated: 0,
       wouldAutoMerge: 0,
+      tier1Enforced: 0,
       actuallyPromoted: 0,
+      enforceThreshold: 0,
       blocked: 0,
       blockReasonCounts: {},
+      enforceReasonCounts: {},
       sessionsWithData: 0,
       samples: [],
     },
@@ -205,20 +214,31 @@ function buildSummary(sessions: SessionItem[]): DiagnosticsSummary {
     const tier1Shadow = final.tier1Shadow as {
       totalEvaluated?: number;
       wouldAutoMerge?: number;
+      tier1Enforced?: number;
       actuallyPromoted?: number;
+      enforceThreshold?: number;
       blocked?: number;
       blockReasonCounts?: Record<string, number>;
+      enforceReasonCounts?: Record<string, number>;
       samples?: Array<Record<string, unknown>>;
     } | undefined;
     if (tier1Shadow && typeof tier1Shadow.totalEvaluated === 'number' && tier1Shadow.totalEvaluated > 0) {
       summary.tier1Shadow.sessionsWithData++;
       summary.tier1Shadow.totalEvaluated += tier1Shadow.totalEvaluated;
       summary.tier1Shadow.wouldAutoMerge += tier1Shadow.wouldAutoMerge ?? 0;
+      summary.tier1Shadow.tier1Enforced += tier1Shadow.tier1Enforced ?? 0;
       summary.tier1Shadow.actuallyPromoted += tier1Shadow.actuallyPromoted ?? 0;
+      if (typeof tier1Shadow.enforceThreshold === 'number' && tier1Shadow.enforceThreshold > 0) {
+        summary.tier1Shadow.enforceThreshold = tier1Shadow.enforceThreshold;
+      }
       summary.tier1Shadow.blocked += tier1Shadow.blocked ?? 0;
       for (const [reason, count] of Object.entries(tier1Shadow.blockReasonCounts || {})) {
         summary.tier1Shadow.blockReasonCounts[reason] =
           (summary.tier1Shadow.blockReasonCounts[reason] || 0) + (count || 0);
+      }
+      for (const [reason, count] of Object.entries(tier1Shadow.enforceReasonCounts || {})) {
+        summary.tier1Shadow.enforceReasonCounts[reason] =
+          (summary.tier1Shadow.enforceReasonCounts[reason] || 0) + (count || 0);
       }
       for (const sample of (tier1Shadow.samples || []) as Array<Record<string, unknown>>) {
         if (summary.tier1Shadow.samples.length < 50) {
@@ -229,6 +249,9 @@ function buildSummary(sessions: SessionItem[]): DiagnosticsSummary {
             blockReasons: Array.isArray(sample.blockReasons) ? (sample.blockReasons as string[]) : [],
             confidenceScore: (sample.confidenceScore as number) || 0,
             wouldAutoMerge: (sample.wouldAutoMerge as boolean) || false,
+            tier1Enforced: (sample.tier1Enforced as boolean) || false,
+            enforceReason: (sample.enforceReason as string) || '',
+            enforceThreshold: (sample.enforceThreshold as number) || 0,
             bridgeTier: (sample.bridgeTier as number) || 3,
           });
         }
@@ -622,7 +645,7 @@ export default function EnrichmentDiagnosticsPage() {
               <CardTitle>Tier-1 Shadow Evaluation</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="grid gap-4 md:grid-cols-4 text-sm">
+              <div className="grid gap-4 md:grid-cols-6 text-sm">
                 <div className="flex items-center justify-between">
                   <span>Sessions with data</span>
                   <Badge variant="outline">{summary.tier1Shadow.sessionsWithData}</Badge>
@@ -636,8 +659,20 @@ export default function EnrichmentDiagnosticsPage() {
                   <Badge variant="outline">{summary.tier1Shadow.wouldAutoMerge}</Badge>
                 </div>
                 <div className="flex items-center justify-between">
+                  <span>Tier-1 enforced</span>
+                  <Badge variant="outline">{summary.tier1Shadow.tier1Enforced}</Badge>
+                </div>
+                <div className="flex items-center justify-between">
                   <span>Blocked</span>
                   <Badge variant="outline">{summary.tier1Shadow.blocked}</Badge>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Enforce threshold</span>
+                  <Badge variant="outline">
+                    {summary.tier1Shadow.enforceThreshold > 0
+                      ? summary.tier1Shadow.enforceThreshold.toFixed(2)
+                      : '-'}
+                  </Badge>
                 </div>
               </div>
               {Object.keys(summary.tier1Shadow.blockReasonCounts).length > 0 && (
@@ -645,6 +680,21 @@ export default function EnrichmentDiagnosticsPage() {
                   <div className="text-sm font-medium mb-2">Block Reasons</div>
                   <div className="grid gap-1 text-sm">
                     {Object.entries(summary.tier1Shadow.blockReasonCounts)
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([reason, count]) => (
+                        <div key={reason} className="flex items-center justify-between">
+                          <span className="text-muted-foreground">{reason}</span>
+                          <Badge variant="outline">{count}</Badge>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
+              {Object.keys(summary.tier1Shadow.enforceReasonCounts).length > 0 && (
+                <div>
+                  <div className="text-sm font-medium mb-2">Enforce Reasons</div>
+                  <div className="grid gap-1 text-sm">
+                    {Object.entries(summary.tier1Shadow.enforceReasonCounts)
                       .sort((a, b) => b[1] - a[1])
                       .map(([reason, count]) => (
                         <div key={reason} className="flex items-center justify-between">
@@ -671,6 +721,8 @@ export default function EnrichmentDiagnosticsPage() {
                           <th className="py-1">Signals</th>
                           <th className="py-1">Block Reasons</th>
                           <th className="py-1">Would Merge</th>
+                          <th className="py-1">Enforced</th>
+                          <th className="py-1">Enforce Reason</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -687,6 +739,12 @@ export default function EnrichmentDiagnosticsPage() {
                                 {sample.wouldAutoMerge ? 'Yes' : 'No'}
                               </Badge>
                             </td>
+                            <td className="py-1">
+                              <Badge variant={sample.tier1Enforced ? 'default' : 'outline'}>
+                                {sample.tier1Enforced ? 'Yes' : 'No'}
+                              </Badge>
+                            </td>
+                            <td className="py-1 text-xs">{sample.enforceReason || '-'}</td>
                           </tr>
                         ))}
                       </tbody>

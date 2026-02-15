@@ -110,6 +110,9 @@ interface Tier1ShadowSample {
   blockReasons: string[];
   confidenceScore: number;
   wouldAutoMerge: boolean;
+  tier1Enforced: boolean;
+  enforceReason: string;
+  enforceThreshold: number;
   actuallyPromoted: boolean;
   bridgeTier: number;
 }
@@ -117,13 +120,16 @@ interface Tier1ShadowSample {
 interface Tier1ShadowDiagnostics {
   enabled: boolean;
   enforce: boolean;
+  enforceThreshold: number;
   sampleRate: number;
   totalEvaluated: number;
   wouldAutoMerge: number;
+  tier1Enforced: number;
   actuallyPromoted: number;
   blocked: number;
   samples: Tier1ShadowSample[];
   blockReasonCounts: Record<string, number>;
+  enforceReasonCounts: Record<string, number>;
 }
 
 function aggregateTier1Shadow(
@@ -139,9 +145,11 @@ function aggregateTier1Shadow(
   const result: Tier1ShadowDiagnostics = {
     enabled: true,
     enforce: first.enforce,
+    enforceThreshold: first.enforceThreshold,
     sampleRate: first.sampleRate,
     totalEvaluated: 0,
     wouldAutoMerge: 0,
+    tier1Enforced: 0,
     actuallyPromoted: 0,
     blocked: 0,
     samples: [],
@@ -153,15 +161,30 @@ function aggregateTier1Shadow(
       team_page: 0,
       id_mismatch: 0,
     },
+    enforceReasonCounts: {
+      eligible: 0,
+      enforce_disabled: 0,
+      not_tier1: 0,
+      missing_strict_signal: 0,
+      below_enforce_threshold: 0,
+      contradiction: 0,
+      name_mismatch: 0,
+      team_page: 0,
+      id_mismatch: 0,
+    },
   };
 
   for (const shadow of shadows) {
     result.totalEvaluated += shadow.totalEvaluated;
     result.wouldAutoMerge += shadow.wouldAutoMerge;
+    result.tier1Enforced += shadow.tier1Enforced;
     result.actuallyPromoted += shadow.actuallyPromoted;
     result.blocked += shadow.blocked;
     for (const [reason, count] of Object.entries(shadow.blockReasonCounts)) {
       result.blockReasonCounts[reason] = (result.blockReasonCounts[reason] || 0) + count;
+    }
+    for (const [reason, count] of Object.entries(shadow.enforceReasonCounts)) {
+      result.enforceReasonCounts[reason] = (result.enforceReasonCounts[reason] || 0) + count;
     }
     for (const sample of shadow.samples) {
       if (result.samples.length < 50) {
@@ -177,32 +200,35 @@ console.log('\n=== Test 3: aggregateTier1Shadow ===');
 
 // Create 3 platform shadows
 const platform1: Tier1ShadowDiagnostics = {
-  enabled: true, enforce: false, sampleRate: 1,
-  totalEvaluated: 5, wouldAutoMerge: 1, actuallyPromoted: 0, blocked: 4,
+  enabled: true, enforce: false, enforceThreshold: 0.83, sampleRate: 1,
+  totalEvaluated: 5, wouldAutoMerge: 1, tier1Enforced: 0, actuallyPromoted: 0, blocked: 4,
   samples: [
-    { platform: 'github', platformId: 'user1', signals: ['linkedin_url_in_bio'], blockReasons: [], confidenceScore: 0.9, wouldAutoMerge: true, actuallyPromoted: false, bridgeTier: 1 },
-    { platform: 'github', platformId: 'user2', signals: [], blockReasons: ['no_bridge_signal', 'low_confidence'], confidenceScore: 0.3, wouldAutoMerge: false, actuallyPromoted: false, bridgeTier: 3 },
+    { platform: 'github', platformId: 'user1', signals: ['linkedin_url_in_bio'], blockReasons: [], confidenceScore: 0.9, wouldAutoMerge: true, tier1Enforced: false, enforceReason: 'enforce_disabled', enforceThreshold: 0.83, actuallyPromoted: false, bridgeTier: 1 },
+    { platform: 'github', platformId: 'user2', signals: [], blockReasons: ['no_bridge_signal', 'low_confidence'], confidenceScore: 0.3, wouldAutoMerge: false, tier1Enforced: false, enforceReason: 'not_tier1', enforceThreshold: 0.83, actuallyPromoted: false, bridgeTier: 3 },
   ],
   blockReasonCounts: { no_bridge_signal: 2, low_confidence: 3, contradiction: 0, name_mismatch: 0, team_page: 0, id_mismatch: 0 },
+  enforceReasonCounts: { eligible: 0, enforce_disabled: 1, not_tier1: 1, missing_strict_signal: 0, below_enforce_threshold: 0, contradiction: 0, name_mismatch: 0, team_page: 0, id_mismatch: 0 },
 };
 
 const platform2: Tier1ShadowDiagnostics = {
-  enabled: true, enforce: false, sampleRate: 1,
-  totalEvaluated: 3, wouldAutoMerge: 0, actuallyPromoted: 0, blocked: 3,
+  enabled: true, enforce: false, enforceThreshold: 0.83, sampleRate: 1,
+  totalEvaluated: 3, wouldAutoMerge: 0, tier1Enforced: 0, actuallyPromoted: 0, blocked: 3,
   samples: [
-    { platform: 'stackoverflow', platformId: 'user3', signals: [], blockReasons: ['no_bridge_signal'], confidenceScore: 0.4, wouldAutoMerge: false, actuallyPromoted: false, bridgeTier: 3 },
+    { platform: 'stackoverflow', platformId: 'user3', signals: [], blockReasons: ['no_bridge_signal'], confidenceScore: 0.4, wouldAutoMerge: false, tier1Enforced: false, enforceReason: 'not_tier1', enforceThreshold: 0.83, actuallyPromoted: false, bridgeTier: 3 },
   ],
   blockReasonCounts: { no_bridge_signal: 3, low_confidence: 1, contradiction: 1, name_mismatch: 0, team_page: 0, id_mismatch: 0 },
+  enforceReasonCounts: { eligible: 0, enforce_disabled: 0, not_tier1: 1, missing_strict_signal: 0, below_enforce_threshold: 0, contradiction: 0, name_mismatch: 0, team_page: 0, id_mismatch: 0 },
 };
 
 const platform3: Tier1ShadowDiagnostics = {
-  enabled: true, enforce: false, sampleRate: 1,
-  totalEvaluated: 2, wouldAutoMerge: 2, actuallyPromoted: 0, blocked: 0,
+  enabled: true, enforce: false, enforceThreshold: 0.83, sampleRate: 1,
+  totalEvaluated: 2, wouldAutoMerge: 2, tier1Enforced: 0, actuallyPromoted: 0, blocked: 0,
   samples: [
-    { platform: 'medium', platformId: 'user4', signals: ['mutual_reference'], blockReasons: [], confidenceScore: 0.95, wouldAutoMerge: true, actuallyPromoted: false, bridgeTier: 1 },
-    { platform: 'medium', platformId: 'user5', signals: ['linkedin_url_in_page'], blockReasons: [], confidenceScore: 0.88, wouldAutoMerge: true, actuallyPromoted: false, bridgeTier: 1 },
+    { platform: 'medium', platformId: 'user4', signals: ['mutual_reference'], blockReasons: [], confidenceScore: 0.95, wouldAutoMerge: true, tier1Enforced: false, enforceReason: 'enforce_disabled', enforceThreshold: 0.83, actuallyPromoted: false, bridgeTier: 1 },
+    { platform: 'medium', platformId: 'user5', signals: ['linkedin_url_in_page'], blockReasons: [], confidenceScore: 0.88, wouldAutoMerge: true, tier1Enforced: false, enforceReason: 'enforce_disabled', enforceThreshold: 0.83, actuallyPromoted: false, bridgeTier: 1 },
   ],
   blockReasonCounts: { no_bridge_signal: 0, low_confidence: 0, contradiction: 0, name_mismatch: 0, team_page: 0, id_mismatch: 0 },
+  enforceReasonCounts: { eligible: 0, enforce_disabled: 2, not_tier1: 0, missing_strict_signal: 0, below_enforce_threshold: 0, contradiction: 0, name_mismatch: 0, team_page: 0, id_mismatch: 0 },
 };
 
 const aggregated = aggregateTier1Shadow({
@@ -214,6 +240,7 @@ const aggregated = aggregateTier1Shadow({
 const checks = [
   ['totalEvaluated', aggregated?.totalEvaluated === 10],
   ['wouldAutoMerge', aggregated?.wouldAutoMerge === 3],
+  ['tier1Enforced', aggregated?.tier1Enforced === 0],
   ['actuallyPromoted', aggregated?.actuallyPromoted === 0],
   ['blocked', aggregated?.blocked === 7],
   ['no_bridge_signal count', aggregated?.blockReasonCounts.no_bridge_signal === 5],
@@ -231,13 +258,14 @@ for (const [name, pass] of checks) {
 
 // Test sample cap at 50
 const bigPlatform: Tier1ShadowDiagnostics = {
-  enabled: true, enforce: false, sampleRate: 1,
-  totalEvaluated: 60, wouldAutoMerge: 0, actuallyPromoted: 0, blocked: 60,
+  enabled: true, enforce: false, enforceThreshold: 0.83, sampleRate: 1,
+  totalEvaluated: 60, wouldAutoMerge: 0, tier1Enforced: 0, actuallyPromoted: 0, blocked: 60,
   samples: Array.from({ length: 60 }, (_, i) => ({
     platform: 'github', platformId: `user-${i}`, signals: [] as string[], blockReasons: ['no_bridge_signal'],
-    confidenceScore: 0.1, wouldAutoMerge: false, actuallyPromoted: false, bridgeTier: 3 as number,
+    confidenceScore: 0.1, wouldAutoMerge: false, tier1Enforced: false, enforceReason: 'not_tier1', enforceThreshold: 0.83, actuallyPromoted: false, bridgeTier: 3 as number,
   })),
   blockReasonCounts: { no_bridge_signal: 60, low_confidence: 0, contradiction: 0, name_mismatch: 0, team_page: 0, id_mismatch: 0 },
+  enforceReasonCounts: { eligible: 0, enforce_disabled: 0, not_tier1: 60, missing_strict_signal: 0, below_enforce_threshold: 0, contradiction: 0, name_mismatch: 0, team_page: 0, id_mismatch: 0 },
 };
 
 const cappedResult = aggregateTier1Shadow({ github: { tier1Shadow: bigPlatform } });

@@ -101,9 +101,11 @@ function aggregateTier1Shadow(
   const result: Tier1ShadowDiagnostics = {
     enabled: true,
     enforce: first.enforce,
+    enforceThreshold: first.enforceThreshold,
     sampleRate: first.sampleRate,
     totalEvaluated: 0,
     wouldAutoMerge: 0,
+    tier1Enforced: 0,
     actuallyPromoted: 0,
     blocked: 0,
     samples: [],
@@ -115,15 +117,30 @@ function aggregateTier1Shadow(
       team_page: 0,
       id_mismatch: 0,
     },
+    enforceReasonCounts: {
+      eligible: 0,
+      enforce_disabled: 0,
+      not_tier1: 0,
+      missing_strict_signal: 0,
+      below_enforce_threshold: 0,
+      contradiction: 0,
+      name_mismatch: 0,
+      team_page: 0,
+      id_mismatch: 0,
+    },
   };
 
   for (const shadow of shadows) {
     result.totalEvaluated += shadow.totalEvaluated;
     result.wouldAutoMerge += shadow.wouldAutoMerge;
+    result.tier1Enforced += shadow.tier1Enforced;
     result.actuallyPromoted += shadow.actuallyPromoted;
     result.blocked += shadow.blocked;
     for (const [reason, count] of Object.entries(shadow.blockReasonCounts)) {
       result.blockReasonCounts[reason as Tier1BlockReason] += count;
+    }
+    for (const [reason, count] of Object.entries(shadow.enforceReasonCounts)) {
+      result.enforceReasonCounts[reason as keyof typeof result.enforceReasonCounts] += count;
     }
     for (const sample of shadow.samples) {
       if (result.samples.length < 50) {
@@ -283,6 +300,12 @@ function buildRunTrace(state: EnrichmentState): EnrichmentRunTrace {
   const variantStats = (allExecutedVariants.length > 0 || allRejectedVariants.length > 0)
     ? buildVariantStats(allExecutedVariants, allRejectedVariants)
     : undefined;
+  const aggregatedTier1Shadow = aggregateTier1Shadow(platformResults);
+  const aggregatedTier1Gap = aggregateTier1Gap(platformResults);
+  const dominantTier1EnforceReason = aggregatedTier1Shadow
+    ? Object.entries(aggregatedTier1Shadow.enforceReasonCounts)
+        .sort((a, b) => b[1] - a[1])[0]?.[0]
+    : undefined;
 
   return {
     input: {
@@ -318,9 +341,12 @@ function buildRunTrace(state: EnrichmentState): EnrichmentRunTrace {
       // Summary metadata for draft/verified tracking
       summaryMeta: sanitizeSummaryMeta(state.summaryMeta),
       // Tier-1 shadow diagnostics (aggregated across platforms)
-      tier1Shadow: aggregateTier1Shadow(platformResults),
+      tier1Shadow: aggregatedTier1Shadow,
+      tier1Enforced: aggregatedTier1Shadow?.tier1Enforced,
+      tier1EnforceThreshold: aggregatedTier1Shadow?.enforceThreshold,
+      tier1EnforceReason: dominantTier1EnforceReason,
       // Tier-1 near-pass diagnostics (aggregated across platforms)
-      tier1Gap: aggregateTier1Gap(platformResults),
+      tier1Gap: aggregatedTier1Gap,
     },
     failureReason: state.status === 'failed' ? state.errors?.[0]?.message : undefined,
   };
@@ -577,6 +603,7 @@ export async function githubBridgeNode(
       bridgeTier: i.bridgeTier,
       bridgeSignals: i.bridge?.signals,
       persistReason: i.persistReason,
+      tier1AutoConfirmed: i.tier1AutoConfirmed,
     }));
 
     const platformResult: PlatformQueryResult = {

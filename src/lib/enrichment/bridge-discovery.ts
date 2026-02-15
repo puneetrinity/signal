@@ -56,6 +56,7 @@ import {
   type Tier1ShadowDiagnostics,
   type Tier1ShadowSample,
   type Tier1BlockReason,
+  type Tier1EnforceReason,
   type Tier1SignalSource,
   type Tier1GapDiagnostics,
   type Tier1GapSample,
@@ -64,6 +65,7 @@ import {
   createEmptyMetrics,
   createEmptyTier1Gap,
   createEmptyTier1Shadow,
+  TIER_1_ENFORCE_SIGNALS,
   TIER_1_SIGNALS,
 } from './bridge-types';
 import {
@@ -71,7 +73,10 @@ import {
   extractAllHintsWithConfidence,
   mergeHintsFromSerpMeta,
 } from './hint-extraction';
-import { getEnrichmentMinConfidenceThreshold } from './config';
+import {
+  getEnrichmentMinConfidenceThreshold,
+  getTier1EnforceMinConfidenceThreshold,
+} from './config';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger('BridgeDiscovery');
@@ -122,6 +127,8 @@ export interface DiscoveredIdentity {
   persistReason?: string;
   /** SERP position for tiebreaker sorting */
   serpPosition?: number;
+  /** Whether this identity was auto-confirmed via strict Tier-1 enforce */
+  tier1AutoConfirmed?: boolean;
 }
 
 /**
@@ -177,7 +184,7 @@ const TIER1_GAP_SAMPLE_RATE = (() => {
   if (!Number.isFinite(raw) || raw < 0) return 1;
   return Math.min(raw, 1);
 })();
-const TIER1_AUTO_MERGE_THRESHOLD = 0.85;
+const TIER1_ENFORCE_MIN_CONFIDENCE = getTier1EnforceMinConfidenceThreshold('BridgeDiscovery');
 
 /**
  * Deterministic sampler: hash(sessionId + platformId) → 0..99
@@ -209,6 +216,26 @@ function buildTier1GapDeficits(score: ScoreBreakdown): Tier1GapDeficit[] {
       return { component, current, max, deficit };
     })
     .sort((a, b) => b.deficit - a.deficit);
+}
+
+function resolveTier1EnforceReason(input: {
+  isTier1Candidate: boolean;
+  hasStrictSignal: boolean;
+  meetsThreshold: boolean;
+  hasContradiction: boolean;
+  nameMismatch: boolean;
+  hasTeamPageSignal: boolean;
+  hasIdMismatch: boolean;
+}): Tier1EnforceReason {
+  if (!input.isTier1Candidate) return 'not_tier1';
+  if (!input.hasStrictSignal) return 'missing_strict_signal';
+  if (!input.meetsThreshold) return 'below_enforce_threshold';
+  if (input.hasContradiction) return 'contradiction';
+  if (input.nameMismatch) return 'name_mismatch';
+  if (input.hasTeamPageSignal) return 'team_page';
+  if (input.hasIdMismatch) return 'id_mismatch';
+  if (!TIER1_ENFORCE) return 'enforce_disabled';
+  return 'eligible';
 }
 
 function getBridgeQueryBudget(): number {
@@ -848,10 +875,10 @@ export async function discoverGitHubIdentities(
 
   // Initialize Tier-1 shadow diagnostics
   const tier1Shadow = TIER1_SHADOW
-    ? createEmptyTier1Shadow(true, TIER1_ENFORCE, TIER1_SAMPLE_RATE)
+    ? createEmptyTier1Shadow(true, TIER1_ENFORCE, TIER1_SAMPLE_RATE, TIER1_ENFORCE_MIN_CONFIDENCE)
     : undefined;
   const tier1Gap = TIER1_GAP_DIAGNOSTICS
-    ? createEmptyTier1Gap(true, TIER1_GAP_SAMPLE_RATE, TIER1_AUTO_MERGE_THRESHOLD)
+    ? createEmptyTier1Gap(true, TIER1_GAP_SAMPLE_RATE, TIER1_ENFORCE_MIN_CONFIDENCE)
     : undefined;
   const shadowSessionId = opts.sessionId || candidateId;
 
@@ -1068,21 +1095,44 @@ export async function discoverGitHubIdentities(
         !!candidateLinkedInId &&
         !!linkedInId &&
         canonicalizeLinkedInSlug(linkedInId) !== candidateLinkedInId;
+      const hasStrictTier1Signal =
+        tier1Signals.some((s) => TIER_1_ENFORCE_SIGNALS.includes(s));
+      const isTier1Candidate = bridge.tier === 1;
+      const meetsEnforceThreshold = confidence >= TIER1_ENFORCE_MIN_CONFIDENCE;
       const blockReasons: Tier1BlockReason[] = [];
       if (tier1Signals.length === 0) blockReasons.push('no_bridge_signal');
-      if (confidence < TIER1_AUTO_MERGE_THRESHOLD) blockReasons.push('low_confidence');
+      if (!meetsEnforceThreshold) blockReasons.push('low_confidence');
       if (hasContradiction) blockReasons.push('contradiction');
       if (nameMismatch) blockReasons.push('name_mismatch');
       if (hasTeamPageSignal) blockReasons.push('team_page');
       if (hasIdMismatch) blockReasons.push('id_mismatch');
-      const wouldAutoMerge = tier1Signals.length > 0 &&
-        confidence >= TIER1_AUTO_MERGE_THRESHOLD &&
+      const wouldAutoMerge = isTier1Candidate &&
+        hasStrictTier1Signal &&
+        meetsEnforceThreshold &&
         !hasContradiction &&
         !nameMismatch &&
         !hasTeamPageSignal &&
         !hasIdMismatch;
+      const tier1Enforced = TIER1_ENFORCE && wouldAutoMerge;
+      const enforceReason = resolveTier1EnforceReason({
+        isTier1Candidate,
+        hasStrictSignal: hasStrictTier1Signal,
+        meetsThreshold: meetsEnforceThreshold,
+        hasContradiction,
+        nameMismatch,
+        hasTeamPageSignal,
+        hasIdMismatch,
+      });
+      const effectiveBridge = TIER1_ENFORCE && isTier1Candidate && !tier1Enforced
+        ? {
+            ...bridge,
+            tier: 2 as const,
+            confidenceFloor: 0.5,
+            autoMergeEligible: false,
+          }
+        : bridge;
 
-      // Tier-1 shadow evaluation (log-only, no behavior change)
+      // Tier-1 shadow evaluation
       if (tier1Shadow && deterministicSample(shadowSessionId, login) < TIER1_SAMPLE_RATE * 100) {
         const sample: Tier1ShadowSample = {
           platform: 'github',
@@ -1091,12 +1141,20 @@ export async function discoverGitHubIdentities(
           blockReasons,
           confidenceScore: confidence,
           wouldAutoMerge,
-          actuallyPromoted: false, // Always false - this PR is log-only
+          tier1Enforced,
+          enforceReason,
+          enforceThreshold: TIER1_ENFORCE_MIN_CONFIDENCE,
+          actuallyPromoted: tier1Enforced,
           bridgeTier: bridge.tier,
         };
 
         tier1Shadow.totalEvaluated++;
         if (wouldAutoMerge) tier1Shadow.wouldAutoMerge++;
+        if (tier1Enforced) {
+          tier1Shadow.tier1Enforced++;
+          tier1Shadow.actuallyPromoted++;
+        }
+        tier1Shadow.enforceReasonCounts[enforceReason]++;
         if (!wouldAutoMerge) {
           tier1Shadow.blocked++;
           for (const reason of blockReasons) {
@@ -1112,8 +1170,8 @@ export async function discoverGitHubIdentities(
       if (tier1Gap && deterministicSample(`${shadowSessionId}:gap`, login) < TIER1_GAP_SAMPLE_RATE * 100) {
         if (tier1Signals.length > 0) {
           tier1Gap.totalSignalCandidates++;
-          if (confidence < TIER1_AUTO_MERGE_THRESHOLD) {
-            const distanceToThreshold = TIER1_AUTO_MERGE_THRESHOLD - confidence;
+          if (!meetsEnforceThreshold) {
+            const distanceToThreshold = TIER1_ENFORCE_MIN_CONFIDENCE - confidence;
             tier1Gap.belowThreshold++;
             tier1Gap.avgDistanceToThreshold =
               ((tier1Gap.avgDistanceToThreshold * (tier1Gap.belowThreshold - 1)) + distanceToThreshold) /
@@ -1130,7 +1188,7 @@ export async function discoverGitHubIdentities(
                 signals: tier1Signals,
                 blockReasons,
                 confidenceScore: confidence,
-                threshold: TIER1_AUTO_MERGE_THRESHOLD,
+                threshold: TIER1_ENFORCE_MIN_CONFIDENCE,
                 distanceToThreshold,
                 scoreBreakdown: {
                   bridgeWeight: scoreBreakdown.bridgeWeight,
@@ -1150,19 +1208,20 @@ export async function discoverGitHubIdentities(
 
       const persistResult = shouldPersistWithBridge(
         scoreBreakdown,
-        bridge,
-        tier2Count
+        effectiveBridge,
+        tier2Count,
+        TIER1_ENFORCE ? TIER1_ENFORCE_MIN_CONFIDENCE : 0.90
       );
 
       metrics.identitiesByTier[persistResult.tier] =
         (metrics.identitiesByTier[persistResult.tier] || 0) + 1;
 
       if (persistResult.shouldPersist) {
-        if (bridge.tier === 2) {
+        if (effectiveBridge.tier === 2) {
           tier2Count += 1;
         }
 
-        if (bridge.tier === 1) {
+        if (effectiveBridge.tier === 1) {
           hasTier1Bridge = true;
           metrics.hasTier1Bridge = true;
         }
@@ -1185,26 +1244,29 @@ export async function discoverGitHubIdentities(
             followers: profile.followers,
             publicRepos: profile.public_repos,
           },
-          bridge,
-          bridgeTier: bridge.tier,
-          persistReason: persistResult.reason,
+          bridge: effectiveBridge,
+          bridgeTier: effectiveBridge.tier,
+          persistReason: tier1Enforced
+            ? `Tier-1 enforced auto-merge (${confidence.toFixed(2)} >= ${TIER1_ENFORCE_MIN_CONFIDENCE.toFixed(2)}): ${persistResult.reason}`
+            : persistResult.reason,
           serpPosition,
+          tier1AutoConfirmed: tier1Enforced,
         });
 
         log.info({
           login,
           confidence,
-          tier: bridge.tier,
+          tier: effectiveBridge.tier,
           reason: persistResult.reason,
         }, 'Found match');
 
-        if (bridge.tier === 1) {
+        if (effectiveBridge.tier === 1) {
           earlyStopReason = 'tier1_bridge_found';
         }
       } else {
         log.info({
           login,
-          tier: bridge.tier,
+          tier: effectiveBridge.tier,
           reason: persistResult.reason,
         }, 'Skipped');
       }
@@ -1318,10 +1380,14 @@ export async function discoverGitHubIdentities(
   if (tier1Shadow && tier1Shadow.totalEvaluated > 0) {
     log.info({
       linkedinId: hints.linkedinId,
+      enforce: tier1Shadow.enforce,
+      enforceThreshold: tier1Shadow.enforceThreshold,
       totalEvaluated: tier1Shadow.totalEvaluated,
       wouldAutoMerge: tier1Shadow.wouldAutoMerge,
+      tier1Enforced: tier1Shadow.tier1Enforced,
       blocked: tier1Shadow.blocked,
       blockReasonCounts: tier1Shadow.blockReasonCounts,
+      enforceReasonCounts: tier1Shadow.enforceReasonCounts,
     }, 'Tier-1 shadow');
   }
 

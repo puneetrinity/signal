@@ -716,7 +716,8 @@ function formatBridgeReason(bridge: BridgeDetection, score: ScoreBreakdown): str
 export function shouldPersistWithBridge(
   score: ScoreBreakdown,
   bridge: BridgeDetection,
-  tier2Count: number = 0
+  tier2Count: number = 0,
+  autoMergeThreshold: number = 0.90
 ): {
   shouldPersist: boolean;
   reason: string;
@@ -726,12 +727,13 @@ export function shouldPersistWithBridge(
 
   // Tier 1: Always persist (explicit bidirectional link)
   if (bridge.tier === 1) {
-    const autoMergeEligible = score.total >= 0.90;
+    const autoMergeEligible = score.total >= autoMergeThreshold;
+    const thresholdLabel = autoMergeThreshold.toFixed(2);
     return {
       shouldPersist: true,
       reason: autoMergeEligible
-        ? `Tier-1 bridge, auto-merge eligible (${score.total.toFixed(2)} >= 0.90): ${bridgeReason}`
-        : `Tier-1 bridge detected (${score.total.toFixed(2)} < 0.90 auto-merge threshold): ${bridgeReason}`,
+        ? `Tier-1 bridge, auto-merge eligible (${score.total.toFixed(2)} >= ${thresholdLabel}): ${bridgeReason}`
+        : `Tier-1 bridge detected (${score.total.toFixed(2)} < ${thresholdLabel} auto-merge threshold): ${bridgeReason}`,
       tier: 1,
     };
   }

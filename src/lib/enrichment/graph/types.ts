@@ -8,7 +8,7 @@
 
 import { Annotation } from '@langchain/langgraph';
 import type { RoleType } from '@/types/linkedin';
-import type { EnrichmentPlatform, DiscoveredIdentity, ScoreBreakdown, PlatformDiagnostics } from '../sources/types';
+import type { EnrichmentPlatform, DiscoveredIdentity, PlatformDiagnostics } from '../sources/types';
 import type { Tier1ShadowDiagnostics, Tier1GapDiagnostics } from '../bridge-types';
 
 // Re-export for convenience
@@ -148,6 +148,12 @@ export interface EnrichmentRunTrace {
     };
     /** Tier-1 shadow evaluation diagnostics (aggregated across platforms) */
     tier1Shadow?: Tier1ShadowDiagnostics;
+    /** Number of identities kept at Tier-1 by strict enforce rule in this run. */
+    tier1Enforced?: number;
+    /** Tier-1 enforce threshold used in this run. */
+    tier1EnforceThreshold?: number;
+    /** Dominant enforce reason across evaluated Tier-1 shadow samples. */
+    tier1EnforceReason?: string;
     /** Tier-1 near-pass diagnostics (aggregated across platforms) */
     tier1Gap?: Tier1GapDiagnostics;
   };

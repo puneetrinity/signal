@@ -178,6 +178,20 @@ export type Tier1SignalSource =
   | 'mutual_reference';
 
 /**
+ * Strict-subset Tier-1 enforce reason.
+ */
+export type Tier1EnforceReason =
+  | 'eligible'
+  | 'enforce_disabled'
+  | 'not_tier1'
+  | 'missing_strict_signal'
+  | 'below_enforce_threshold'
+  | 'contradiction'
+  | 'name_mismatch'
+  | 'team_page'
+  | 'id_mismatch';
+
+/**
  * Per-identity shadow sample for Tier-1 evaluation
  */
 export interface Tier1ShadowSample {
@@ -187,6 +201,9 @@ export interface Tier1ShadowSample {
   blockReasons: Tier1BlockReason[];
   confidenceScore: number;
   wouldAutoMerge: boolean;
+  tier1Enforced: boolean;
+  enforceReason: Tier1EnforceReason;
+  enforceThreshold: number;
   actuallyPromoted: boolean;
   bridgeTier: BridgeTier;
 }
@@ -197,13 +214,16 @@ export interface Tier1ShadowSample {
 export interface Tier1ShadowDiagnostics {
   enabled: boolean;
   enforce: boolean;
+  enforceThreshold: number;
   sampleRate: number;
   totalEvaluated: number;
   wouldAutoMerge: number;
+  tier1Enforced: number;
   actuallyPromoted: number;
   blocked: number;
   samples: Tier1ShadowSample[];
   blockReasonCounts: Record<Tier1BlockReason, number>;
+  enforceReasonCounts: Record<Tier1EnforceReason, number>;
 }
 
 /**
@@ -269,20 +289,34 @@ export interface Tier1GapDiagnostics {
 export function createEmptyTier1Shadow(
   enabled: boolean,
   enforce: boolean,
-  sampleRate: number
+  sampleRate: number,
+  enforceThreshold: number
 ): Tier1ShadowDiagnostics {
   return {
     enabled,
     enforce,
+    enforceThreshold,
     sampleRate,
     totalEvaluated: 0,
     wouldAutoMerge: 0,
+    tier1Enforced: 0,
     actuallyPromoted: 0,
     blocked: 0,
     samples: [],
     blockReasonCounts: {
       no_bridge_signal: 0,
       low_confidence: 0,
+      contradiction: 0,
+      name_mismatch: 0,
+      team_page: 0,
+      id_mismatch: 0,
+    },
+    enforceReasonCounts: {
+      eligible: 0,
+      enforce_disabled: 0,
+      not_tier1: 0,
+      missing_strict_signal: 0,
+      below_enforce_threshold: 0,
       contradiction: 0,
       name_mismatch: 0,
       team_page: 0,
@@ -325,6 +359,15 @@ export const TIER_1_SIGNALS: BridgeSignal[] = [
   'linkedin_url_in_blog',
   'linkedin_url_in_page',
   'mutual_reference',
+];
+
+/**
+ * Strict subset of Tier-1 signals eligible for auto-confirm enforcement.
+ * Only bio/blog links (strongest evidence) qualify.
+ */
+export const TIER_1_ENFORCE_SIGNALS: BridgeSignal[] = [
+  'linkedin_url_in_bio',
+  'linkedin_url_in_blog',
 ];
 
 /**
