@@ -13,6 +13,7 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:generate": "prisma generate",
     "worker:enrichment": "tsx src/lib/enrichment/worker.ts",
+    "worker:sourcing": "tsx src/lib/sourcing/worker.ts",
     "eval": "tsx scripts/eval-enrichment.ts",
     "eval:verbose": "tsx scripts/eval-enrichment.ts --verbose"
   },

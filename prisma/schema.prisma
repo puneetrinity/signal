@@ -155,6 +155,8 @@ model Candidate {
   identityCandidates  IdentityCandidate[]
   confirmedIdentities ConfirmedIdentity[]
   enrichmentSessions  EnrichmentSession[]
+  sourcingCandidates  JobSourcingCandidate[]
+  intelligenceSnapshots CandidateIntelligenceSnapshot[]
 
   // Tenant-scoped unique constraints
   @@unique([tenantId, linkedinUrl])
@@ -167,6 +169,32 @@ model Candidate {
   @@index([confidenceScore])
   @@index([createdAt])
   @@map("candidates")
+}
+
+/// CandidateIntelligenceSnapshot: Structured enrichment data computed at enrichment time
+model CandidateIntelligenceSnapshot {
+  id                  String   @id @default(cuid())
+  candidateId         String
+  tenantId            String
+  track               String   @default("tech")  // tech | non_tech
+  skillsNormalized    String[]
+  roleType            String?
+  seniorityBand       String?
+  location            String?
+  industries          String[] @default([])
+  activityRecencyDays Int?
+  computedAt          DateTime @default(now())
+  staleAfter          DateTime
+  sourceSessionId     String?
+  sourceFingerprint   String?
+  signalsJson         Json?
+
+  candidate           Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@unique([candidateId, tenantId, track])
+  @@index([tenantId, track])
+  @@index([tenantId, staleAfter])
+  @@map("candidate_intelligence_snapshots")
 }
 
 /// IdentityCandidate: Unconfirmed identity signals
@@ -424,4 +452,46 @@ model SearchCacheV2 {
   @@index([tenantId, queryHash])
   @@index([expiresAt])
   @@map("search_cache_v2")
+}
+
+model JobSourcingRequest {
+  id                String   @id @default(cuid())
+  tenantId          String
+  externalJobId     String
+  jobContextHash    String
+  jobContext        Json
+  callbackUrl       String
+  status            String   @default("queued")
+  requestedAt       DateTime @default(now())
+  completedAt       DateTime?
+  callbackAttempts  Int      @default(0)
+  lastCallbackError String?  @db.Text
+  resultCount       Int?
+
+  candidates        JobSourcingCandidate[]
+
+  @@unique([tenantId, externalJobId, jobContextHash])
+  @@index([tenantId, status])
+  @@map("job_sourcing_requests")
+}
+
+model JobSourcingCandidate {
+  id                String @id @default(cuid())
+  tenantId          String
+  sourcingRequestId String
+  candidateId       String
+  fitScore          Float?
+  fitBreakdown      Json?
+  sourceType        String
+  enrichmentStatus  String
+  rank              Int
+
+  sourcingRequest   JobSourcingRequest @relation(fields: [sourcingRequestId], references: [id])
+  candidate         Candidate          @relation(fields: [candidateId], references: [id])
+
+  @@unique([sourcingRequestId, candidateId])
+  @@index([tenantId, sourcingRequestId])
+  @@index([sourcingRequestId])
+  @@index([candidateId])
+  @@map("job_sourcing_candidates")
 }

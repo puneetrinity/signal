@@ -1,6 +1,7 @@
 # Offline Eval Harness + Bridge Tiering Reliability
 
 > **Status: LOCKED** — All CI gates passing as of 2025-12-23
+> **Tier-1 Enforce: LIVE** — Rolled out 2026-02-15, 210 sessions, 100% precision
 
 ## Done
 
@@ -17,6 +18,12 @@
   - [x] Auto-merge precision: **100%** (>= 98%)
   - [x] Tier-1 detection recall: **88.9%** (>= 85%)
   - [x] Persisted identity rate: **75.0%** (>= 50%)
+- [x] **Tier-1 strict-subset enforcement** (2026-02-15)
+  - [x] Enforce predicate: `linkedin_url_in_bio` or `linkedin_url_in_blog` + conf >= 0.83 + no contradiction
+  - [x] Non-qualifying Tier-1 downgraded to Tier-2 when enforce is on
+  - [x] Shadow telemetry: `tier1Shadow`, `tier1Gap`, `enforceReasonCounts` in run trace
+  - [x] Kill switch: `ENRICHMENT_TIER1_ENFORCE=false`
+  - [x] Production rollout: 210 sessions, 30/30 enforced correct, 0 failures
 
 ## Current metrics (eval)
 
@@ -60,5 +67,7 @@ npm run eval  # ~30ms, runs in CI on every PR
 | `eval/fixtures/candidates.jsonl` | Test fixtures with mock search/GitHub data |
 | `eval/config.json` | Thresholds and eval configuration |
 | `scripts/eval-enrichment.ts` | Eval runner CLI |
-| `src/lib/enrichment/bridge-discovery.ts` | Core bridge discovery with Tier-1 boost |
+| `src/lib/enrichment/bridge-discovery.ts` | Core bridge discovery with Tier-1 boost + enforce predicate |
+| `src/lib/enrichment/bridge-types.ts` | Tier/signal types, `TIER_1_ENFORCE_SIGNALS` |
+| `src/lib/enrichment/config.ts` | Threshold configuration (enforce min confidence) |
 | `src/lib/enrichment/scoring.ts` | Confidence scoring logic |

@@ -1,7 +1,7 @@
 # V2 Enrichment System Architecture
 
-> **Last Updated:** 2025-12-23
-> **Status:** Production-ready, eval harness protected
+> **Last Updated:** 2026-02-15
+> **Status:** Production-ready, eval harness protected, Tier-1 enforce live
 
 ## Executive Summary
 
@@ -366,11 +366,11 @@ Candidate Input
 
 ### Bridge Tier Classification
 
-| Tier | Description | Confidence Floor | Auto-merge | Cap |
-|------|-------------|------------------|------------|-----|
-| **1** | Explicit bidirectional link | 0.85 | Yes | Unlimited |
-| **2** | Strong unidirectional signals | 0.50 | No (review) | 3 per run |
-| **3** | Weak/speculative | 0.00 | No (review) | Threshold-based |
+| Tier | Description | Confidence Floor | Auto-merge | Enforce | Cap |
+|------|-------------|------------------|------------|---------|-----|
+| **1** | Explicit bidirectional link | 0.83 | Yes | Strict subset only | Unlimited |
+| **2** | Strong unidirectional signals | 0.50 | No (review) | N/A | 3 per run |
+| **3** | Weak/speculative | 0.00 | No (review) | N/A | Threshold-based |
 
 ### Bridge Signals
 
@@ -455,6 +455,45 @@ GitHub Profile
   │
   └─ No signals → Tier 3: name-based scoring only
 ```
+
+### Tier-1 Strict-Subset Enforcement
+
+When `ENRICHMENT_TIER1_ENFORCE=true`, a strict subset of Tier-1 bridges are eligible for automatic confirmation. Non-qualifying Tier-1 candidates are downgraded to Tier-2.
+
+**Enforce-eligible signals** (defined in `TIER_1_ENFORCE_SIGNALS`):
+- `linkedin_url_in_bio` — LinkedIn URL in GitHub profile bio
+- `linkedin_url_in_blog` — LinkedIn URL in GitHub website/blog field
+
+**NOT enforce-eligible** (remain Tier-1 for shadow telemetry, but treated as Tier-2 when enforce is on):
+- `linkedin_url_in_page` — Found via reverse page search (higher false positive risk)
+- `mutual_reference` — Both profiles link to each other
+
+**Enforce predicate:**
+```typescript
+const wouldAutoMerge =
+  bridge.tier === 1 &&
+  bridge.signals.some(s => TIER_1_ENFORCE_SIGNALS.includes(s)) &&
+  confidence >= TIER1_ENFORCE_MIN_CONFIDENCE &&  // default 0.83
+  !hasContradiction &&
+  !nameMismatch &&
+  !hasTeamPageSignal &&
+  !hasIdMismatch;
+
+const tier1Enforced = TIER1_ENFORCE && wouldAutoMerge;
+```
+
+**Effective bridge downgrade** — when enforce is on, non-qualifying Tier-1 identities are downgraded:
+```typescript
+const effectiveBridge = TIER1_ENFORCE && isTier1 && !tier1Enforced
+  ? { ...bridge, tier: 2, autoMergeEligible: false }
+  : bridge;
+```
+
+**Important:** The `tier1AutoConfirmed` flag is diagnostic only. `IdentityCandidate.status` remains `unconfirmed` in the database — the existing confirm/audit flow is preserved.
+
+**Kill switch:** Set `ENRICHMENT_TIER1_ENFORCE=false` on Railway. Process restarts and all enforcement stops immediately.
+
+**Rollout data (Feb 2026):** 210 sessions, 30 enforced, 100% precision, 0 failures.
 
 ---
 
@@ -940,6 +979,9 @@ const stats = await getQueueStats();
 | **Scoring** |||
 | `ENRICHMENT_MIN_CONFIDENCE` | `0.35` | Storage threshold |
 | `ENRICHMENT_TIER2_CAP` | `3` | Max Tier-2 bridges per run |
+| **Tier-1 Enforce** |||
+| `ENRICHMENT_TIER1_ENFORCE` | `false` | Enable strict-subset auto-confirmation |
+| `ENRICHMENT_TIER1_ENFORCE_MIN_CONFIDENCE` | `0.83` | Minimum confidence for enforce |
 | **Features** |||
 | `ENABLE_COMMIT_EMAIL_EVIDENCE` | `false` | Extract commit emails |
 | `ENRICHMENT_ENABLE_QUERY_NORMALIZATION` | `true` | Normalize diacritics |
@@ -964,9 +1006,12 @@ const stats = await getQueueStats();
 - SessionId becomes graph thread_id (unique per tenant+candidate)
 
 ### Bridge-First Design
-- Tier 1 bridges → auto-merge eligible (≥ 0.90 confidence)
+- Tier 1 bridges → auto-merge eligible (≥ 0.83 confidence with enforce, ≥ 0.90 without)
+- Tier 1 enforce → strict subset only (`linkedin_url_in_bio`, `linkedin_url_in_blog`), no contradictions
+- Tier 1 non-qualifying → downgraded to Tier 2 when enforce is on
 - Tier 2 bridges → capped at 3 per run
 - Tier 3 → requires traditional threshold (0.35)
+- `IdentityCandidate.status` stays `unconfirmed` — enforce is diagnostic, confirm flow is separate
 
 ### Evidence Pointers (NOT PII)
 - Store URLs to evidence, not sensitive data
@@ -1018,6 +1063,13 @@ interface EnrichmentRunTrace {
     identitiesPersisted: number;
     bestConfidence: number | null;
     durationMs: number;
+    // Tier-1 enforce telemetry
+    tier1Enforced?: number;
+    tier1EnforceThreshold?: number;
+    tier1EnforceReason?: string;
+    // Shadow diagnostics
+    tier1Shadow?: Tier1ShadowDiagnostics;
+    tier1Gap?: Tier1GapDiagnostics;
   };
 }
 ```
@@ -1080,8 +1132,9 @@ npm run eval:verbose # With detailed output
 | `src/lib/enrichment/worker.ts` | Standalone worker process |
 | **Scoring & Bridge** ||
 | `src/lib/enrichment/scoring.ts` | Confidence scoring |
-| `src/lib/enrichment/bridge-discovery.ts` | Bridge detection |
-| `src/lib/enrichment/bridge-types.ts` | Tier/signal types |
+| `src/lib/enrichment/bridge-discovery.ts` | Bridge detection + enforce predicate |
+| `src/lib/enrichment/bridge-types.ts` | Tier/signal types + enforce constants |
+| `src/lib/enrichment/config.ts` | Threshold configuration (enforce, etc.) |
 | **External** ||
 | `src/lib/enrichment/github.ts` | GitHub client |
 | `src/lib/enrichment/sources/search-executor.ts` | Web search |
