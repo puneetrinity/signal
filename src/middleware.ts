@@ -30,8 +30,14 @@ const isProtectedApiRoute = createRouteMatcher([
 ]);
 
 export default clerkMiddleware(async (auth, req) => {
-  const { userId, orgId } = await auth();
   const url = req.nextUrl;
+
+  // v3 routes use their own JWT auth — skip Clerk entirely
+  if (url.pathname.startsWith('/api/v3/')) {
+    return NextResponse.next();
+  }
+
+  const { userId, orgId } = await auth();
 
   // Special case: /api/v2/search GET without 'q' param is a public health check
   if (url.pathname === '/api/v2/search' && req.method === 'GET' && !url.searchParams.has('q')) {
