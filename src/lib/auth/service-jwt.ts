@@ -7,7 +7,7 @@
  * Fail-closed: if Redis is unavailable (including NoopRedis), returns 503.
  */
 
-import { importSPKI, jwtVerify, errors } from 'jose';
+import { importSPKI, jwtVerify } from 'jose';
 import { NextRequest } from 'next/server';
 import { redis } from '@/lib/redis/client';
 
@@ -46,6 +46,13 @@ function fail503(error: string): { authorized: false; response: Response } {
   return { authorized: false, response: jsonResponse(503, { success: false, error }) };
 }
 
+function getClaimValidationFailureClaim(err: unknown): string | null {
+  if (!err || typeof err !== 'object') return null;
+  const asRecord = err as { name?: unknown; claim?: unknown };
+  if (asRecord.name !== 'JWTClaimValidationFailed') return null;
+  return typeof asRecord.claim === 'string' ? asRecord.claim : null;
+}
+
 export async function verifyServiceJWT(request: NextRequest): Promise<VerifyResult> {
   // 1. Extract Bearer token
   const authHeader = request.headers.get('authorization');
@@ -81,8 +88,10 @@ export async function verifyServiceJWT(request: NextRequest): Promise<VerifyResu
     payload = result.payload;
   } catch (err) {
     // Wrong aud or iss → 403 per integration spec
-    if (err instanceof errors.JWTClaimValidationFailed && (err.claim === 'aud' || err.claim === 'iss')) {
-      return fail403(`Invalid token: ${err.message}`);
+    const failedClaim = getClaimValidationFailureClaim(err);
+    if (failedClaim === 'aud' || failedClaim === 'iss') {
+      const message = err instanceof Error ? err.message : 'Token claim validation failed';
+      return fail403(`Invalid token: ${message}`);
     }
     const message = err instanceof Error ? err.message : 'Token verification failed';
     return fail401(`Invalid token: ${message}`);
