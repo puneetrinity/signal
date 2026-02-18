@@ -39,6 +39,18 @@ const LOCATION_ALIAS_REWRITES: Array<[RegExp, string]> = [
   [/\bsf\b/gi, 'san francisco'],
 ];
 
+const LOCATION_NOISE_PATTERNS: RegExp[] = [
+  /\blinkedin\b/i,
+  /\bview\b.*\bprofile\b/i,
+  /\bprofessional community\b/i,
+  /\beducation:/i,
+  /\bexperience:/i,
+  /https?:\/\//i,
+  /\bwww\./i,
+  /\.com\b/i,
+  /\.org\b/i,
+];
+
 const LOCATION_PLACEHOLDERS = new Set([
   '.',
   '..',
@@ -53,29 +65,19 @@ const LOCATION_PLACEHOLDERS = new Set([
   'null',
 ]);
 
-const CITY_COUNTRY_HINTS: Record<string, string> = {
-  hyderabad: 'india',
-  bangalore: 'india',
-  mumbai: 'india',
-  pune: 'india',
-  delhi: 'india',
-  chennai: 'india',
-  kolkata: 'india',
-  london: 'uk',
-  manchester: 'uk',
-  berlin: 'germany',
-  munich: 'germany',
-  paris: 'france',
-  toronto: 'canada',
-  vancouver: 'canada',
-  sydney: 'australia',
-  melbourne: 'australia',
-  'new york': 'usa',
-  'san francisco': 'usa',
-  austin: 'usa',
-  seattle: 'usa',
-  boston: 'usa',
-};
+const COUNTRY_TOKENS = new Set([
+  'india',
+  'usa',
+  'us',
+  'united',
+  'states',
+  'uk',
+  'kingdom',
+  'canada',
+  'australia',
+  'germany',
+  'france',
+]);
 
 function canonicalizeLocation(text: string): string {
   let normalized = text.toLowerCase().trim();
@@ -100,6 +102,18 @@ function isMeaningfulLocation(text: string | null | undefined): boolean {
   return isMeaningfulNormalizedLocation(canonicalizeLocation(text));
 }
 
+function isNoisyLocationHint(text: string): boolean {
+  const raw = text.trim();
+  if (!raw) return true;
+  if (raw.length > 80) return true;
+  if (/\.{3,}|…/.test(raw)) return true;
+  if (LOCATION_NOISE_PATTERNS.some((pattern) => pattern.test(raw))) return true;
+
+  const alphaNum = raw.replace(/[^a-z0-9]/gi, '').length;
+  if (alphaNum < 3) return true;
+  return false;
+}
+
 function locationTokens(text: string): string[] {
   return canonicalizeLocation(text)
     .split(/[\s,]+/)
@@ -107,21 +121,21 @@ function locationTokens(text: string): string[] {
     .filter((token) => token.length > 1);
 }
 
-function inferCountry(text: string): string | null {
-  const normalized = canonicalizeLocation(text);
-  if (!isMeaningfulNormalizedLocation(normalized)) return null;
-  if (normalized.includes('india')) return 'india';
-  if (normalized.includes('united states') || normalized.includes('usa') || /\bus\b/.test(normalized)) return 'usa';
-  if (normalized.includes('united kingdom') || normalized.includes('uk')) return 'uk';
-  if (normalized.includes('canada')) return 'canada';
-  if (normalized.includes('australia')) return 'australia';
-  if (normalized.includes('germany')) return 'germany';
-  if (normalized.includes('france')) return 'france';
+function extractPrimaryCity(normalizedLocation: string): string | null {
+  const [firstSegmentRaw] = normalizedLocation.split(',');
+  const firstSegment = firstSegmentRaw?.trim() ?? '';
+  if (!firstSegment) return null;
+  const firstSegmentTokens = firstSegment.split(/\s+/).filter(Boolean);
+  if (firstSegmentTokens.length === 0) return null;
+  if (firstSegmentTokens.every((token) => COUNTRY_TOKENS.has(token))) return null;
+  return firstSegment;
+}
 
-  for (const [city, country] of Object.entries(CITY_COUNTRY_HINTS)) {
-    if (normalized.includes(city)) return country;
-  }
-  return null;
+function hasCountryTokenOverlap(targetLocation: string, candidateLocation: string): boolean {
+  const targetTokens = locationTokens(targetLocation).filter((token) => COUNTRY_TOKENS.has(token));
+  if (targetTokens.length === 0) return false;
+  const candidateTokens = new Set(locationTokens(candidateLocation));
+  return targetTokens.some((token) => candidateTokens.has(token));
 }
 
 function computeSkillScore(
@@ -195,23 +209,23 @@ function computeLocationScore(candidate: CandidateForRanking, targetLocation: st
   const target = targetLocation ?? '';
   // Prefer snapshot location
   const loc = candidate.snapshot?.location ?? candidate.locationHint;
-  if (isMeaningfulLocation(loc)) {
+  if (isMeaningfulLocation(loc) && !isNoisyLocationHint(loc ?? '')) {
     const candidateLocation = loc ?? '';
     const targetNorm = canonicalizeLocation(target);
     const candidateNorm = canonicalizeLocation(candidateLocation);
-    if (candidateNorm && targetNorm && (candidateNorm.includes(targetNorm) || targetNorm.includes(candidateNorm))) {
+    const targetCity = extractPrimaryCity(targetNorm);
+
+    if (
+      targetCity &&
+      candidateNorm &&
+      candidateNorm.includes(targetCity)
+    ) {
       return 1;
     }
 
-    const targetTokens = new Set(locationTokens(target));
-    const candidateTokens = locationTokens(candidateLocation);
-    if (candidateTokens.some((token) => targetTokens.has(token))) return 1;
-
-    const targetCountry = inferCountry(target);
-    const candidateCountry = inferCountry(candidateLocation);
-    if (targetCountry && candidateCountry && targetCountry === candidateCountry) return 0.7;
+    // If target is country-only (no city constraint), allow country token overlap.
+    if (!targetCity && hasCountryTokenOverlap(target, candidateLocation)) return 1;
   }
-  if (candidate.headlineHint && /\bremote\b/i.test(candidate.headlineHint)) return 0.5;
   return 0;
 }
 

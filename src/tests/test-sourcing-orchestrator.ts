@@ -424,6 +424,40 @@ console.log('\n--- Snapshot-Aware Ranking ---');
 }
 
 {
+  // Noisy SERP snippets should be ignored as location evidence
+  const reqs = makeRequirements({ location: 'Bangalore, India' });
+  const noisyLoc: CandidateForRanking = {
+    id: 'noisy-loc', headlineHint: null,
+    locationHint: "India. View Example Person's profile on LinkedIn",
+    searchTitle: '', searchSnippet: '', enrichmentStatus: 'pending', lastEnrichedAt: null,
+  };
+  const scored = rankCandidates([noisyLoc], reqs);
+  assert(scored[0].fitBreakdown.locationScore === 0, 'Noisy LinkedIn snippet location scores 0');
+}
+
+{
+  // City-constrained searches should not pass on country-only overlap
+  const reqs = makeRequirements({ location: 'Delhi, India' });
+  const sameCountryOtherCity: CandidateForRanking = {
+    id: 'same-country-other-city', headlineHint: null, locationHint: 'Bangalore, India',
+    searchTitle: '', searchSnippet: '', enrichmentStatus: 'pending', lastEnrichedAt: null,
+  };
+  const scored = rankCandidates([sameCountryOtherCity], reqs);
+  assert(scored[0].fitBreakdown.locationScore === 0, 'Delhi target does not match Bangalore by country fallback');
+}
+
+{
+  // Country-only targets can still use country overlap
+  const reqs = makeRequirements({ location: 'India' });
+  const countryOnlyMatch: CandidateForRanking = {
+    id: 'country-only-match', headlineHint: null, locationHint: 'Bangalore, India',
+    searchTitle: '', searchSnippet: '', enrichmentStatus: 'pending', lastEnrichedAt: null,
+  };
+  const scored = rankCandidates([countryOnlyMatch], reqs);
+  assert(scored[0].fitBreakdown.locationScore === 1, 'Country-only target India matches Bangalore, India');
+}
+
+{
   // Snapshot computedAt used for freshness
   const reqs = makeRequirements();
   const snapFresh: CandidateForRanking = {
