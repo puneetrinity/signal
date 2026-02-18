@@ -1,8 +1,9 @@
 import { prisma } from '@/lib/prisma';
 import { Prisma } from '@prisma/client';
+import { redis } from '@/lib/redis/client';
 import { toJsonValue } from '@/lib/prisma/json';
 import { createLogger } from '@/lib/logger';
-import { buildJobRequirements } from './jd-digest';
+import { buildJobRequirements, type SourcingJobContextInput } from './jd-digest';
 import { rankCandidates } from './ranking';
 import { discoverCandidates } from './discovery';
 import { getSourcingConfig } from './config';
@@ -19,17 +20,107 @@ export interface OrchestratorResult {
   discoveryShortfallRate: number; // 0.0 = no shortfall, 1.0 = total miss (0 when no discovery needed)
   autoEnrichQueued: number;
   staleRefreshQueued: number;
+  queriesExecuted: number;
+  qualityGateTriggered: boolean;
+  avgFitTopK: number;
+  countAboveThreshold: number;
+  discoveryReason: 'pool_deficit' | 'low_quality_pool' | 'deficit_and_low_quality' | null;
+  discoverySkippedReason: 'daily_serp_cap_reached' | 'cap_guard_unavailable' | null;
+}
+
+interface AssembledCandidate {
+  candidateId: string;
+  fitScore: number | null;
+  fitBreakdown: FitBreakdown | null;
+  sourceType: string;
+  enrichmentStatus: string;
+  rank: number;
+}
+
+function formatUtcDay(date = new Date()): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function secondsUntilUtcDayEnd(date = new Date()): number {
+  const end = new Date(date);
+  end.setUTCHours(23, 59, 59, 999);
+  return Math.max(1, Math.ceil((end.getTime() - date.getTime()) / 1000));
+}
+
+async function getDiscoveryQueryBudget(
+  tenantId: string,
+  maxQueries: number,
+  dailyCap: number,
+): Promise<{
+  allowed: boolean;
+  maxQueries: number;
+  key: string | null;
+  reservedQueries: number;
+  skippedReason: OrchestratorResult['discoverySkippedReason'];
+}> {
+  if (dailyCap <= 0) {
+    return { allowed: true, maxQueries, key: null, reservedQueries: 0, skippedReason: null };
+  }
+
+  try {
+    const ping = await redis.ping();
+    if (ping !== 'PONG') {
+      return { allowed: false, maxQueries: 0, key: null, reservedQueries: 0, skippedReason: 'cap_guard_unavailable' };
+    }
+
+    const key = `sourcing:serper:${tenantId}:${formatUtcDay()}`;
+    const ttl = secondsUntilUtcDayEnd();
+
+    // Reserve queries atomically; shrink reservation until it fits under cap.
+    for (let reserve = maxQueries; reserve >= 1; reserve--) {
+      const newTotal = await redis.incrby(key, reserve);
+      await redis.expire(key, ttl);
+      if (newTotal <= dailyCap) {
+        return { allowed: true, maxQueries: reserve, key, reservedQueries: reserve, skippedReason: null };
+      }
+      await redis.decrby(key, reserve);
+    }
+
+    return { allowed: false, maxQueries: 0, key, reservedQueries: 0, skippedReason: 'daily_serp_cap_reached' };
+  } catch (error) {
+    log.warn({ tenantId, error }, 'Failed to read discovery budget, skipping discovery for spend safety');
+    return { allowed: false, maxQueries: 0, key: null, reservedQueries: 0, skippedReason: 'cap_guard_unavailable' };
+  }
+}
+
+async function releaseUnusedReservedQueries(
+  key: string | null,
+  reservedQueries: number,
+  usedQueries: number,
+): Promise<void> {
+  if (!key || reservedQueries <= 0) return;
+  const unused = reservedQueries - usedQueries;
+  if (unused <= 0) return;
+  try {
+    await redis.decrby(key, unused);
+  } catch (error) {
+    log.warn({ key, reservedQueries, usedQueries, error }, 'Failed to release unused reserved discovery queries');
+  }
 }
 
 export async function runSourcingOrchestrator(
   requestId: string,
   tenantId: string,
-  jobContext: { jdDigest: string; location?: string; experienceYears?: number; education?: string },
+  jobContext: SourcingJobContextInput,
 ): Promise<OrchestratorResult> {
   const config = getSourcingConfig();
   const requirements = buildJobRequirements(jobContext);
 
-  log.info({ requestId, tenantId, topSkills: requirements.topSkills, roleFamily: requirements.roleFamily }, 'Starting orchestrator');
+  log.info(
+    {
+      requestId,
+      tenantId,
+      topSkills: requirements.topSkills,
+      roleFamily: requirements.roleFamily,
+      location: requirements.location,
+    },
+    'Starting orchestrator',
+  );
 
   // 1. Query tenant pool (capped at 5000 most recent)
   const poolRows = await prisma.candidate.findMany({
@@ -53,10 +144,8 @@ export async function runSourcingOrchestrator(
     orderBy: { updatedAt: 'desc' },
   });
 
-  log.info({ requestId, poolSize: poolRows.length }, 'Pool queried');
-
-  // Build ID→row lookup (avoids O(n) find() in hot loops over up to 5000 rows)
   const poolById = new Map(poolRows.map((r) => [r.id, r]));
+  log.info({ requestId, poolSize: poolRows.length }, 'Pool queried');
 
   // 2. Rank pool candidates
   const poolForRanking: CandidateForRanking[] = poolRows.map((r) => {
@@ -83,112 +172,171 @@ export async function runSourcingOrchestrator(
   });
   const scoredPool = rankCandidates(poolForRanking, requirements);
 
-  // 3. Assess deficit
-  const enrichedCandidates = scoredPool.filter((sc) => {
-    return poolById.get(sc.candidateId)?.enrichmentStatus === 'completed';
-  });
+  const topK = scoredPool.slice(0, Math.min(scoredPool.length, config.qualityTopK));
+  const avgFitTopK = topK.length > 0
+    ? topK.reduce((sum, row) => sum + row.fitScore, 0) / topK.length
+    : 0;
+  const countAboveThreshold = topK.filter((row) => row.fitScore >= config.qualityThreshold).length;
+  const minCountAboveRequired = Math.min(config.qualityMinCountAbove, topK.length);
+  const qualityGateTriggered =
+    topK.length === 0 ||
+    avgFitTopK < config.qualityMinAvgFit ||
+    countAboveThreshold < minCountAboveRequired;
+
+  // 3. Discovery decision (deficit and/or low quality)
+  const enrichedCandidates = scoredPool.filter((sc) => poolById.get(sc.candidateId)?.enrichmentStatus === 'completed');
   const enrichedCount = enrichedCandidates.length;
 
   let discoveredCount = 0;
   let discoveredCandidateIds: string[] = [];
   let discoveryTarget = 0;
+  let queriesExecuted = 0;
+  let discoveryReason: OrchestratorResult['discoveryReason'] = null;
+  let discoverySkippedReason: OrchestratorResult['discoverySkippedReason'] = null;
 
-  // Top-off: discover when pool can't fill targetCount on its own
   const poolSize = scoredPool.length;
-  const poolDeficit = config.targetCount - poolSize;
+  const poolDeficit = Math.max(0, config.targetCount - poolSize);
+  const qualityDrivenTarget = qualityGateTriggered ? Math.ceil(config.targetCount * 0.2) : 0;
+  const desiredDiscoveryTarget = Math.max(poolDeficit, qualityDrivenTarget);
 
-  if (poolDeficit > 0) {
-    // Weak pool (enriched < minGoodEnough): cap at jobMaxEnrich to guard SERP cost.
-    // Decent pool: full top-off (discover exact deficit).
+  if (poolDeficit > 0 && qualityGateTriggered) discoveryReason = 'deficit_and_low_quality';
+  else if (poolDeficit > 0) discoveryReason = 'pool_deficit';
+  else if (qualityGateTriggered) discoveryReason = 'low_quality_pool';
+
+  if (desiredDiscoveryTarget > 0) {
     const aggressive = enrichedCount < config.minGoodEnough;
-    discoveryTarget = aggressive
-      ? Math.min(poolDeficit, config.jobMaxEnrich)
-      : poolDeficit;
-    const existingLinkedinIds = new Set(poolRows.map((r) => r.linkedinId));
-
-    log.info({
-      requestId,
-      discoveryTarget,
-      poolSize,
-      enrichedCount,
-      poolDeficit,
-      aggressive,
-    }, 'Starting discovery');
-
-    const discovered = await discoverCandidates(
+    discoveryTarget = aggressive ? Math.min(desiredDiscoveryTarget, config.jobMaxEnrich) : desiredDiscoveryTarget;
+    const budget = await getDiscoveryQueryBudget(
       tenantId,
-      requirements,
-      discoveryTarget,
-      existingLinkedinIds,
       config.maxSerpQueries,
+      config.dailySerpCapPerTenant,
     );
-    discoveredCount = discovered.length;
-    discoveredCandidateIds = discovered.map((d) => d.candidateId);
 
-    if (discoveredCount < discoveryTarget) {
-      log.warn({
-        requestId,
-        discoveredCount,
-        discoveryTarget,
-        shortfall: discoveryTarget - discoveredCount,
-      }, 'Discovery under-delivered — deterministic queries yielded insufficient results');
+    if (!budget.allowed || budget.maxQueries <= 0) {
+      discoverySkippedReason = budget.skippedReason;
+      log.warn(
+        {
+          requestId,
+          tenantId,
+          discoveryReason,
+          dailyCap: config.dailySerpCapPerTenant,
+          discoverySkippedReason,
+        },
+        'Discovery skipped by spend guard',
+      );
+    } else {
+      const existingLinkedinIds = new Set(poolRows.map((r) => r.linkedinId));
+      log.info(
+        {
+          requestId,
+          poolSize,
+          enrichedCount,
+          poolDeficit,
+          qualityGateTriggered,
+          avgFitTopK: Number(avgFitTopK.toFixed(3)),
+          countAboveThreshold,
+          minCountAboveRequired,
+          discoveryReason,
+          discoveryTarget,
+          maxQueries: budget.maxQueries,
+          aggressive,
+        },
+        'Starting discovery',
+      );
+
+      let usedQueries = 0;
+      try {
+        const discovery = await discoverCandidates(
+          tenantId,
+          requirements,
+          discoveryTarget,
+          existingLinkedinIds,
+          budget.maxQueries,
+        );
+
+        discoveredCount = discovery.candidates.length;
+        discoveredCandidateIds = discovery.candidates.map((d) => d.candidateId);
+        queriesExecuted = discovery.queriesExecuted;
+        usedQueries = queriesExecuted;
+      } finally {
+        await releaseUnusedReservedQueries(budget.key, budget.reservedQueries, usedQueries);
+      }
+
+      if (discoveredCount < discoveryTarget) {
+        log.warn(
+          {
+            requestId,
+            discoveredCount,
+            discoveryTarget,
+            shortfall: discoveryTarget - discoveredCount,
+          },
+          'Discovery under-delivered — deterministic queries yielded insufficient results',
+        );
+      }
     }
-
-    log.info({ requestId, discoveredCount }, 'Discovery complete');
   }
 
-  // 4. Assemble final list: enriched by fitScore → non-enriched pool by fitScore → discovered by discovery order
-  const enrichedSet = new Set(enrichedCandidates.map((c) => c.candidateId));
-  const nonEnrichedPool = scoredPool.filter((sc) => !enrichedSet.has(sc.candidateId));
-
-  interface AssembledCandidate {
-    candidateId: string;
-    fitScore: number | null;
-    fitBreakdown: FitBreakdown | null;
-    sourceType: string;
-    enrichmentStatus: string;
-    rank: number;
-  }
-
+  // 4. Assemble final list with controlled mix in low-quality scenarios
   const assembled: AssembledCandidate[] = [];
+  const assembledIds = new Set<string>();
+  const enrichedIds = new Set(enrichedCandidates.map((row) => row.candidateId));
+  const nonEnrichedPool = scoredPool.filter((sc) => !enrichedIds.has(sc.candidateId));
   let rank = 1;
 
-  // Enriched candidates first (sorted by fitScore desc)
+  const pushCandidate = (candidate: Omit<AssembledCandidate, 'rank'>): void => {
+    if (assembled.length >= config.targetCount) return;
+    if (assembledIds.has(candidate.candidateId)) return;
+    assembled.push({ ...candidate, rank: rank++ });
+    assembledIds.add(candidate.candidateId);
+  };
+
+  const discoveredSlotTarget = qualityGateTriggered
+    ? Math.min(discoveredCandidateIds.length, Math.ceil(config.targetCount * 0.2))
+    : 0;
+  const poolSlotTarget = config.targetCount - discoveredSlotTarget;
+  const enrichedCap = qualityGateTriggered ? Math.min(50, poolSlotTarget) : poolSlotTarget;
+
   for (const sc of enrichedCandidates) {
-    if (assembled.length >= config.targetCount) break;
-    assembled.push({
+    if (assembled.length >= enrichedCap) break;
+    pushCandidate({
       candidateId: sc.candidateId,
       fitScore: sc.fitScore,
       fitBreakdown: sc.fitBreakdown,
       sourceType: 'pool_enriched',
       enrichmentStatus: 'completed',
-      rank: rank++,
     });
   }
 
-  // Non-enriched pool (sorted by fitScore desc)
   for (const sc of nonEnrichedPool) {
-    if (assembled.length >= config.targetCount) break;
-    assembled.push({
+    if (assembled.length >= poolSlotTarget) break;
+    pushCandidate({
       candidateId: sc.candidateId,
       fitScore: sc.fitScore,
       fitBreakdown: sc.fitBreakdown,
       sourceType: 'pool',
       enrichmentStatus: poolById.get(sc.candidateId)?.enrichmentStatus ?? 'pending',
-      rank: rank++,
     });
   }
 
-  // Discovered (in discovery order)
   for (const candidateId of discoveredCandidateIds) {
-    if (assembled.length >= config.targetCount) break;
-    assembled.push({
+    pushCandidate({
       candidateId,
       fitScore: null,
       fitBreakdown: null,
       sourceType: 'discovered',
       enrichmentStatus: 'pending',
-      rank: rank++,
+    });
+  }
+
+  // Backfill in case discovery under-delivers reserved slots.
+  for (const sc of nonEnrichedPool) {
+    if (assembled.length >= config.targetCount) break;
+    pushCandidate({
+      candidateId: sc.candidateId,
+      fitScore: sc.fitScore,
+      fitBreakdown: sc.fitBreakdown,
+      sourceType: 'pool',
+      enrichmentStatus: poolById.get(sc.candidateId)?.enrichmentStatus ?? 'pending',
     });
   }
 
@@ -203,9 +351,7 @@ export async function runSourcingOrchestrator(
         sourcingRequestId: requestId,
         candidateId: a.candidateId,
         fitScore: a.fitScore,
-        fitBreakdown: a.fitBreakdown
-          ? toJsonValue(a.fitBreakdown)
-          : Prisma.JsonNull,
+        fitBreakdown: a.fitBreakdown ? toJsonValue(a.fitBreakdown) : Prisma.JsonNull,
         sourceType: a.sourceType,
         enrichmentStatus: a.enrichmentStatus,
         rank: a.rank,
@@ -213,19 +359,19 @@ export async function runSourcingOrchestrator(
     }),
   ]);
 
-  // 6. Auto-enrich top N unenriched candidates
-  //    Cross-run dedupe: skip candidates with an already queued/running session.
-  const candidateIdsToEnqueue = [
-    ...assembled.filter((a) => a.enrichmentStatus !== 'completed').slice(0, config.initialEnrichCount).map((a) => a.candidateId),
-  ];
+  // 6. Auto-enrich top N unenriched candidates (cross-run dedupe)
+  const candidateIdsToEnqueue = assembled
+    .filter((a) => a.enrichmentStatus !== 'completed')
+    .slice(0, config.initialEnrichCount)
+    .map((a) => a.candidateId);
+
   const now = new Date();
   const staleCandidateIds = poolForRanking
     .filter((r) => r.snapshot?.staleAfter && r.snapshot.staleAfter < now)
     .slice(0, config.staleRefreshMaxPerRun)
     .map((r) => r.id);
-  const allPotentialIds = [...new Set([...candidateIdsToEnqueue, ...staleCandidateIds])];
 
-  // Batch query for active sessions to avoid duplicate enqueues across runs
+  const allPotentialIds = [...new Set([...candidateIdsToEnqueue, ...staleCandidateIds])];
   const activeSessions = allPotentialIds.length > 0
     ? await prisma.enrichmentSession.findMany({
         where: {
@@ -240,11 +386,10 @@ export async function runSourcingOrchestrator(
 
   const enqueuedIds = new Set<string>();
   let autoEnrichQueued = 0;
-
   for (const a of assembled.filter((a) => a.enrichmentStatus !== 'completed').slice(0, config.initialEnrichCount)) {
     if (alreadyActiveIds.has(a.candidateId) || enqueuedIds.has(a.candidateId)) continue;
     try {
-      const priority = 10 + (a.rank - 1); // rank 1 → priority 10, rank 20 → priority 29
+      const priority = 10 + (a.rank - 1); // rank 1 → priority 10
       await createEnrichmentSession(tenantId, a.candidateId, { priority });
       enqueuedIds.add(a.candidateId);
       autoEnrichQueued++;
@@ -281,6 +426,12 @@ export async function runSourcingOrchestrator(
     discoveryShortfallRate,
     autoEnrichQueued,
     staleRefreshQueued,
+    queriesExecuted,
+    qualityGateTriggered,
+    avgFitTopK: Number(avgFitTopK.toFixed(4)),
+    countAboveThreshold,
+    discoveryReason,
+    discoverySkippedReason,
   };
 
   log.info({ requestId, ...result }, 'Orchestrator complete');

@@ -105,6 +105,29 @@ console.log('\n--- JD Digest Parsing ---');
   assert(reqs.topSkills[0] === 'Go', 'buildJobRequirements: skills from jdDigest');
 }
 
+{
+  // Empty jdDigest fallback: use structured fields from Vanta jobContext
+  const reqs = buildJobRequirements({
+    jdDigest: '',
+    title: 'Senior DevOps Engineer',
+    skills: ['AWS', 'Terraform', 'Kubernetes'],
+    location: 'Hyderabad',
+  });
+  assert(reqs.topSkills.length === 3, 'Fallback: skills come from structured context');
+  assert(reqs.seniorityLevel === 'senior', 'Fallback: seniority parsed from title');
+  assert(reqs.roleFamily === 'devops', 'Fallback: role family parsed from title');
+}
+
+{
+  // Case-insensitive skill dedupe across required + good-to-have
+  const reqs = buildJobRequirements({
+    jdDigest: '',
+    skills: ['React', 'TypeScript'],
+    goodToHaveSkills: ['react', 'typescript', 'GraphQL'],
+  });
+  assert(reqs.topSkills.length === 3, 'Fallback: skills dedupe is case-insensitive');
+}
+
 // ---------------------------------------------------------------------------
 // Test: Ranking
 // ---------------------------------------------------------------------------
@@ -368,6 +391,28 @@ console.log('\n--- Snapshot-Aware Ranking ---');
 }
 
 {
+  // Location alias normalization: Bengaluru should match Bangalore
+  const reqs = makeRequirements({ location: 'Bangalore, India' });
+  const aliasLoc: CandidateForRanking = {
+    id: 'alias-loc', headlineHint: null, locationHint: 'Bengaluru, India',
+    searchTitle: '', searchSnippet: '', enrichmentStatus: 'pending', lastEnrichedAt: null,
+  };
+  const scored = rankCandidates([aliasLoc], reqs);
+  assert(scored[0].fitBreakdown.locationScore === 1, 'Location alias Bengaluru↔Bangalore match = 1');
+}
+
+{
+  // Country inference must not false-match "us" substring in non-US locations (e.g., Russia)
+  const reqs = makeRequirements({ location: 'USA' });
+  const russiaLoc: CandidateForRanking = {
+    id: 'russia-loc', headlineHint: null, locationHint: 'Moscow, Russia',
+    searchTitle: '', searchSnippet: '', enrichmentStatus: 'pending', lastEnrichedAt: null,
+  };
+  const scored = rankCandidates([russiaLoc], reqs);
+  assert(scored[0].fitBreakdown.locationScore === 0, 'Country inference: Russia does not match USA');
+}
+
+{
   // Snapshot computedAt used for freshness
   const reqs = makeRequirements();
   const snapFresh: CandidateForRanking = {
@@ -398,18 +443,28 @@ console.log('\n--- Config Safety ---');
   // Simulate bad env values
   const origTarget = process.env.TARGET_COUNT;
   const origMin = process.env.MIN_GOOD_ENOUGH;
+  const origQualityMinAvg = process.env.SOURCE_QUALITY_MIN_AVG_FIT;
+  const origQualityThreshold = process.env.SOURCE_QUALITY_THRESHOLD;
 
   process.env.TARGET_COUNT = 'banana';
   process.env.MIN_GOOD_ENOUGH = '-5';
+  process.env.SOURCE_QUALITY_MIN_AVG_FIT = 'not-a-number';
+  process.env.SOURCE_QUALITY_THRESHOLD = '2.5'; // clamped to 1
   const config = getSourcingConfig();
   assert(config.targetCount === 100, 'NaN env → fallback 100');
   assert(config.minGoodEnough === 30, 'Negative env → fallback 30');
+  assert(config.qualityMinAvgFit === 0.45, 'Invalid quality avg fit → fallback 0.45');
+  assert(config.qualityThreshold === 1, 'Quality threshold >1 → clamped to 1');
 
   // Restore
   if (origTarget !== undefined) process.env.TARGET_COUNT = origTarget;
   else delete process.env.TARGET_COUNT;
   if (origMin !== undefined) process.env.MIN_GOOD_ENOUGH = origMin;
   else delete process.env.MIN_GOOD_ENOUGH;
+  if (origQualityMinAvg !== undefined) process.env.SOURCE_QUALITY_MIN_AVG_FIT = origQualityMinAvg;
+  else delete process.env.SOURCE_QUALITY_MIN_AVG_FIT;
+  if (origQualityThreshold !== undefined) process.env.SOURCE_QUALITY_THRESHOLD = origQualityThreshold;
+  else delete process.env.SOURCE_QUALITY_THRESHOLD;
 }
 
 // ---------------------------------------------------------------------------

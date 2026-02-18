@@ -18,6 +18,9 @@ import type { SourcingJobData } from '@/lib/sourcing/types';
 const bodySchema = z.object({
   jobContext: z.object({
     jdDigest: z.string(),
+    title: z.string().optional(),
+    skills: z.array(z.string()).optional(),
+    goodToHaveSkills: z.array(z.string()).optional(),
     location: z.string().optional(),
     experienceYears: z.number().optional(),
     education: z.string().optional(),

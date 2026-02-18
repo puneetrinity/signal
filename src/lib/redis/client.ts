@@ -46,6 +46,14 @@ class NoopRedis {
     return 0;
   }
 
+  async incrby(_key: string, _increment: number) {
+    return 0;
+  }
+
+  async decrby(_key: string, _decrement: number) {
+    return 0;
+  }
+
   async expire(_key: string, _ttl: number) {
     return 0;
   }

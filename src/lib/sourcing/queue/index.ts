@@ -11,6 +11,7 @@ import { createLogger } from '@/lib/logger';
 import { deliverCallback } from '../callback';
 import { runSourcingOrchestrator } from '../orchestrator';
 import type { SourcingJobData, SourcingJobResult, SourcingCallbackPayload } from '../types';
+import type { SourcingJobContextInput } from '../jd-digest';
 
 const log = createLogger('SourcingQueue');
 
@@ -86,9 +87,7 @@ async function processSourcingJob(
     const jobRequest = await prisma.jobSourcingRequest.findUniqueOrThrow({
       where: { id: requestId },
     });
-    const jobContext = jobRequest.jobContext as {
-      jdDigest: string; location?: string; experienceYears?: number; education?: string;
-    };
+    const jobContext = jobRequest.jobContext as unknown as SourcingJobContextInput;
     const orchestratorResult = await runSourcingOrchestrator(requestId, tenantId, jobContext);
     const candidateCount = orchestratorResult.candidateCount;
     const enrichedCount = orchestratorResult.enrichedCount;

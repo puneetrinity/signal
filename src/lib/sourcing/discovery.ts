@@ -11,28 +11,38 @@ export interface DiscoveredCandidate {
   queryIndex: number;
 }
 
+export interface DiscoveryRunResult {
+  candidates: DiscoveredCandidate[];
+  queriesExecuted: number;
+  queriesBuilt: number;
+}
+
 function buildQueries(requirements: JobRequirements, maxQueries: number): string[] {
   const roleFamily = requirements.roleFamily || '';
   const location = requirements.location || '';
   const skills = requirements.topSkills.slice(0, 3);
   const queries: string[] = [];
 
-  // Full query: role + location + top skills
-  if (roleFamily && location && skills.length > 0) {
-    queries.push(
-      `site:linkedin.com/in "${roleFamily}" "${location}" ${skills.join(' ')}`,
-    );
-  } else if (roleFamily && skills.length > 0) {
-    queries.push(
-      `site:linkedin.com/in "${roleFamily}" ${skills.join(' ')}`,
-    );
+  // Role-guided queries
+  if (roleFamily && skills.length > 0) {
+    if (location) {
+      queries.push(
+        `site:linkedin.com/in "${roleFamily}" "${location}" ${skills.join(' ')}`,
+      );
+    }
+    if (queries.length < maxQueries) {
+      queries.push(
+        `site:linkedin.com/in "${roleFamily}" ${skills.join(' ')}`,
+      );
+    }
   }
 
-  // No-location variant
-  if (location && roleFamily && skills.length > 0 && queries.length < maxQueries) {
-    queries.push(
-      `site:linkedin.com/in "${roleFamily}" ${skills.join(' ')}`,
-    );
+  // Skill-first fallback when role family is unavailable
+  if (!roleFamily && location && skills.length > 0 && queries.length < maxQueries) {
+    queries.push(`site:linkedin.com/in "${location}" ${skills.join(' ')}`);
+  }
+  if (!roleFamily && skills.length > 0 && queries.length < maxQueries) {
+    queries.push(`site:linkedin.com/in ${skills.join(' ')}`);
   }
 
   // Narrow-skills variant (top 2 skills only)
@@ -64,15 +74,17 @@ export async function discoverCandidates(
   targetCount: number,
   existingLinkedinIds: Set<string>,
   maxQueries: number = 3,
-): Promise<DiscoveredCandidate[]> {
+): Promise<DiscoveryRunResult> {
   const queries = buildQueries(requirements, maxQueries);
   const discovered: DiscoveredCandidate[] = [];
   const seenLinkedinIds = new Set(existingLinkedinIds);
+  let queriesExecuted = 0;
 
   for (let qi = 0; qi < queries.length; qi++) {
     if (discovered.length >= targetCount) break;
 
     const query = queries[qi];
+    queriesExecuted++;
     log.info({ query, queryIndex: qi }, 'Running discovery query');
 
     try {
@@ -115,7 +127,11 @@ export async function discoverCandidates(
     }, 'All discovery queries returned zero new candidates — query refinement needed (Phase 4 LLM)');
   }
 
-  return discovered;
+  return {
+    candidates: discovered,
+    queriesExecuted,
+    queriesBuilt: queries.length,
+  };
 }
 
 function extractLinkedInIdFromUrl(url: string): string | null {

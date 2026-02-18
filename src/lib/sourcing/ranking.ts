@@ -32,6 +32,68 @@ export interface ScoredCandidate {
   fitBreakdown: FitBreakdown;
 }
 
+const LOCATION_ALIAS_REWRITES: Array<[RegExp, string]> = [
+  [/\bbengaluru\b/gi, 'bangalore'],
+  [/\bbombay\b/gi, 'mumbai'],
+  [/\bnyc\b/gi, 'new york'],
+  [/\bsf\b/gi, 'san francisco'],
+];
+
+const CITY_COUNTRY_HINTS: Record<string, string> = {
+  hyderabad: 'india',
+  bangalore: 'india',
+  mumbai: 'india',
+  pune: 'india',
+  delhi: 'india',
+  chennai: 'india',
+  kolkata: 'india',
+  london: 'uk',
+  manchester: 'uk',
+  berlin: 'germany',
+  munich: 'germany',
+  paris: 'france',
+  toronto: 'canada',
+  vancouver: 'canada',
+  sydney: 'australia',
+  melbourne: 'australia',
+  'new york': 'usa',
+  'san francisco': 'usa',
+  austin: 'usa',
+  seattle: 'usa',
+  boston: 'usa',
+};
+
+function canonicalizeLocation(text: string): string {
+  let normalized = text.toLowerCase().trim();
+  for (const [pattern, replacement] of LOCATION_ALIAS_REWRITES) {
+    normalized = normalized.replace(pattern, replacement);
+  }
+  return normalized.replace(/[^a-z0-9\s,]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function locationTokens(text: string): string[] {
+  return canonicalizeLocation(text)
+    .split(/[\s,]+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function inferCountry(text: string): string | null {
+  const normalized = canonicalizeLocation(text);
+  if (normalized.includes('india')) return 'india';
+  if (normalized.includes('united states') || normalized.includes('usa') || /\bus\b/.test(normalized)) return 'usa';
+  if (normalized.includes('united kingdom') || normalized.includes('uk')) return 'uk';
+  if (normalized.includes('canada')) return 'canada';
+  if (normalized.includes('australia')) return 'australia';
+  if (normalized.includes('germany')) return 'germany';
+  if (normalized.includes('france')) return 'france';
+
+  for (const [city, country] of Object.entries(CITY_COUNTRY_HINTS)) {
+    if (normalized.includes(city)) return country;
+  }
+  return null;
+}
+
 function computeSkillScore(
   candidate: CandidateForRanking,
   topSkills: string[],
@@ -102,7 +164,19 @@ function computeLocationScore(candidate: CandidateForRanking, targetLocation: st
   if (!targetLocation) return 0.5; // neutral
   // Prefer snapshot location
   const loc = candidate.snapshot?.location ?? candidate.locationHint;
-  if (loc && loc.toLowerCase().includes(targetLocation.toLowerCase())) return 1;
+  if (loc) {
+    const targetNorm = canonicalizeLocation(targetLocation);
+    const candidateNorm = canonicalizeLocation(loc);
+    if (candidateNorm.includes(targetNorm) || targetNorm.includes(candidateNorm)) return 1;
+
+    const targetTokens = new Set(locationTokens(targetLocation));
+    const candidateTokens = locationTokens(loc);
+    if (candidateTokens.some((token) => targetTokens.has(token))) return 1;
+
+    const targetCountry = inferCountry(targetLocation);
+    const candidateCountry = inferCountry(loc);
+    if (targetCountry && candidateCountry && targetCountry === candidateCountry) return 0.7;
+  }
   if (candidate.headlineHint && /\bremote\b/i.test(candidate.headlineHint)) return 0.5;
   return 0;
 }
@@ -122,6 +196,11 @@ export function rankCandidates(
   candidates: CandidateForRanking[],
   requirements: JobRequirements,
 ): ScoredCandidate[] {
+  const hasLocationConstraint = Boolean(requirements.location?.trim());
+  const weights = hasLocationConstraint
+    ? { skill: 0.45, seniority: 0.25, location: 0.20, freshness: 0.10 }
+    : { skill: 0.50, seniority: 0.30, location: 0.00, freshness: 0.20 };
+
   return candidates
     .map((c) => {
       const skillScore = computeSkillScore(c, requirements.topSkills, requirements.domain);
@@ -130,10 +209,10 @@ export function rankCandidates(
       const activityFreshnessScore = computeFreshnessScore(c);
 
       const fitScore =
-        0.5 * skillScore +
-        0.3 * seniorityScore +
-        0.1 * locationScore +
-        0.1 * activityFreshnessScore;
+        weights.skill * skillScore +
+        weights.seniority * seniorityScore +
+        weights.location * locationScore +
+        weights.freshness * activityFreshnessScore;
 
       return {
         candidateId: c.id,
