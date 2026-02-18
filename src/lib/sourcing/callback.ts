@@ -16,11 +16,16 @@ const REQUEST_TIMEOUT_MS = 10_000;
 
 let cachedKey: CryptoKey | null = null;
 
+function decodePemMaybeBase64(pem: string): string {
+  return pem.includes('-----BEGIN') ? pem : Buffer.from(pem, 'base64').toString('utf-8');
+}
+
 async function getSigningKey(): Promise<CryptoKey> {
   if (cachedKey) return cachedKey;
   const pem = process.env.SIGNAL_JWT_PRIVATE_KEY;
   if (!pem) throw new Error('SIGNAL_JWT_PRIVATE_KEY not configured');
-  cachedKey = await importPKCS8(pem, 'RS256');
+  const decoded = decodePemMaybeBase64(pem);
+  cachedKey = await importPKCS8(decoded, 'RS256');
   return cachedKey;
 }
 

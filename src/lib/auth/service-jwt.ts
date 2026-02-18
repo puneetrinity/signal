@@ -7,7 +7,7 @@
  * Fail-closed: if Redis is unavailable (including NoopRedis), returns 503.
  */
 
-import { importSPKI, jwtVerify } from 'jose';
+import { decodeProtectedHeader, importSPKI, jwtVerify } from 'jose';
 import { NextRequest } from 'next/server';
 import { redis } from '@/lib/redis/client';
 
@@ -53,6 +53,10 @@ function getClaimValidationFailureClaim(err: unknown): string | null {
   return typeof asRecord.claim === 'string' ? asRecord.claim : null;
 }
 
+function decodePemMaybeBase64(pem: string): string {
+  return pem.includes('-----BEGIN') ? pem : Buffer.from(pem, 'base64').toString('utf-8');
+}
+
 export async function verifyServiceJWT(request: NextRequest): Promise<VerifyResult> {
   // 1. Extract Bearer token
   const authHeader = request.headers.get('authorization');
@@ -60,6 +64,13 @@ export async function verifyServiceJWT(request: NextRequest): Promise<VerifyResu
     return fail401('Missing or invalid Authorization header');
   }
   const token = authHeader.slice(7);
+
+  // Reject obviously malformed compact JWTs early.
+  try {
+    decodeProtectedHeader(token);
+  } catch {
+    return fail401('Invalid token');
+  }
 
   // 2. Import public key
   const publicKeyPem = process.env.VANTAHIRE_JWT_PUBLIC_KEY;
@@ -70,7 +81,7 @@ export async function verifyServiceJWT(request: NextRequest): Promise<VerifyResu
 
   let key;
   try {
-    key = await importSPKI(publicKeyPem, 'RS256');
+    key = await importSPKI(decodePemMaybeBase64(publicKeyPem), 'RS256');
   } catch (err) {
     console.error('[ServiceAuth] Failed to import public key:', err);
     return fail401('Service authentication not configured');
@@ -90,11 +101,9 @@ export async function verifyServiceJWT(request: NextRequest): Promise<VerifyResu
     // Wrong aud or iss → 403 per integration spec
     const failedClaim = getClaimValidationFailureClaim(err);
     if (failedClaim === 'aud' || failedClaim === 'iss') {
-      const message = err instanceof Error ? err.message : 'Token claim validation failed';
-      return fail403(`Invalid token: ${message}`);
+      return fail403('Invalid token claim');
     }
-    const message = err instanceof Error ? err.message : 'Token verification failed';
-    return fail401(`Invalid token: ${message}`);
+    return fail401('Invalid token');
   }
 
   // 4. Validate required custom claims
