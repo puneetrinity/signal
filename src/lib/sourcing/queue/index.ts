@@ -6,8 +6,10 @@
 
 import { Queue, Worker, Job } from 'bullmq';
 import IORedis from 'ioredis';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/prisma';
 import { createLogger } from '@/lib/logger';
+import { toJsonValue } from '@/lib/prisma/json';
 import { deliverCallback } from '../callback';
 import { runSourcingOrchestrator } from '../orchestrator';
 import type { SourcingJobData, SourcingJobResult, SourcingCallbackPayload } from '../types';
@@ -100,6 +102,17 @@ async function processSourcingJob(
         status: 'complete',
         completedAt: new Date(),
         resultCount: candidateCount,
+        qualityGateTriggered: orchestratorResult.qualityGateTriggered,
+        queriesExecuted: orchestratorResult.queriesExecuted,
+        diagnostics: toJsonValue({
+          avgFitTopK: orchestratorResult.avgFitTopK,
+          countAboveThreshold: orchestratorResult.countAboveThreshold,
+          discoveryReason: orchestratorResult.discoveryReason,
+          discoverySkippedReason: orchestratorResult.discoverySkippedReason,
+          discoveryShortfallRate: orchestratorResult.discoveryShortfallRate,
+          discoveredCount: orchestratorResult.discoveredCount,
+          poolCount: orchestratorResult.poolCount,
+        }),
       },
     });
 
@@ -130,7 +143,12 @@ async function processSourcingJob(
 
     await prisma.jobSourcingRequest.update({
       where: { id: requestId },
-      data: { status: 'failed' },
+      data: {
+        status: 'failed',
+        qualityGateTriggered: false,
+        queriesExecuted: 0,
+        diagnostics: Prisma.JsonNull,
+      },
     });
 
     // Attempt failure callback

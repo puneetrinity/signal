@@ -7,6 +7,7 @@
 
 import { createHash } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
+import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { verifyServiceJWT } from '@/lib/auth/service-jwt';
 import { requireScope } from '@/lib/auth/service-scopes';
@@ -94,6 +95,9 @@ export async function POST(
         callbackAttempts: 0,
         lastCallbackError: null,
         resultCount: null,
+        qualityGateTriggered: false,
+        queriesExecuted: 0,
+        diagnostics: Prisma.JsonNull,
       },
     });
 

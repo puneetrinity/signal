@@ -467,6 +467,9 @@ model JobSourcingRequest {
   callbackAttempts  Int      @default(0)
   lastCallbackError String?  @db.Text
   resultCount       Int?
+  qualityGateTriggered Boolean @default(false)
+  queriesExecuted      Int     @default(0)
+  diagnostics          Json?
 
   candidates        JobSourcingCandidate[]
 

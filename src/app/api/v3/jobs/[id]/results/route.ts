@@ -82,6 +82,9 @@ export async function GET(
     requestedAt: sourcingRequest.requestedAt.toISOString(),
     completedAt: sourcingRequest.completedAt?.toISOString() ?? null,
     resultCount: sourcingRequest.resultCount,
+    qualityGateTriggered: sourcingRequest.qualityGateTriggered,
+    queriesExecuted: sourcingRequest.queriesExecuted,
+    diagnostics: sourcingRequest.diagnostics,
     candidates: sourcingRequest.candidates.map((sc) => {
       const snap = sc.candidate.intelligenceSnapshots[0] ?? null;
       return {
