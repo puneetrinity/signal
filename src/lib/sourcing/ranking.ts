@@ -39,6 +39,20 @@ const LOCATION_ALIAS_REWRITES: Array<[RegExp, string]> = [
   [/\bsf\b/gi, 'san francisco'],
 ];
 
+const LOCATION_PLACEHOLDERS = new Set([
+  '.',
+  '..',
+  '...',
+  '-',
+  'na',
+  'n a',
+  'n/a',
+  'unknown',
+  'not specified',
+  'none',
+  'null',
+]);
+
 const CITY_COUNTRY_HINTS: Record<string, string> = {
   hyderabad: 'india',
   bangalore: 'india',
@@ -71,15 +85,31 @@ function canonicalizeLocation(text: string): string {
   return normalized.replace(/[^a-z0-9\s,]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+function isMeaningfulNormalizedLocation(normalized: string): boolean {
+  if (!normalized) return false;
+  if (LOCATION_PLACEHOLDERS.has(normalized)) return false;
+  if (normalized.length <= 1) return false;
+  const tokens = normalized.split(/[\s,]+/).map((token) => token.trim()).filter(Boolean);
+  if (tokens.length === 0) return false;
+  if (tokens.every((token) => token.length <= 1)) return false;
+  return true;
+}
+
+function isMeaningfulLocation(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return isMeaningfulNormalizedLocation(canonicalizeLocation(text));
+}
+
 function locationTokens(text: string): string[] {
   return canonicalizeLocation(text)
     .split(/[\s,]+/)
     .map((token) => token.trim())
-    .filter(Boolean);
+    .filter((token) => token.length > 1);
 }
 
 function inferCountry(text: string): string | null {
   const normalized = canonicalizeLocation(text);
+  if (!isMeaningfulNormalizedLocation(normalized)) return null;
   if (normalized.includes('india')) return 'india';
   if (normalized.includes('united states') || normalized.includes('usa') || /\bus\b/.test(normalized)) return 'usa';
   if (normalized.includes('united kingdom') || normalized.includes('uk')) return 'uk';
@@ -161,20 +191,24 @@ function computeSeniorityScore(candidate: CandidateForRanking, targetLevel: stri
 }
 
 function computeLocationScore(candidate: CandidateForRanking, targetLocation: string | null): number {
-  if (!targetLocation) return 0.5; // neutral
+  if (!isMeaningfulLocation(targetLocation)) return 0.5; // neutral
+  const target = targetLocation ?? '';
   // Prefer snapshot location
   const loc = candidate.snapshot?.location ?? candidate.locationHint;
-  if (loc) {
-    const targetNorm = canonicalizeLocation(targetLocation);
-    const candidateNorm = canonicalizeLocation(loc);
-    if (candidateNorm.includes(targetNorm) || targetNorm.includes(candidateNorm)) return 1;
+  if (isMeaningfulLocation(loc)) {
+    const candidateLocation = loc ?? '';
+    const targetNorm = canonicalizeLocation(target);
+    const candidateNorm = canonicalizeLocation(candidateLocation);
+    if (candidateNorm && targetNorm && (candidateNorm.includes(targetNorm) || targetNorm.includes(candidateNorm))) {
+      return 1;
+    }
 
-    const targetTokens = new Set(locationTokens(targetLocation));
-    const candidateTokens = locationTokens(loc);
+    const targetTokens = new Set(locationTokens(target));
+    const candidateTokens = locationTokens(candidateLocation);
     if (candidateTokens.some((token) => targetTokens.has(token))) return 1;
 
-    const targetCountry = inferCountry(targetLocation);
-    const candidateCountry = inferCountry(loc);
+    const targetCountry = inferCountry(target);
+    const candidateCountry = inferCountry(candidateLocation);
     if (targetCountry && candidateCountry && targetCountry === candidateCountry) return 0.7;
   }
   if (candidate.headlineHint && /\bremote\b/i.test(candidate.headlineHint)) return 0.5;

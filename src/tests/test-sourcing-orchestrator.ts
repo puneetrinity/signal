@@ -413,6 +413,17 @@ console.log('\n--- Snapshot-Aware Ranking ---');
 }
 
 {
+  // Placeholder location text should never score as a location match
+  const reqs = makeRequirements({ location: 'Hyderabad, India' });
+  const placeholderLoc: CandidateForRanking = {
+    id: 'placeholder-loc', headlineHint: null, locationHint: '...',
+    searchTitle: '', searchSnippet: '', enrichmentStatus: 'pending', lastEnrichedAt: null,
+  };
+  const scored = rankCandidates([placeholderLoc], reqs);
+  assert(scored[0].fitBreakdown.locationScore === 0, "Placeholder location '...' scores 0");
+}
+
+{
   // Snapshot computedAt used for freshness
   const reqs = makeRequirements();
   const snapFresh: CandidateForRanking = {
