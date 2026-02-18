@@ -48,3 +48,8 @@ CREATE INDEX IF NOT EXISTS "enrichment_sessions_tenantId_idx" ON "enrichment_ses
 CREATE INDEX IF NOT EXISTS "audit_logs_tenantId_idx" ON "audit_logs"("tenantId");
 CREATE INDEX IF NOT EXISTS "search_cache_v2_tenantId_idx" ON "search_cache_v2"("tenantId");
 CREATE INDEX IF NOT EXISTS "search_cache_v2_tenantId_queryHash_idx" ON "search_cache_v2"("tenantId", "queryHash");
+
+-- Step 7: Add sourcing diagnostics columns (Phase 5.1)
+ALTER TABLE "job_sourcing_requests" ADD COLUMN IF NOT EXISTS "quality_gate_triggered" BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE "job_sourcing_requests" ADD COLUMN IF NOT EXISTS "queries_executed" INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE "job_sourcing_requests" ADD COLUMN IF NOT EXISTS "diagnostics" JSONB;

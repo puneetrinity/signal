@@ -31,6 +31,11 @@ async function main() {
     // === Migration 20251218000000: Add runTrace field ===
     `ALTER TABLE "enrichment_sessions" ADD COLUMN IF NOT EXISTS "runTrace" JSONB`,
 
+    // === Migration 20260218010000: Add sourcing diagnostics columns ===
+    `ALTER TABLE "job_sourcing_requests" ADD COLUMN IF NOT EXISTS "quality_gate_triggered" BOOLEAN NOT NULL DEFAULT false`,
+    `ALTER TABLE "job_sourcing_requests" ADD COLUMN IF NOT EXISTS "queries_executed" INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE "job_sourcing_requests" ADD COLUMN IF NOT EXISTS "diagnostics" JSONB`,
+
     // === Migration 20251218200000: Create tenant_settings table ===
     `CREATE TABLE IF NOT EXISTS "tenant_settings" (
       "id" TEXT NOT NULL,
