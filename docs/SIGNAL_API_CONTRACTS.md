@@ -57,11 +57,16 @@ Content-Type: application/json
     "jdDigest": string,          // required — JD summary text
     "location": string?,         // optional
     "experienceYears": number?,  // optional
-    "education": string?         // optional
+    "education": string?,        // optional
+    "jobTrackHint": "auto" | "tech" | "non_tech"?,  // optional — track classification hint
+    "jobTrackHintSource": "system" | "user"?,        // optional — who set the hint
+    "jobTrackHintReason": string?                    // optional — why the hint was set
   },
   "callbackUrl": string          // required — valid URL, receives callback on completion
 }
 ```
+
+**Note:** `jobTrackHint`, `jobTrackHintSource`, and `jobTrackHintReason` are excluded from `jobContextHash`. Same job context with different hints = same request (idempotent).
 
 ### Response — New Request (202)
 
@@ -70,7 +75,13 @@ Content-Type: application/json
   "success": true,
   "requestId": "cmlq707lw0000p75gzhj3ij99",
   "status": "queued",
-  "idempotent": false
+  "idempotent": false,
+  "trackDecision": {
+    "track": "tech",
+    "confidence": 0.92,
+    "method": "deterministic",
+    "classifierVersion": "v1"
+  }
 }
 ```
 
@@ -83,7 +94,13 @@ Returned when an active/completed request exists with the same `(tenantId, exter
   "success": true,
   "requestId": "cmlq707lw0000p75gzhj3ij99",
   "status": "complete",
-  "idempotent": true
+  "idempotent": true,
+  "trackDecision": {
+    "track": "tech",
+    "confidence": 0.92,
+    "method": "deterministic",
+    "classifierVersion": "v1"
+  }
 }
 ```
 
@@ -97,7 +114,13 @@ Returned when a `failed` or `callback_failed` request exists. Re-queues the requ
   "requestId": "cmlq707lw0000p75gzhj3ij99",
   "status": "queued",
   "idempotent": false,
-  "retried": true
+  "retried": true,
+  "trackDecision": {
+    "track": "tech",
+    "confidence": 0.92,
+    "method": "deterministic",
+    "classifierVersion": "v1"
+  }
 }
 ```
 
@@ -137,6 +160,20 @@ GET /api/v3/jobs/{externalJobId}/results?requestId=<id>
   "requestedAt": "2026-02-17T05:58:46.917Z",
   "completedAt": "2026-02-17T05:58:47.228Z",
   "resultCount": 12,
+  "trackDecision": {
+    "track": "tech",
+    "confidence": 0.92,
+    "method": "deterministic",
+    "classifierVersion": "v1",
+    "deterministicSignals": {
+      "techScore": 0.94,
+      "nonTechScore": 0.06,
+      "matchedTechKeywords": ["react", "typescript", "software engineer"],
+      "matchedNonTechKeywords": [],
+      "roleFamilySignal": "frontend"
+    },
+    "resolvedAt": "2026-02-17T05:58:46.920Z"
+  },
   "candidates": [
     {
       "candidateId": "cmll077tb006gqp5gqtgqltr9",
@@ -171,13 +208,43 @@ GET /api/v3/jobs/{externalJobId}/results?requestId=<id>
         "staleAfter": "2026-03-19T06:16:01.887Z"
       },
       "freshness": {
-        "stale": false,
+        "snapshotAgeDays": 3,
+        "staleServed": false,
         "lastEnrichedAt": "2026-02-17T06:16:01.000Z"
+      },
+      "professionalValidation": {
+        "tier": 1,
+        "overallScore": 0.87,
+        "topReasons": ["All gates passed"],
+        "freshness": {
+          "lastValidatedAt": "2026-02-17T06:16:01.000Z",
+          "stale": false
+        },
+        "contradictions": 0
       }
     }
-  ]
+  ],
+  "snapshotStats": {
+    "totalWithSnapshot": 10,
+    "staleCount": 2,
+    "avgAgeDays": 12.3
+  }
 }
 ```
+
+### Track Decision Fields
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `trackDecision` | `object \| null` | null for pre-classifier requests |
+| `trackDecision.track` | `"tech" \| "non_tech" \| "blended"` | Resolved job track |
+| `trackDecision.confidence` | `number` | 0.0 – 1.0 |
+| `trackDecision.method` | `"deterministic" \| "groq" \| "deterministic+groq"` | How the decision was made |
+| `trackDecision.classifierVersion` | `string` | e.g. `"v1"` |
+| `trackDecision.deterministicSignals` | `object` | Keyword scoring details |
+| `trackDecision.groqResult` | `object \| undefined` | Present only when Groq was consulted |
+| `trackDecision.hintUsed` | `object \| undefined` | Present only when an explicit hint was provided |
+| `trackDecision.resolvedAt` | `string` | ISO 8601 |
 
 ### Field Reference
 
@@ -189,8 +256,30 @@ GET /api/v3/jobs/{externalJobId}/results?requestId=<id>
 | `enrichmentStatus` | `string` | `pending`, `completed`, `failed` |
 | `rank` | `number` | 1-based, lower = better |
 | `snapshot` | `object \| null` | null if no enrichment has run |
-| `freshness.stale` | `boolean \| null` | true if `staleAfter < now`, null if no snapshot |
+| `freshness.snapshotAgeDays` | `number \| null` | days since snapshot was computed |
+| `freshness.staleServed` | `boolean` | true if snapshot was stale when served |
 | `freshness.lastEnrichedAt` | `string \| null` | ISO 8601 |
+| `professionalValidation` | `object \| null` | null if no non-tech snapshot exists or shadow mode is on |
+| `snapshotStats` | `object` | Request-level snapshot diagnostics |
+
+### Professional Validation Fields
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `tier` | `1 \| 2 \| 3` | 1 = all gates pass, 2 = soft fail, 3 = hard fail |
+| `overallScore` | `number` | 0.0 – 1.0 composite score |
+| `topReasons` | `string[]` | Human-readable gate pass/fail reasons |
+| `freshness.lastValidatedAt` | `string \| null` | ISO 8601 |
+| `freshness.stale` | `boolean \| null` | true if data is stale |
+| `contradictions` | `number` | Count of identity contradictions |
+
+### Snapshot Stats Fields
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `totalWithSnapshot` | `number` | Candidates with a tech snapshot |
+| `staleCount` | `number` | Candidates with stale snapshots |
+| `avgAgeDays` | `number \| null` | Average snapshot age in days, null if no snapshots |
 
 ### Snapshot Fields
 
@@ -353,3 +442,18 @@ Content-Type: application/json
 | `SNAPSHOT_STALE_DAYS` | No | `30` | Days until snapshot is considered stale |
 | `STALE_REFRESH_MAX_PER_RUN` | No | `10` | Max stale candidates re-enriched per run |
 | `SOURCING_WORKER_CONCURRENCY` | No | `2` | BullMQ worker concurrency |
+
+### Track Classifier
+
+| Var | Required | Default | Notes |
+|-----|----------|---------|-------|
+| `TRACK_CLASSIFIER_VERSION` | No | `v1` | Versioning for auditability |
+| `TRACK_LOW_CONF_THRESHOLD` | No | `0.60` | Below this → Groq fallback |
+| `TRACK_BLEND_THRESHOLD` | No | `0.15` | Score margin below which → blended |
+| `TRACK_GROQ_ENABLED` | No | `true` | Kill switch for Groq (`false` to disable) |
+| `TRACK_GROQ_TIMEOUT_MS` | No | `1200` | Per-attempt timeout |
+| `TRACK_GROQ_MAX_RETRIES` | No | `1` | One retry on failure |
+| `TRACK_GROQ_CACHE_TTL_DAYS` | No | `30` | Redis cache TTL |
+| `TRACK_CB_THRESHOLD` | No | `5` | Failures to open circuit breaker |
+| `TRACK_CB_WINDOW_SEC` | No | `300` | Rolling failure window |
+| `TRACK_CB_COOLDOWN_SEC` | No | `60` | How long circuit stays open |

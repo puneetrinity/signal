@@ -90,7 +90,7 @@ async function processSourcingJob(
       where: { id: requestId },
     });
     const jobContext = jobRequest.jobContext as unknown as SourcingJobContextInput;
-    const orchestratorResult = await runSourcingOrchestrator(requestId, tenantId, jobContext);
+    const orchestratorResult = await runSourcingOrchestrator(requestId, tenantId, jobContext, job.data.resolvedTrack);
     const candidateCount = orchestratorResult.candidateCount;
     const enrichedCount = orchestratorResult.enrichedCount;
 
@@ -105,6 +105,8 @@ async function processSourcingJob(
         qualityGateTriggered: orchestratorResult.qualityGateTriggered,
         queriesExecuted: orchestratorResult.queriesExecuted,
         diagnostics: toJsonValue({
+          // Preserve trackDecision written at enqueue time
+          ...(job.data.resolvedTrack ? { trackDecision: job.data.resolvedTrack } : {}),
           avgFitTopK: orchestratorResult.avgFitTopK,
           countAboveThreshold: orchestratorResult.countAboveThreshold,
           discoveryReason: orchestratorResult.discoveryReason,
@@ -112,6 +114,9 @@ async function processSourcingJob(
           discoveryShortfallRate: orchestratorResult.discoveryShortfallRate,
           discoveredCount: orchestratorResult.discoveredCount,
           poolCount: orchestratorResult.poolCount,
+          snapshotReuseCount: orchestratorResult.snapshotReuseCount,
+          snapshotStaleServedCount: orchestratorResult.snapshotStaleServedCount,
+          snapshotRefreshQueuedCount: orchestratorResult.snapshotRefreshQueuedCount,
         }),
       },
     });
@@ -147,7 +152,10 @@ async function processSourcingJob(
         status: 'failed',
         qualityGateTriggered: false,
         queriesExecuted: 0,
-        diagnostics: Prisma.JsonNull,
+        // Preserve trackDecision written at enqueue time; only clear orchestrator fields
+        diagnostics: job.data.resolvedTrack
+          ? toJsonValue({ trackDecision: job.data.resolvedTrack })
+          : Prisma.JsonNull,
       },
     });
 

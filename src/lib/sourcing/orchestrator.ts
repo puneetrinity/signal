@@ -9,6 +9,7 @@ import { discoverCandidates } from './discovery';
 import { getSourcingConfig } from './config';
 import { createEnrichmentSession } from '@/lib/enrichment/queue';
 import type { CandidateForRanking, FitBreakdown } from './ranking';
+import type { TrackDecision } from './types';
 
 const log = createLogger('SourcingOrchestrator');
 
@@ -26,6 +27,9 @@ export interface OrchestratorResult {
   countAboveThreshold: number;
   discoveryReason: 'pool_deficit' | 'low_quality_pool' | 'deficit_and_low_quality' | null;
   discoverySkippedReason: 'daily_serp_cap_reached' | 'cap_guard_unavailable' | null;
+  snapshotReuseCount: number;
+  snapshotStaleServedCount: number;
+  snapshotRefreshQueuedCount: number;
 }
 
 interface AssembledCandidate {
@@ -107,6 +111,7 @@ export async function runSourcingOrchestrator(
   requestId: string,
   tenantId: string,
   jobContext: SourcingJobContextInput,
+  trackDecision?: TrackDecision,
 ): Promise<OrchestratorResult> {
   const config = getSourcingConfig();
   const requirements = buildJobRequirements(jobContext);
@@ -118,6 +123,7 @@ export async function runSourcingOrchestrator(
       topSkills: requirements.topSkills,
       roleFamily: requirements.roleFamily,
       location: requirements.location,
+      resolvedTrack: trackDecision ? { track: trackDecision.track, confidence: trackDecision.confidence, method: trackDecision.method } : null,
     },
     'Starting orchestrator',
   );
@@ -418,6 +424,18 @@ export async function runSourcingOrchestrator(
     ? (discoveryTarget - discoveredCount) / discoveryTarget
     : 0;
 
+  // Snapshot reuse stats: candidates in assembled list with fresh snapshots
+  const snapshotReuseCount = assembled.filter((a) => {
+    const row = poolById.get(a.candidateId);
+    const snap = row?.intelligenceSnapshots?.[0];
+    return snap && (!snap.staleAfter || snap.staleAfter >= now);
+  }).length;
+  const snapshotStaleServedCount = assembled.filter((a) => {
+    const row = poolById.get(a.candidateId);
+    const snap = row?.intelligenceSnapshots?.[0];
+    return snap?.staleAfter && snap.staleAfter < now;
+  }).length;
+
   const result: OrchestratorResult = {
     candidateCount: assembled.length,
     enrichedCount: assembled.filter((a) => a.sourceType === 'pool_enriched').length,
@@ -432,8 +450,11 @@ export async function runSourcingOrchestrator(
     countAboveThreshold,
     discoveryReason,
     discoverySkippedReason,
+    snapshotReuseCount,
+    snapshotStaleServedCount,
+    snapshotRefreshQueuedCount: staleRefreshQueued,
   };
 
-  log.info({ requestId, ...result }, 'Orchestrator complete');
+  log.info({ requestId, resolvedTrack: trackDecision?.track ?? null, ...result }, 'Orchestrator complete');
   return result;
 }

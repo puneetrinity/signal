@@ -7,13 +7,15 @@
 
 import { createHash } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
-import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { verifyServiceJWT } from '@/lib/auth/service-jwt';
 import { requireScope } from '@/lib/auth/service-scopes';
 import { getEnrichmentProviderStatus } from '@/lib/enrichment/provider';
 import { prisma } from '@/lib/prisma';
+import { toJsonValue } from '@/lib/prisma/json';
 import { getSourcingQueue } from '@/lib/sourcing/queue';
+import { buildJobRequirements, type SourcingJobContextInput } from '@/lib/sourcing/jd-digest';
+import { resolveTrack } from '@/lib/sourcing/track-resolver';
 import type { SourcingJobData } from '@/lib/sourcing/types';
 
 const bodySchema = z.object({
@@ -25,12 +27,27 @@ const bodySchema = z.object({
     location: z.string().optional(),
     experienceYears: z.number().optional(),
     education: z.string().optional(),
+    // Track hint fields — excluded from jobContextHash (see idempotency caveat below)
+    jobTrackHint: z.enum(['auto', 'tech', 'non_tech']).optional(),
+    jobTrackHintSource: z.enum(['system', 'user']).optional(),
+    jobTrackHintReason: z.string().optional(),
   }),
   callbackUrl: z.string().url(),
 });
 
+// Idempotency caveat: jobTrackHint, jobTrackHintSource, jobTrackHintReason, and
+// TRACK_CLASSIFIER_VERSION are all excluded from jobContextHash. This means:
+// - Same job context with different hints = same request (idempotent).
+// - If the classifier version changes, existing requests are reused — the trackDecision
+//   reflects the version at first resolution, not the current version.
+const HASH_EXCLUDED_FIELDS = new Set(['jobTrackHint', 'jobTrackHintSource', 'jobTrackHintReason']);
+
 function computeJobContextHash(jobContext: Record<string, unknown>): string {
-  const sorted = JSON.stringify(jobContext, Object.keys(jobContext).sort());
+  const filtered: Record<string, unknown> = {};
+  for (const key of Object.keys(jobContext).sort()) {
+    if (!HASH_EXCLUDED_FIELDS.has(key)) filtered[key] = jobContext[key];
+  }
+  const sorted = JSON.stringify(filtered, Object.keys(filtered).sort());
   return createHash('sha256').update(sorted).digest('hex');
 }
 
@@ -69,6 +86,25 @@ export async function POST(
   const tenantId = auth.context.tenantId;
   const jobContextHash = computeJobContextHash(body.jobContext as Record<string, unknown>);
 
+  // Resolve track (runs for both new requests and retries — fast deterministic path)
+  const jobContext = body.jobContext as SourcingJobContextInput;
+  const requirements = buildJobRequirements(jobContext);
+  const hint = body.jobContext.jobTrackHint
+    ? {
+        jobTrackHint: body.jobContext.jobTrackHint,
+        jobTrackHintSource: body.jobContext.jobTrackHintSource,
+        jobTrackHintReason: body.jobContext.jobTrackHintReason,
+      }
+    : undefined;
+  const trackDecision = await resolveTrack(jobContext, requirements, hint);
+
+  const trackDecisionSummary = {
+    track: trackDecision.track,
+    confidence: trackDecision.confidence,
+    method: trackDecision.method,
+    classifierVersion: trackDecision.classifierVersion,
+  };
+
   // Idempotency check
   const existing = await prisma.jobSourcingRequest.findUnique({
     where: { tenantId_externalJobId_jobContextHash: { tenantId, externalJobId, jobContextHash } },
@@ -78,15 +114,19 @@ export async function POST(
     // Allow re-queue for terminal failure states
     const retryable = existing.status === 'failed' || existing.status === 'callback_failed';
     if (!retryable) {
+      // Return persisted trackDecision, not freshly computed one, for consistency with GET /results
+      const existingDiag = existing.diagnostics as Record<string, unknown> | null;
+      const persistedTrackDecision = existingDiag?.trackDecision ?? null;
       return NextResponse.json({
         success: true,
         requestId: existing.id,
         status: existing.status,
         idempotent: true,
+        trackDecision: persistedTrackDecision,
       });
     }
 
-    // Reset failed request and re-enqueue
+    // Reset failed request and re-enqueue — persist trackDecision before enqueue
     await prisma.jobSourcingRequest.update({
       where: { id: existing.id },
       data: {
@@ -97,7 +137,7 @@ export async function POST(
         resultCount: null,
         qualityGateTriggered: false,
         queriesExecuted: 0,
-        diagnostics: Prisma.JsonNull,
+        diagnostics: toJsonValue({ trackDecision }),
       },
     });
 
@@ -111,6 +151,7 @@ export async function POST(
       tenantId,
       externalJobId,
       callbackUrl: body.callbackUrl,
+      resolvedTrack: trackDecision,
     };
     await queue.add('source', jobData, { jobId: existing.id });
 
@@ -121,12 +162,13 @@ export async function POST(
         status: 'queued',
         idempotent: false,
         retried: true,
+        trackDecision: trackDecisionSummary,
       },
       { status: 202 },
     );
   }
 
-  // Create new request
+  // Create new request — persist trackDecision in diagnostics before enqueue
   const req = await prisma.jobSourcingRequest.create({
     data: {
       tenantId,
@@ -135,6 +177,7 @@ export async function POST(
       jobContext: body.jobContext,
       callbackUrl: body.callbackUrl,
       status: 'queued',
+      diagnostics: toJsonValue({ trackDecision }),
     },
   });
 
@@ -144,6 +187,7 @@ export async function POST(
     tenantId,
     externalJobId,
     callbackUrl: body.callbackUrl,
+    resolvedTrack: trackDecision,
   };
   await getSourcingQueue().add('source', jobData, { jobId: req.id });
 
@@ -153,6 +197,7 @@ export async function POST(
       requestId: req.id,
       status: 'queued',
       idempotent: false,
+      trackDecision: trackDecisionSummary,
     },
     { status: 202 },
   );
