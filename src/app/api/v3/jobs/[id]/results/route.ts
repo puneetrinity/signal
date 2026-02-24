@@ -52,7 +52,6 @@ export async function GET(
               lastEnrichedAt: true,
               intelligenceSnapshots: {
                 where: { track: { in: ['tech', 'non-tech'] } },
-                take: 2,
                 orderBy: { computedAt: 'desc' },
                 select: {
                   track: true,
@@ -278,6 +277,10 @@ export async function GET(
     expansionReason: (diag.expansionReason as string) ?? null,
     requestedLocation: (diag.requestedLocation as string) ?? null,
     strictDemotedCount: (diag.strictDemotedCount as number) ?? 0,
+    locationMatchCounts: (diag.locationMatchCounts as Record<string, number>) ?? null,
+    demotedStrictWithCityMatch: (diag.demotedStrictWithCityMatch as number) ?? 0,
+    strictBeforeDemotion: (diag.strictBeforeDemotion as number) ?? 0,
+    selectedSnapshotTrack: (diag.selectedSnapshotTrack as string) ?? 'tech',
   };
 
   return NextResponse.json({

@@ -11,6 +11,7 @@ import { createEnrichmentSession } from '@/lib/enrichment/queue';
 import { isMeaningfulLocation, isNoisyLocationHint } from './ranking';
 import type { CandidateForRanking, FitBreakdown, MatchTier, LocationMatchType } from './ranking';
 import type { TrackDecision } from './types';
+import { jobTrackToDbFilter } from './types';
 
 const log = createLogger('SourcingOrchestrator');
 
@@ -44,6 +45,10 @@ export interface OrchestratorResult {
   };
   locationHintCoverage: number;
   strictDemotedCount: number;
+  locationMatchCounts: { city_exact: number; city_alias: number; country_only: number; none: number };
+  demotedStrictWithCityMatch: number;
+  strictBeforeDemotion: number;
+  selectedSnapshotTrack: string;
 }
 
 interface AssembledCandidate {
@@ -145,6 +150,11 @@ export async function runSourcingOrchestrator(
   );
 
   // 1. Query tenant pool (capped at 5000 most recent)
+  const snapshotTrackFilter = jobTrackToDbFilter(trackDecision?.track);
+  const selectedSnapshotTrack = snapshotTrackFilter.length === 1
+    ? snapshotTrackFilter[0]
+    : 'tech'; // blended uses deterministic tech-first preference
+
   const poolRows = await prisma.candidate.findMany({
     where: { tenantId },
     select: {
@@ -157,8 +167,7 @@ export async function runSourcingOrchestrator(
       enrichmentStatus: true,
       lastEnrichedAt: true,
       intelligenceSnapshots: {
-        where: { track: 'tech' },
-        take: 1,
+        where: { track: { in: snapshotTrackFilter } },
         orderBy: { computedAt: 'desc' },
       },
     },
@@ -171,7 +180,13 @@ export async function runSourcingOrchestrator(
 
   // 2. Rank pool candidates
   const poolForRanking: CandidateForRanking[] = poolRows.map((r) => {
-    const snap = r.intelligenceSnapshots[0] ?? null;
+    // For blended, deterministically prefer latest tech snapshot when present.
+    // We fetch all matched tracks sorted by computedAt so per-track fallback is stable.
+    const latestTechSnap = r.intelligenceSnapshots.find((s) => s.track === 'tech') ?? null;
+    const latestNonTechSnap = r.intelligenceSnapshots.find((s) => s.track === 'non-tech') ?? null;
+    const snap = snapshotTrackFilter.length === 1
+      ? (r.intelligenceSnapshots[0] ?? null)
+      : (latestTechSnap ?? latestNonTechSnap);
     return {
       id: r.id,
       headlineHint: r.headlineHint,
@@ -335,10 +350,16 @@ export async function runSourcingOrchestrator(
   // Quality guard: demote strict candidates below fitScore floor to expanded pool
   let strictDemotedCount = 0;
   const qualifiedStrict: typeof strictPool = [];
+  const strictBeforeDemotion = strictPool.length;
+  let demotedStrictWithCityMatch = 0;
   for (const sc of strictPool) {
     if (sc.fitScore < config.bestMatchesMinFitScore) {
+      sc.matchTier = 'expanded_location';
       expandedPool.push(sc);
       strictDemotedCount++;
+      if (sc.locationMatchType === 'city_exact' || sc.locationMatchType === 'city_alias') {
+        demotedStrictWithCityMatch++;
+      }
     } else {
       qualifiedStrict.push(sc);
     }
@@ -554,6 +575,15 @@ export async function runSourcingOrchestrator(
     ? Number((candidatesWithLocation / scoredAssembled.length).toFixed(4))
     : 0;
 
+  // Computed from full scoredPool (pre-assembly), not the assembled top-N.
+  // This gives visibility into the entire candidate distribution for diagnostics.
+  const locationMatchCounts = {
+    city_exact: scoredPool.filter(sc => sc.locationMatchType === 'city_exact').length,
+    city_alias: scoredPool.filter(sc => sc.locationMatchType === 'city_alias').length,
+    country_only: scoredPool.filter(sc => sc.locationMatchType === 'country_only').length,
+    none: scoredPool.filter(sc => sc.locationMatchType === 'none').length,
+  };
+
   const result: OrchestratorResult = {
     candidateCount: assembled.length,
     enrichedCount: assembled.filter((a) => a.sourceType === 'pool_enriched').length,
@@ -580,6 +610,10 @@ export async function runSourcingOrchestrator(
     skillScoreDiagnostics,
     locationHintCoverage,
     strictDemotedCount,
+    locationMatchCounts,
+    demotedStrictWithCityMatch,
+    strictBeforeDemotion,
+    selectedSnapshotTrack,
   };
 
   log.info({ requestId, resolvedTrack: trackDecision?.track ?? null, ...result }, 'Orchestrator complete');

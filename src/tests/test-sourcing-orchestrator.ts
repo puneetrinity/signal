@@ -8,6 +8,9 @@
 import { rankCandidates, isNoisyLocationHint, type CandidateForRanking, type ScoredCandidate } from '@/lib/sourcing/ranking';
 import { parseJdDigest, buildJobRequirements, type JobRequirements } from '@/lib/sourcing/jd-digest';
 import { getSourcingConfig } from '@/lib/sourcing/config';
+import { extractLocationFromSnippet } from '@/lib/enrichment/hint-extraction';
+import { isLikelyLocationHint } from '@/lib/sourcing/hint-sanitizer';
+import { jobTrackToDbFilter } from '@/lib/sourcing/types';
 
 let passed = 0;
 let failed = 0;
@@ -758,6 +761,7 @@ function simulateAssembly(
   const qualifiedStrict: ScoredCandidate[] = [];
   for (const sc of strictPool) {
     if (sc.fitScore < bestMatchesMinFitScore) {
+      sc.matchTier = 'expanded_location';
       expandedPool.push(sc);
       strictDemotedCount++;
     } else {
@@ -882,6 +886,220 @@ function simulateAssembly(
 
   assert(result.strictDemotedCount === 0, 'E2E no-location: 0 demoted');
   assert(result.expansionReason === null, 'E2E no-location: no expansion reason');
+}
+
+// ---------------------------------------------------------------------------
+// Test: Demoted tier rewrite
+// ---------------------------------------------------------------------------
+
+console.log('\n--- Demoted Tier Rewrite ---');
+
+{
+  const reqs = makeRequirements({ location: 'Delhi, India', topSkills: ['Kubernetes', 'AWS', 'Terraform'] });
+  const candidates: CandidateForRanking[] = [
+    {
+      id: 'devops-delhi-2', headlineHint: 'Senior DevOps Engineer', locationHint: 'Delhi, India',
+      searchTitle: 'DevOps Engineer', searchSnippet: 'Kubernetes AWS Terraform infrastructure',
+      enrichmentStatus: 'pending', lastEnrichedAt: null,
+    },
+    {
+      id: 'sales-delhi-2', headlineHint: 'Sales Manager', locationHint: 'Delhi, India',
+      searchTitle: 'Sales Manager', searchSnippet: 'Managing regional sales team',
+      enrichmentStatus: 'pending', lastEnrichedAt: null,
+    },
+  ];
+
+  const scored = rankCandidates(candidates, reqs);
+  const result = simulateAssembly(scored, true, 100, 0.45);
+
+  const salesAfter = scored.find(s => s.candidateId === 'sales-delhi-2')!;
+  const devopsAfter = scored.find(s => s.candidateId === 'devops-delhi-2')!;
+
+  assert(result.strictDemotedCount >= 1, 'Tier rewrite: at least 1 demoted');
+  assert(salesAfter.matchTier === 'expanded_location', 'Tier rewrite: demoted candidate has expanded_location matchTier');
+  assert(devopsAfter.matchTier === 'strict_location', 'Tier rewrite: non-demoted stays strict_location');
+}
+
+// ---------------------------------------------------------------------------
+// Test: locationMatchCounts consistency
+// ---------------------------------------------------------------------------
+
+console.log('\n--- locationMatchCounts Consistency ---');
+
+{
+  const reqs = makeRequirements({ location: 'Delhi, India', topSkills: ['React'] });
+  const candidates: CandidateForRanking[] = [
+    {
+      id: 'city-exact', headlineHint: 'Engineer', locationHint: 'Delhi, India',
+      searchTitle: '', searchSnippet: '', enrichmentStatus: 'pending', lastEnrichedAt: null,
+    },
+    {
+      id: 'country-only', headlineHint: 'Engineer', locationHint: 'Mumbai, India',
+      searchTitle: '', searchSnippet: '', enrichmentStatus: 'pending', lastEnrichedAt: null,
+    },
+    {
+      id: 'no-loc', headlineHint: 'Engineer', locationHint: null,
+      searchTitle: '', searchSnippet: '', enrichmentStatus: 'pending', lastEnrichedAt: null,
+    },
+  ];
+
+  const scored = rankCandidates(candidates, reqs);
+  const counts = {
+    city_exact: scored.filter(sc => sc.locationMatchType === 'city_exact').length,
+    city_alias: scored.filter(sc => sc.locationMatchType === 'city_alias').length,
+    country_only: scored.filter(sc => sc.locationMatchType === 'country_only').length,
+    none: scored.filter(sc => sc.locationMatchType === 'none').length,
+  };
+
+  assert(counts.city_exact + counts.city_alias + counts.country_only + counts.none === scored.length,
+    'locationMatchCounts sum equals total candidates');
+  assert(counts.city_exact >= 1, 'locationMatchCounts: at least 1 city_exact');
+  assert(counts.country_only >= 1, 'locationMatchCounts: at least 1 country_only');
+}
+
+// ---------------------------------------------------------------------------
+// Test: Polluted extraction rejection
+// ---------------------------------------------------------------------------
+
+console.log('\n--- Polluted Extraction Rejection ---');
+
+{
+  const r1 = extractLocationFromSnippet('Location: Senior Manager with 15 years experience');
+  assert(r1 === null, 'Polluted "Location: Senior Manager..." → null');
+
+  const r2 = extractLocationFromSnippet('Graduated from University of California with honors');
+  assert(r2 === null, 'Polluted "University of California..." → null');
+
+  const r3 = extractLocationFromSnippet('Location: San Francisco, CA · 500+ connections');
+  assert(r3 === 'San Francisco, CA', 'Clean "Location: San Francisco, CA" → extracted');
+
+  const r4 = extractLocationFromSnippet('Engineer based in Bangalore, India.');
+  assert(r4 !== null && r4.includes('Bangalore'), 'Clean "based in Bangalore, India" → includes Bangalore');
+}
+
+// ---------------------------------------------------------------------------
+// Test: isLikelyLocationHint
+// ---------------------------------------------------------------------------
+
+console.log('\n--- isLikelyLocationHint ---');
+
+{
+  assert(isLikelyLocationHint('Delhi, India') === true, 'isLikelyLocationHint: "Delhi, India" → true');
+  assert(isLikelyLocationHint('Senior Manager with 15 years') === false, 'isLikelyLocationHint: bio text → false');
+  assert(isLikelyLocationHint('University of California') === false, 'isLikelyLocationHint: education → false');
+  assert(isLikelyLocationHint('San Francisco, CA') === true, 'isLikelyLocationHint: "San Francisco, CA" → true');
+  assert(isLikelyLocationHint('') === false, 'isLikelyLocationHint: empty → false');
+  assert(isLikelyLocationHint('n/a') === false, 'isLikelyLocationHint: placeholder → false');
+  // Short state code false-positive guards
+  assert(isLikelyLocationHint('Vacation planning') === false, 'isLikelyLocationHint: "Vacation" not matched by "va"');
+  assert(isLikelyLocationHint('Coaching staff') === false, 'isLikelyLocationHint: "Coaching" not matched by "co"');
+  assert(isLikelyLocationHint('Richmond, VA') === true, 'isLikelyLocationHint: "Richmond, VA" word-boundary match → true');
+}
+
+// ---------------------------------------------------------------------------
+// Test: jobTrackToDbFilter mapping
+// ---------------------------------------------------------------------------
+
+console.log('\n--- jobTrackToDbFilter ---');
+
+{
+  const tech = jobTrackToDbFilter('tech');
+  assert(tech.length === 1 && tech[0] === 'tech', "jobTrackToDbFilter('tech') → ['tech']");
+
+  const nonTech = jobTrackToDbFilter('non_tech');
+  assert(nonTech.length === 1 && nonTech[0] === 'non-tech', "jobTrackToDbFilter('non_tech') → ['non-tech']");
+
+  const blended = jobTrackToDbFilter('blended');
+  assert(blended.length === 2 && blended[0] === 'tech' && blended[1] === 'non-tech',
+    "jobTrackToDbFilter('blended') → ['tech', 'non-tech']");
+
+  const undef = jobTrackToDbFilter(undefined);
+  assert(undef.length === 1 && undef[0] === 'tech', "jobTrackToDbFilter(undefined) → ['tech']");
+}
+
+// ---------------------------------------------------------------------------
+// Test: Track-aware snapshot selection
+// ---------------------------------------------------------------------------
+
+console.log('\n--- Track-Aware Snapshot Selection ---');
+
+{
+  function selectSnapshot(trackFilter: string[], snapshots: Array<{ track: string }>) {
+    const latestTech = snapshots.find((s) => s.track === 'tech') ?? null;
+    const latestNonTech = snapshots.find((s) => s.track === 'non-tech') ?? null;
+    return trackFilter.length === 1
+      ? (snapshots[0] ?? null)
+      : (latestTech ?? latestNonTech);
+  }
+
+  // Non-tech snapshot selection: with snapshotTrackFilter = ['non-tech'],
+  // the single snapshot should be picked.
+  type MockSnapshot = { track: string; skillsNormalized: string[] };
+  const nonTechSnap: MockSnapshot = { track: 'non-tech', skillsNormalized: ['Sales', 'Marketing'] };
+  const snapshots: MockSnapshot[] = [nonTechSnap];
+  const snapshotTrackFilter = ['non-tech'];
+  const selected = selectSnapshot(snapshotTrackFilter, snapshots);
+
+  assert(selected === nonTechSnap, 'Non-tech filter: picks the non-tech snapshot');
+}
+
+{
+  function selectSnapshot(trackFilter: string[], snapshots: Array<{ track: string }>) {
+    const latestTech = snapshots.find((s) => s.track === 'tech') ?? null;
+    const latestNonTech = snapshots.find((s) => s.track === 'non-tech') ?? null;
+    return trackFilter.length === 1
+      ? (snapshots[0] ?? null)
+      : (latestTech ?? latestNonTech);
+  }
+
+  // Blended prefers tech: with both snapshots, tech should be picked.
+  type MockSnapshot = { track: string; skillsNormalized: string[] };
+  const techSnap: MockSnapshot = { track: 'tech', skillsNormalized: ['React', 'TypeScript'] };
+  const nonTechSnap: MockSnapshot = { track: 'non-tech', skillsNormalized: ['Sales', 'Marketing'] };
+  const snapshots: MockSnapshot[] = [nonTechSnap, techSnap]; // non-tech first to test find()
+  const snapshotTrackFilter = ['tech', 'non-tech'];
+  const selected = selectSnapshot(snapshotTrackFilter, snapshots);
+
+  assert(selected === techSnap, 'Blended filter: prefers tech snapshot');
+}
+
+{
+  function selectSnapshot(trackFilter: string[], snapshots: Array<{ track: string }>) {
+    const latestTech = snapshots.find((s) => s.track === 'tech') ?? null;
+    const latestNonTech = snapshots.find((s) => s.track === 'non-tech') ?? null;
+    return trackFilter.length === 1
+      ? (snapshots[0] ?? null)
+      : (latestTech ?? latestNonTech);
+  }
+
+  // Blended fallback: only non-tech snapshot available, should pick it.
+  type MockSnapshot = { track: string; skillsNormalized: string[] };
+  const nonTechSnap: MockSnapshot = { track: 'non-tech', skillsNormalized: ['Sales'] };
+  const snapshots: MockSnapshot[] = [nonTechSnap];
+  const snapshotTrackFilter = ['tech', 'non-tech'];
+  const selected = selectSnapshot(snapshotTrackFilter, snapshots);
+
+  assert(selected === nonTechSnap, 'Blended filter: falls back to non-tech when tech absent');
+}
+
+{
+  function selectSnapshot(trackFilter: string[], snapshots: Array<{ track: string }>) {
+    const latestTech = snapshots.find((s) => s.track === 'tech') ?? null;
+    const latestNonTech = snapshots.find((s) => s.track === 'non-tech') ?? null;
+    return trackFilter.length === 1
+      ? (snapshots[0] ?? null)
+      : (latestTech ?? latestNonTech);
+  }
+
+  // Regression guard: if two newest snapshots are non-tech, blended must still pick tech when present.
+  type MockSnapshot = { track: string; computedAt: number };
+  const snapshots: MockSnapshot[] = [
+    { track: 'non-tech', computedAt: 300 },
+    { track: 'non-tech', computedAt: 200 },
+    { track: 'tech', computedAt: 100 },
+  ];
+  const selected = selectSnapshot(['tech', 'non-tech'], snapshots);
+  assert(selected?.track === 'tech', 'Blended filter: still picks tech even when newer non-tech snapshots exist');
 }
 
 // ---------------------------------------------------------------------------

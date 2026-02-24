@@ -4,6 +4,16 @@
 
 export type JobTrack = 'tech' | 'non_tech' | 'blended';
 
+/** Map runtime JobTrack to DB track values (DB uses 'non-tech' with hyphen). */
+export function jobTrackToDbFilter(track: JobTrack | undefined): string[] {
+  switch (track) {
+    case 'tech': return ['tech'];
+    case 'non_tech': return ['non-tech'];
+    case 'blended': return ['tech', 'non-tech'];
+    default: return ['tech'];
+  }
+}
+
 export interface TrackDecision {
   track: JobTrack;
   confidence: number;

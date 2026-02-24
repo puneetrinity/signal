@@ -10,9 +10,13 @@ import type { SourcingCallbackPayload } from './types';
 
 const log = createLogger('SourcingCallback');
 
-const MAX_ATTEMPTS = 3;
-const RETRY_DELAYS_MS = [1_000, 5_000]; // delays between attempts (factor 5)
+export const MAX_ATTEMPTS = 5;
+export const BASE_DELAYS_MS = [1_000, 3_000, 10_000, 30_000];
 const REQUEST_TIMEOUT_MS = 10_000;
+
+export function jitteredDelay(baseMs: number): number {
+  return Math.round(baseMs * (0.8 + Math.random() * 0.4));
+}
 
 let cachedKey: CryptoKey | null = null;
 
@@ -57,7 +61,7 @@ export async function deliverCallback(
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     // Wait before retry (skip on first attempt)
     if (attempt > 0) {
-      await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]));
+      await new Promise((r) => setTimeout(r, jitteredDelay(BASE_DELAYS_MS[attempt - 1])));
     }
 
     try {
@@ -120,4 +124,49 @@ export async function deliverCallback(
   }
   log.error({ requestId }, 'Callback delivery failed after all attempts');
   return false;
+}
+
+export async function redeliverStaleCallbacks(opts: {
+  tenantId?: string;
+  maxAgeMinutes?: number;
+  limit?: number;
+}): Promise<{ attempted: number; succeeded: number; failed: number }> {
+  const maxAge = opts.maxAgeMinutes ?? 30;
+  const limit = opts.limit ?? 50;
+  const cutoff = new Date(Date.now() - maxAge * 60 * 1000);
+
+  const staleRequests = await prisma.jobSourcingRequest.findMany({
+    where: {
+      status: 'callback_failed',
+      completedAt: { lt: cutoff },
+      ...(opts.tenantId ? { tenantId: opts.tenantId } : {}),
+    },
+    take: limit,
+    orderBy: { completedAt: 'asc' },
+  });
+
+  let succeeded = 0;
+  let failed = 0;
+
+  for (const req of staleRequests) {
+    const payload: SourcingCallbackPayload = {
+      version: 1,
+      requestId: req.id,
+      externalJobId: req.externalJobId,
+      status: 'complete',
+      candidateCount: req.resultCount ?? 0,
+      enrichedCount: 0,
+    };
+
+    try {
+      const ok = await deliverCallback(req.id, req.tenantId, req.callbackUrl, payload, true);
+      if (ok) succeeded++;
+      else failed++;
+    } catch {
+      failed++;
+    }
+  }
+
+  log.info({ attempted: staleRequests.length, succeeded, failed }, 'Stale callback redelivery complete');
+  return { attempted: staleRequests.length, succeeded, failed };
 }
