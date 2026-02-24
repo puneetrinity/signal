@@ -29,6 +29,8 @@ import {
   shouldContinueSearching,
 } from './nodes';
 import { computeSnapshotNode } from './snapshot';
+import { nonTechEnrichmentNode } from '../non-tech/node';
+import { isNonTechEnabled } from '../config';
 
 const log = createLogger('EnrichmentGraph');
 
@@ -45,6 +47,7 @@ const NODES = {
   GENERATE_SUMMARY: 'generateSummary',
   PERSIST_SUMMARY: 'persistSummary',
   COMPUTE_SNAPSHOT: 'computeSnapshot',
+  NON_TECH_ENRICHMENT: 'nonTechEnrichment',
 } as const;
 
 /**
@@ -77,6 +80,7 @@ export function buildEnrichmentGraph() {
     .addNode(NODES.GENERATE_SUMMARY, generateSummaryNode)
     .addNode(NODES.PERSIST_SUMMARY, persistSummaryNode)
     .addNode(NODES.COMPUTE_SNAPSHOT, computeSnapshotNode)
+    .addNode(NODES.NON_TECH_ENRICHMENT, nonTechEnrichmentNode)
 
     // Add edges
     .addEdge('__start__', NODES.LOAD_CANDIDATE)
@@ -93,7 +97,10 @@ export function buildEnrichmentGraph() {
     .addEdge(NODES.FETCH_PLATFORM_DATA, NODES.GENERATE_SUMMARY)
     .addEdge(NODES.GENERATE_SUMMARY, NODES.PERSIST_SUMMARY)
     .addEdge(NODES.PERSIST_SUMMARY, NODES.COMPUTE_SNAPSHOT)
-    .addEdge(NODES.COMPUTE_SNAPSHOT, END);
+    .addConditionalEdges(NODES.COMPUTE_SNAPSHOT, () => {
+      return isNonTechEnabled() ? NODES.NON_TECH_ENRICHMENT : END;
+    })
+    .addEdge(NODES.NON_TECH_ENRICHMENT, END);
 
   return graph.compile();
 }
@@ -248,6 +255,7 @@ export async function buildEnrichmentGraphWithCheckpointer(
     .addNode(NODES.GENERATE_SUMMARY, generateSummaryNode)
     .addNode(NODES.PERSIST_SUMMARY, persistSummaryNode)
     .addNode(NODES.COMPUTE_SNAPSHOT, computeSnapshotNode)
+    .addNode(NODES.NON_TECH_ENRICHMENT, nonTechEnrichmentNode)
     .addEdge('__start__', NODES.LOAD_CANDIDATE)
     .addConditionalEdges(NODES.LOAD_CANDIDATE, (state) => {
       if (state.status === 'failed') {
@@ -262,7 +270,10 @@ export async function buildEnrichmentGraphWithCheckpointer(
     .addEdge(NODES.FETCH_PLATFORM_DATA, NODES.GENERATE_SUMMARY)
     .addEdge(NODES.GENERATE_SUMMARY, NODES.PERSIST_SUMMARY)
     .addEdge(NODES.PERSIST_SUMMARY, NODES.COMPUTE_SNAPSHOT)
-    .addEdge(NODES.COMPUTE_SNAPSHOT, END);
+    .addConditionalEdges(NODES.COMPUTE_SNAPSHOT, () => {
+      return isNonTechEnabled() ? NODES.NON_TECH_ENRICHMENT : END;
+    })
+    .addEdge(NODES.NON_TECH_ENRICHMENT, END);
 
   return graph.compile({ checkpointer });
 }

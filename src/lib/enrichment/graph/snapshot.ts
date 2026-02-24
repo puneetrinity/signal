@@ -12,6 +12,12 @@ import type { EnrichmentState, PartialEnrichmentState } from './types';
 
 const log = createLogger('SnapshotNode');
 
+/**
+ * Identity safety invariant: stale-refresh re-runs the full enrichment graph,
+ * which re-persists identities via persistResultsNode. The identity *logic*
+ * (thresholds, bridge tier rules, scoring formulas) stays unchanged — only the
+ * snapshot metadata is recomputed here. This is by design.
+ */
 export async function computeSnapshotNode(
   state: EnrichmentState,
 ): Promise<PartialEnrichmentState> {
