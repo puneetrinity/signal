@@ -1,5 +1,6 @@
 import type { JobRequirements } from './jd-digest';
 import { canonicalizeSkill, getSkillSurfaceForms } from './jd-digest';
+import { isNoisyHint, PLACEHOLDER_HINTS } from './hint-sanitizer';
 import { SENIORITY_LADDER, normalizeSeniorityFromText, seniorityDistance, type SeniorityBand } from '@/lib/taxonomy/seniority';
 import { detectRoleFamilyFromTitle } from '@/lib/taxonomy/role-family';
 
@@ -46,30 +47,23 @@ const LOCATION_ALIAS_REWRITES: Array<[RegExp, string]> = [
   [/\bsf\b/gi, 'san francisco'],
 ];
 
+// Location-specific noise patterns (shared isNoisyHint already covers
+// linkedin, view…profile, URLs, www — only location-stricter checks here)
 const LOCATION_NOISE_PATTERNS: RegExp[] = [
-  /\blinkedin\b/i,
-  /\bview\b.*\bprofile\b/i,
   /\bprofessional community\b/i,
   /\beducation:/i,
   /\bexperience:/i,
-  /https?:\/\//i,
-  /\bwww\./i,
   /\.com\b/i,
   /\.org\b/i,
 ];
 
+// Shared placeholders + location-specific extras (e.g. dots, "not specified")
 const LOCATION_PLACEHOLDERS = new Set([
+  ...PLACEHOLDER_HINTS,
   '.',
   '..',
-  '...',
-  '-',
-  'na',
   'n a',
-  'n/a',
-  'unknown',
   'not specified',
-  'none',
-  'null',
 ]);
 
 const COUNTRY_TOKENS = new Set([
@@ -112,8 +106,12 @@ export function isMeaningfulLocation(text: string | null | undefined): boolean {
 export function isNoisyLocationHint(text: string): boolean {
   const raw = text.trim();
   if (!raw) return true;
+
+  // Shared base rules (placeholders, ellipsis, linkedin/profile/URL patterns)
+  if (isNoisyHint(raw)) return true;
+
+  // Location-specific stricter checks
   if (raw.length > 80) return true;
-  if (/\.{3,}|…/.test(raw)) return true;
   if (LOCATION_NOISE_PATTERNS.some((pattern) => pattern.test(raw))) return true;
 
   const alphaNum = raw.replace(/[^a-z0-9]/gi, '').length;

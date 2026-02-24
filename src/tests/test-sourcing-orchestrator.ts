@@ -5,7 +5,7 @@
  * Run with: npx tsx src/tests/test-sourcing-orchestrator.ts
  */
 
-import { rankCandidates, type CandidateForRanking } from '@/lib/sourcing/ranking';
+import { rankCandidates, isNoisyLocationHint, type CandidateForRanking, type ScoredCandidate } from '@/lib/sourcing/ranking';
 import { parseJdDigest, buildJobRequirements, type JobRequirements } from '@/lib/sourcing/jd-digest';
 import { getSourcingConfig } from '@/lib/sourcing/config';
 
@@ -642,6 +642,246 @@ console.log('\n--- bestMatchesMinFitScore Config ---');
   assert(config.bestMatchesMinFitScore === 1, 'bestMatchesMinFitScore clamped to 1');
   if (origVal !== undefined) process.env.SOURCE_BEST_MATCHES_MIN_FIT_SCORE = origVal;
   else delete process.env.SOURCE_BEST_MATCHES_MIN_FIT_SCORE;
+}
+
+// ---------------------------------------------------------------------------
+// Test: Shared noise check in location ranking
+// ---------------------------------------------------------------------------
+
+console.log('\n--- Shared Noise in Location Ranking ---');
+
+{
+  // isNoisyLocationHint catches shared-layer noise (placeholder)
+  assert(isNoisyLocationHint('n/a'), 'isNoisyLocationHint: placeholder "n/a" is noisy');
+  assert(isNoisyLocationHint('...'), 'isNoisyLocationHint: placeholder "..." is noisy');
+  assert(isNoisyLocationHint('View profile on LinkedIn'), 'isNoisyLocationHint: linkedin boilerplate is noisy');
+  assert(isNoisyLocationHint('https://linkedin.com/in/foo'), 'isNoisyLocationHint: URL is noisy');
+
+  // Location-specific stricter checks still work
+  assert(isNoisyLocationHint('something.com'), 'isNoisyLocationHint: .com domain is noisy');
+  assert(isNoisyLocationHint('Education: MIT'), 'isNoisyLocationHint: education prefix is noisy');
+
+  // Real locations pass
+  assert(!isNoisyLocationHint('San Francisco, CA'), 'isNoisyLocationHint: real city is not noisy');
+  assert(!isNoisyLocationHint('Delhi, India'), 'isNoisyLocationHint: Delhi India is not noisy');
+  assert(!isNoisyLocationHint('Greater Bangalore Area'), 'isNoisyLocationHint: Greater Area is not noisy');
+}
+
+// ---------------------------------------------------------------------------
+// Test: Strict demotion behavior (P1b assembly)
+// ---------------------------------------------------------------------------
+
+console.log('\n--- Strict Demotion Assembly ---');
+
+{
+  // Simulate: strict candidate with very low fitScore should get demoted
+  // We test via ranking + manual assembly logic (matching orchestrator behavior)
+  const reqs = makeRequirements({ location: 'Delhi, India', topSkills: ['Kubernetes', 'AWS', 'Terraform'] });
+
+  // Wrong-role candidate in Delhi (will have low fitScore due to no skill/role match)
+  const wrongRole: CandidateForRanking = {
+    id: 'sales-delhi', headlineHint: 'Sales Manager', locationHint: 'Delhi, India',
+    searchTitle: 'Sales Manager', searchSnippet: 'Managing regional sales team',
+    enrichmentStatus: 'pending', lastEnrichedAt: null,
+  };
+  // Good candidate in Delhi
+  const goodMatch: CandidateForRanking = {
+    id: 'devops-delhi', headlineHint: 'Senior DevOps Engineer', locationHint: 'Delhi, India',
+    searchTitle: 'DevOps Engineer', searchSnippet: 'Kubernetes AWS Terraform infrastructure',
+    enrichmentStatus: 'pending', lastEnrichedAt: null,
+  };
+
+  const scored = rankCandidates([wrongRole, goodMatch], reqs);
+  const salesScore = scored.find((s) => s.candidateId === 'sales-delhi')!;
+  const devopsScore = scored.find((s) => s.candidateId === 'devops-delhi')!;
+
+  assert(salesScore.matchTier === 'strict_location', 'Sales in Delhi is strict before demotion');
+  assert(devopsScore.matchTier === 'strict_location', 'DevOps in Delhi is strict');
+  assert(devopsScore.fitScore > salesScore.fitScore, 'DevOps scores higher than Sales');
+
+  // Simulate demotion: with floor at 0.45, sales candidate (likely <0.45) gets demoted
+  const config = getSourcingConfig();
+  const demoted = scored.filter((sc) => sc.matchTier === 'strict_location' && sc.fitScore < config.bestMatchesMinFitScore);
+  const qualified = scored.filter((sc) => sc.matchTier === 'strict_location' && sc.fitScore >= config.bestMatchesMinFitScore);
+  assert(demoted.some((d) => d.candidateId === 'sales-delhi'), 'Sales candidate demoted below floor');
+  assert(qualified.some((q) => q.candidateId === 'devops-delhi'), 'DevOps candidate above floor');
+}
+
+{
+  // Full demotion: all strict candidates below floor → bestMatches = 0
+  const reqs = makeRequirements({ location: 'Delhi, India', topSkills: ['QuantumComputing', 'FusionReactors'] });
+  const candidates: CandidateForRanking[] = [
+    {
+      id: 'low1', headlineHint: 'Accountant', locationHint: 'Delhi, India',
+      searchTitle: 'Accountant', searchSnippet: 'Finance and accounting',
+      enrichmentStatus: 'pending', lastEnrichedAt: null,
+    },
+    {
+      id: 'low2', headlineHint: 'HR Manager', locationHint: 'Delhi, India',
+      searchTitle: 'HR Manager', searchSnippet: 'Human resources management',
+      enrichmentStatus: 'pending', lastEnrichedAt: null,
+    },
+  ];
+  const scored = rankCandidates(candidates, reqs);
+  const config = getSourcingConfig();
+  const allBelowFloor = scored
+    .filter((sc) => sc.matchTier === 'strict_location')
+    .every((sc) => sc.fitScore < config.bestMatchesMinFitScore);
+  assert(allBelowFloor, 'Full demotion: all strict candidates below floor');
+}
+
+// ---------------------------------------------------------------------------
+// Test: End-to-end assembly (replicates orchestrator partition→demote→assemble)
+// ---------------------------------------------------------------------------
+
+console.log('\n--- End-to-End Assembly ---');
+
+/**
+ * Replicates the orchestrator's partition → quality-guard → assembly → reason
+ * logic exactly, operating on ranked output. No Prisma needed.
+ */
+function simulateAssembly(
+  scoredPool: ScoredCandidate[],
+  hasLocationConstraint: boolean,
+  targetCount: number,
+  bestMatchesMinFitScore: number,
+): {
+  strictMatchedCount: number;
+  expandedCount: number;
+  strictDemotedCount: number;
+  expansionReason: 'insufficient_strict_location_matches' | 'strict_low_quality' | null;
+} {
+  const strictPool = scoredPool.filter((sc) => sc.matchTier === 'strict_location');
+  const expandedPool = scoredPool.filter((sc) => sc.matchTier === 'expanded_location');
+
+  let strictDemotedCount = 0;
+  const qualifiedStrict: ScoredCandidate[] = [];
+  for (const sc of strictPool) {
+    if (sc.fitScore < bestMatchesMinFitScore) {
+      expandedPool.push(sc);
+      strictDemotedCount++;
+    } else {
+      qualifiedStrict.push(sc);
+    }
+  }
+  if (strictDemotedCount > 0) {
+    expandedPool.sort((a, b) => b.fitScore - a.fitScore);
+  }
+
+  const strictMatchedCount = Math.min(qualifiedStrict.length, targetCount);
+  const remaining = targetCount - strictMatchedCount;
+  const expandedCount = Math.min(expandedPool.length, remaining);
+
+  let expansionReason: 'insufficient_strict_location_matches' | 'strict_low_quality' | null = null;
+  if (hasLocationConstraint && strictMatchedCount < targetCount) {
+    expansionReason = strictDemotedCount > 0 ? 'strict_low_quality' : 'insufficient_strict_location_matches';
+  }
+
+  return { strictMatchedCount, expandedCount, strictDemotedCount, expansionReason };
+}
+
+{
+  // Partial demotion: some strict candidates below floor
+  const reqs = makeRequirements({ location: 'Delhi, India', topSkills: ['Kubernetes', 'AWS', 'Terraform'] });
+  const candidates: CandidateForRanking[] = [
+    // Good match in Delhi
+    {
+      id: 'devops-delhi', headlineHint: 'Senior DevOps Engineer', locationHint: 'Delhi, India',
+      searchTitle: 'DevOps Engineer', searchSnippet: 'Kubernetes AWS Terraform infrastructure',
+      enrichmentStatus: 'pending', lastEnrichedAt: null,
+    },
+    // Wrong role in Delhi (will score low)
+    {
+      id: 'sales-delhi', headlineHint: 'Sales Manager', locationHint: 'Delhi, India',
+      searchTitle: 'Sales Manager', searchSnippet: 'Regional sales and accounts',
+      enrichmentStatus: 'pending', lastEnrichedAt: null,
+    },
+    // Expanded candidate (no location)
+    {
+      id: 'devops-none', headlineHint: 'DevOps Engineer', locationHint: null,
+      searchTitle: 'DevOps Engineer', searchSnippet: 'Kubernetes AWS cloud',
+      enrichmentStatus: 'pending', lastEnrichedAt: null,
+    },
+  ];
+
+  const scored = rankCandidates(candidates, reqs);
+  const result = simulateAssembly(scored, true, 100, 0.45);
+
+  assert(result.strictDemotedCount === 1, 'E2E partial: 1 strict candidate demoted');
+  assert(result.strictMatchedCount === 1, 'E2E partial: 1 qualified strict match');
+  assert(result.expansionReason === 'strict_low_quality', 'E2E partial: expansionReason = strict_low_quality');
+}
+
+{
+  // Full demotion: all strict candidates below floor → bestMatches = 0
+  const reqs = makeRequirements({ location: 'Delhi, India', topSkills: ['QuantumComputing', 'FusionReactors'] });
+  const candidates: CandidateForRanking[] = [
+    {
+      id: 'acct-delhi', headlineHint: 'Accountant', locationHint: 'Delhi, India',
+      searchTitle: 'Accountant', searchSnippet: 'Finance and accounting',
+      enrichmentStatus: 'pending', lastEnrichedAt: null,
+    },
+    {
+      id: 'hr-delhi', headlineHint: 'HR Manager', locationHint: 'Delhi, India',
+      searchTitle: 'HR Manager', searchSnippet: 'Human resources management',
+      enrichmentStatus: 'pending', lastEnrichedAt: null,
+    },
+    {
+      id: 'sales-noida', headlineHint: 'Sales Rep', locationHint: null,
+      searchTitle: 'Sales Rep', searchSnippet: 'Sales representative',
+      enrichmentStatus: 'pending', lastEnrichedAt: null,
+    },
+  ];
+
+  const scored = rankCandidates(candidates, reqs);
+  const result = simulateAssembly(scored, true, 100, 0.45);
+
+  assert(result.strictDemotedCount === 2, 'E2E full: 2 strict candidates demoted');
+  assert(result.strictMatchedCount === 0, 'E2E full: 0 qualified strict = empty bestMatches');
+  assert(result.expansionReason === 'strict_low_quality', 'E2E full: expansionReason = strict_low_quality');
+  assert(result.expandedCount === 3, 'E2E full: all 3 candidates in expanded pool');
+}
+
+{
+  // No demotion needed: location-constrained but good strict candidates
+  const reqs = makeRequirements({ location: 'San Francisco', topSkills: ['React', 'TypeScript'] });
+  const candidates: CandidateForRanking[] = [
+    {
+      id: 'fe-sf', headlineHint: 'Senior Frontend Engineer', locationHint: 'San Francisco, CA',
+      searchTitle: 'Frontend Engineer', searchSnippet: 'React TypeScript development',
+      enrichmentStatus: 'pending', lastEnrichedAt: null,
+    },
+    {
+      id: 'fe-ny', headlineHint: 'Frontend Engineer', locationHint: 'New York, NY',
+      searchTitle: 'Frontend Engineer', searchSnippet: 'React TypeScript development',
+      enrichmentStatus: 'pending', lastEnrichedAt: null,
+    },
+  ];
+
+  const scored = rankCandidates(candidates, reqs);
+  const result = simulateAssembly(scored, true, 100, 0.45);
+
+  assert(result.strictDemotedCount === 0, 'E2E no-demote: 0 demoted');
+  assert(result.strictMatchedCount === 1, 'E2E no-demote: 1 strict match (SF)');
+  assert(result.expansionReason === 'insufficient_strict_location_matches', 'E2E no-demote: expansion due to insufficient strict, not quality');
+}
+
+{
+  // No location constraint: everything is strict, no demotion, no expansion reason
+  const reqs = makeRequirements({ location: null, topSkills: ['React'] });
+  const candidates: CandidateForRanking[] = [
+    {
+      id: 'any1', headlineHint: 'Senior Frontend Engineer', locationHint: null,
+      searchTitle: 'React Developer', searchSnippet: 'Experienced React and TypeScript developer',
+      enrichmentStatus: 'completed', lastEnrichedAt: new Date(Date.now() - 10 * 86400000),
+    },
+  ];
+
+  const scored = rankCandidates(candidates, reqs);
+  const result = simulateAssembly(scored, false, 100, 0.45);
+
+  assert(result.strictDemotedCount === 0, 'E2E no-location: 0 demoted');
+  assert(result.expansionReason === null, 'E2E no-location: no expansion reason');
 }
 
 // ---------------------------------------------------------------------------

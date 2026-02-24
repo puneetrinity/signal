@@ -9,6 +9,7 @@
  */
 
 import type { HintWithConfidence, EnrichedHints, HintSource } from './bridge-types';
+import { isNoisyHint } from '@/lib/sourcing/hint-sanitizer';
 
 /**
  * Extracted hints from LinkedIn SERP data
@@ -398,8 +399,9 @@ function isLikelyCompany(str: string): boolean {
 function isLikelyLocation(str: string): boolean {
   if (!str || str.length < 2 || str.length > 60) return false;
 
-  // Reject boilerplate/URL-ish strings before checking city/country lists
-  if (/\blinkedin\b|\bview\b.*\bprofile\b|https?:\/\/|www\./i.test(str)) return false;
+  // Shared base noise check (placeholders, linkedin/profile/URL patterns)
+  if (isNoisyHint(str)) return false;
+  // Location-specific boilerplate rejects
   if (/\bprofessional community\b|\bconnections?\b|\bfollowers?\b/i.test(str)) return false;
 
   const lower = str.toLowerCase();
