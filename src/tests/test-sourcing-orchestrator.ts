@@ -517,6 +517,134 @@ console.log('\n--- Config Safety ---');
 }
 
 // ---------------------------------------------------------------------------
+// Test: Alias-aware text fallback (P0)
+// ---------------------------------------------------------------------------
+
+console.log('\n--- Alias-Aware Text Fallback ---');
+
+{
+  // "node.js" in JD should match "nodejs" in snippet
+  const reqs = makeRequirements({ topSkills: ['node.js'] });
+  const candidate: CandidateForRanking = {
+    id: 'nodejs-alias', headlineHint: 'Backend Developer', locationHint: null,
+    searchTitle: 'NodeJS Engineer', searchSnippet: 'Experienced in nodejs and express',
+    enrichmentStatus: 'pending', lastEnrichedAt: null,
+  };
+  const scored = rankCandidates([candidate], reqs);
+  assert(scored[0].fitBreakdown.skillScore > 0, 'node.js JD matches "nodejs" in snippet via alias');
+}
+
+{
+  // "TypeScript" should match "ts" via alias (short alias in allowlist)
+  const reqs = makeRequirements({ topSkills: ['TypeScript'] });
+  const candidate: CandidateForRanking = {
+    id: 'ts-alias', headlineHint: 'Engineer', locationHint: null,
+    searchTitle: '', searchSnippet: 'Expert in React and TS development',
+    enrichmentStatus: 'pending', lastEnrichedAt: null,
+  };
+  const scored = rankCandidates([candidate], reqs);
+  assert(scored[0].fitBreakdown.skillScore > 0, 'TypeScript JD matches "ts" in snippet via alias');
+}
+
+{
+  // c++ should match via special boundary handling (non-word chars at end)
+  const reqs = makeRequirements({ topSkills: ['c++'] });
+  const candidate: CandidateForRanking = {
+    id: 'cpp-boundary', headlineHint: 'C++ Developer', locationHint: null,
+    searchTitle: '', searchSnippet: 'Proficient in c++ and embedded systems',
+    enrichmentStatus: 'pending', lastEnrichedAt: null,
+  };
+  const scored = rankCandidates([candidate], reqs);
+  assert(scored[0].fitBreakdown.skillScore > 0, 'c++ matches via buildSkillRegex special boundary');
+}
+
+{
+  // .net should match via special boundary handling (non-word chars at start)
+  const reqs = makeRequirements({ topSkills: ['.net'] });
+  const candidate: CandidateForRanking = {
+    id: 'dotnet-boundary', headlineHint: '.NET Developer', locationHint: null,
+    searchTitle: '', searchSnippet: 'Building .net microservices',
+    enrichmentStatus: 'pending', lastEnrichedAt: null,
+  };
+  const scored = rankCandidates([candidate], reqs);
+  assert(scored[0].fitBreakdown.skillScore > 0, '.net matches via buildSkillRegex special boundary');
+}
+
+{
+  // c# should match
+  const reqs = makeRequirements({ topSkills: ['c#'] });
+  const candidate: CandidateForRanking = {
+    id: 'csharp-boundary', headlineHint: 'C# Developer', locationHint: null,
+    searchTitle: '', searchSnippet: 'Working with c# and unity',
+    enrichmentStatus: 'pending', lastEnrichedAt: null,
+  };
+  const scored = rankCandidates([candidate], reqs);
+  assert(scored[0].fitBreakdown.skillScore > 0, 'c# matches via buildSkillRegex special boundary');
+}
+
+// ---------------------------------------------------------------------------
+// Test: Greater Area location normalization (P1a)
+// ---------------------------------------------------------------------------
+
+console.log('\n--- Greater Area Location Normalization ---');
+
+{
+  // "Greater Delhi Area" should be normalized and match Delhi target
+  const reqs = makeRequirements({ location: 'Delhi, India' });
+  const candidate: CandidateForRanking = {
+    id: 'greater-delhi', headlineHint: null, locationHint: 'Greater Delhi Area',
+    searchTitle: '', searchSnippet: '', enrichmentStatus: 'pending', lastEnrichedAt: null,
+  };
+  const scored = rankCandidates([candidate], reqs);
+  assert(scored[0].matchTier === 'strict_location', 'Greater Delhi Area → strict for Delhi target');
+}
+
+{
+  // "Mumbai Metropolitan Region" should normalize and match Mumbai target
+  const reqs = makeRequirements({ location: 'Mumbai, India' });
+  const candidate: CandidateForRanking = {
+    id: 'mumbai-metro', headlineHint: null, locationHint: 'Mumbai Metropolitan Region',
+    searchTitle: '', searchSnippet: '', enrichmentStatus: 'pending', lastEnrichedAt: null,
+  };
+  const scored = rankCandidates([candidate], reqs);
+  assert(scored[0].matchTier === 'strict_location', 'Mumbai Metropolitan Region → strict for Mumbai target');
+}
+
+// ---------------------------------------------------------------------------
+// Test: bestMatchesMinFitScore config (P1b)
+// ---------------------------------------------------------------------------
+
+console.log('\n--- bestMatchesMinFitScore Config ---');
+
+{
+  const origVal = process.env.SOURCE_BEST_MATCHES_MIN_FIT_SCORE;
+  process.env.SOURCE_BEST_MATCHES_MIN_FIT_SCORE = '0.50';
+  const config = getSourcingConfig();
+  assert(config.bestMatchesMinFitScore === 0.50, 'bestMatchesMinFitScore parsed from env');
+  if (origVal !== undefined) process.env.SOURCE_BEST_MATCHES_MIN_FIT_SCORE = origVal;
+  else delete process.env.SOURCE_BEST_MATCHES_MIN_FIT_SCORE;
+}
+
+{
+  // Default value when env var not set
+  const origVal = process.env.SOURCE_BEST_MATCHES_MIN_FIT_SCORE;
+  delete process.env.SOURCE_BEST_MATCHES_MIN_FIT_SCORE;
+  const config = getSourcingConfig();
+  assert(config.bestMatchesMinFitScore === 0.45, 'bestMatchesMinFitScore defaults to 0.45');
+  if (origVal !== undefined) process.env.SOURCE_BEST_MATCHES_MIN_FIT_SCORE = origVal;
+}
+
+{
+  // Clamped to [0,1]
+  const origVal = process.env.SOURCE_BEST_MATCHES_MIN_FIT_SCORE;
+  process.env.SOURCE_BEST_MATCHES_MIN_FIT_SCORE = '1.5';
+  const config = getSourcingConfig();
+  assert(config.bestMatchesMinFitScore === 1, 'bestMatchesMinFitScore clamped to 1');
+  if (origVal !== undefined) process.env.SOURCE_BEST_MATCHES_MIN_FIT_SCORE = origVal;
+  else delete process.env.SOURCE_BEST_MATCHES_MIN_FIT_SCORE;
+}
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 

@@ -123,6 +123,9 @@ async function processSourcingJob(
           expandedCount: orchestratorResult.expandedCount,
           expansionReason: orchestratorResult.expansionReason,
           requestedLocation: orchestratorResult.requestedLocation,
+          skillScoreDiagnostics: orchestratorResult.skillScoreDiagnostics,
+          locationHintCoverage: orchestratorResult.locationHintCoverage,
+          strictDemotedCount: orchestratorResult.strictDemotedCount,
         }),
       },
     });

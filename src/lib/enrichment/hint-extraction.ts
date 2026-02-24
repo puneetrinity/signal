@@ -398,6 +398,10 @@ function isLikelyCompany(str: string): boolean {
 function isLikelyLocation(str: string): boolean {
   if (!str || str.length < 2 || str.length > 60) return false;
 
+  // Reject boilerplate/URL-ish strings before checking city/country lists
+  if (/\blinkedin\b|\bview\b.*\bprofile\b|https?:\/\/|www\./i.test(str)) return false;
+  if (/\bprofessional community\b|\bconnections?\b|\bfollowers?\b/i.test(str)) return false;
+
   const lower = str.toLowerCase();
 
   // Location indicators
@@ -427,10 +431,23 @@ function isLikelyLocation(str: string): boolean {
     'boston', 'chicago', 'denver', 'atlanta', 'miami', 'portland',
     'london', 'berlin', 'paris', 'amsterdam', 'dublin', 'singapore',
     'toronto', 'vancouver', 'sydney', 'melbourne', 'bangalore', 'mumbai',
+    'delhi', 'new delhi', 'hyderabad', 'pune', 'chennai', 'kolkata',
+    'noida', 'gurgaon', 'gurugram', 'ahmedabad', 'jaipur', 'lucknow',
+    'chandigarh', 'kochi', 'indore',
   ];
 
   for (const city of cities) {
     if (lower.includes(city)) return true;
+  }
+
+  // Countries
+  const countries = [
+    'india', 'germany', 'france', 'canada', 'australia',
+    'united kingdom', 'japan', 'brazil',
+  ];
+
+  for (const country of countries) {
+    if (lower.includes(country)) return true;
   }
 
   // Pattern: "City, State/Country" (Unicode-aware)

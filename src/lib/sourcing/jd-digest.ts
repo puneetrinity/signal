@@ -33,6 +33,19 @@ export function canonicalizeSkill(skill: string): string {
   return SKILL_ALIASES[lower] ?? lower;
 }
 
+/**
+ * Returns all known surface forms (aliases + canonical) for a given skill.
+ * Used by ranking text fallback to broaden regex matching.
+ */
+export function getSkillSurfaceForms(skill: string): string[] {
+  const canonical = canonicalizeSkill(skill);
+  const forms = new Set<string>([canonical, skill.toLowerCase().trim()]);
+  for (const [alias, target] of Object.entries(SKILL_ALIASES)) {
+    if (target === canonical) forms.add(alias);
+  }
+  return [...forms];
+}
+
 export interface JdDigestParsed {
   topSkills: string[];
   seniorityLevel: string | null;

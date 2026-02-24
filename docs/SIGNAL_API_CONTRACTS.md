@@ -279,9 +279,12 @@ GET /api/v3/jobs/{externalJobId}/results?requestId=<id>
 | `groupCounts.broaderPool` | `number` | Candidates in broader-pool group |
 | `groupCounts.strictMatchedCount` | `number` | Candidates in strict_location tier |
 | `groupCounts.expandedCount` | `number` | Candidates in expanded_location tier |
-| `groupCounts.expansionReason` | `string \| null` | `"insufficient_strict_location_matches"` or null |
+| `groupCounts.expansionReason` | `string \| null` | `"insufficient_strict_location_matches"`, `"strict_low_quality"`, or null |
 | `groupCounts.requestedLocation` | `string \| null` | Original location from job context |
+| `groupCounts.strictDemotedCount` | `number` | Strict-location candidates demoted below fitScore floor (default 0) |
 | `snapshotStats` | `object` | Request-level snapshot diagnostics |
+| `diagnostics.skillScoreDiagnostics` | `object \| undefined` | `{withSnapshotSkills, usingTextFallback, avgSkillScoreBySourceType}` — skill scoring path breakdown |
+| `diagnostics.locationHintCoverage` | `number \| undefined` | Fraction of scored (non-discovered) assembled candidates with a meaningful, non-noisy location hint (0.0–1.0) |
 
 ### Professional Validation Fields
 

@@ -15,6 +15,7 @@ export interface SourcingConfig {
   minDiscoveryShareLowQuality: number;
   maxDiscoveryShare: number;
   minStrictMatchesBeforeExpand: number;
+  bestMatchesMinFitScore: number;
   // Track classifier
   trackClassifierVersion: string;
   trackLowConfThreshold: number;
@@ -62,6 +63,7 @@ export function getSourcingConfig(): SourcingConfig {
     minDiscoveryShareLowQuality: clamp(parseFloatSafe(process.env.SOURCE_MIN_DISCOVERY_SHARE_LOW_QUALITY, 0.40), 0, 1),
     maxDiscoveryShare: clamp(parseFloatSafe(process.env.SOURCE_MAX_DISCOVERY_SHARE, 0.70), 0, 1),
     minStrictMatchesBeforeExpand: parseIntSafe(process.env.SOURCE_MIN_STRICT_MATCHES_BEFORE_EXPAND, 20),
+    bestMatchesMinFitScore: clamp(parseFloatSafe(process.env.SOURCE_BEST_MATCHES_MIN_FIT_SCORE, 0.45), 0, 1),
     // Track classifier
     trackClassifierVersion: process.env.TRACK_CLASSIFIER_VERSION || 'v1',
     trackLowConfThreshold: clamp(parseFloatSafe(process.env.TRACK_LOW_CONF_THRESHOLD, 0.60), 0, 1),

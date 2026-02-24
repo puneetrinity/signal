@@ -1,5 +1,5 @@
 import type { JobRequirements } from './jd-digest';
-import { canonicalizeSkill } from './jd-digest';
+import { canonicalizeSkill, getSkillSurfaceForms } from './jd-digest';
 import { SENIORITY_LADDER, normalizeSeniorityFromText, seniorityDistance, type SeniorityBand } from '@/lib/taxonomy/seniority';
 import { detectRoleFamilyFromTitle } from '@/lib/taxonomy/role-family';
 
@@ -104,12 +104,12 @@ function isMeaningfulNormalizedLocation(normalized: string): boolean {
   return true;
 }
 
-function isMeaningfulLocation(text: string | null | undefined): boolean {
+export function isMeaningfulLocation(text: string | null | undefined): boolean {
   if (!text) return false;
   return isMeaningfulNormalizedLocation(canonicalizeLocation(text));
 }
 
-function isNoisyLocationHint(text: string): boolean {
+export function isNoisyLocationHint(text: string): boolean {
   const raw = text.trim();
   if (!raw) return true;
   if (raw.length > 80) return true;
@@ -130,7 +130,13 @@ function locationTokens(text: string): string[] {
 
 function extractPrimaryCity(normalizedLocation: string): string | null {
   const [firstSegmentRaw] = normalizedLocation.split(',');
-  const firstSegment = firstSegmentRaw?.trim() ?? '';
+  let firstSegment = firstSegmentRaw?.trim() ?? '';
+  if (!firstSegment) return null;
+  // Normalize "Greater X Area" / "X Metropolitan Region" patterns
+  firstSegment = firstSegment
+    .replace(/^greater\s+/i, '')
+    .replace(/\s+(area|metropolitan\s+region|region)$/i, '')
+    .trim();
   if (!firstSegment) return null;
   const firstSegmentTokens = firstSegment.split(/\s+/).filter(Boolean);
   if (firstSegmentTokens.length === 0) return null;
@@ -143,6 +149,17 @@ function hasCountryTokenOverlap(targetLocation: string, candidateLocation: strin
   if (targetTokens.length === 0) return false;
   const candidateTokens = new Set(locationTokens(candidateLocation));
   return targetTokens.some((token) => candidateTokens.has(token));
+}
+
+const SHORT_ALIAS_ALLOWLIST = new Set(['ts', 'js', 'go', 'pg', 'k8s']);
+
+function buildSkillRegex(form: string): RegExp {
+  const escaped = form.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const needsLeadingBoundary = /^\w/.test(form);
+  const needsTrailingBoundary = /\w$/.test(form);
+  const prefix = needsLeadingBoundary ? '\\b' : '(?:^|[^a-z0-9])';
+  const suffix = needsTrailingBoundary ? '\\b' : '(?=$|[^a-z0-9])';
+  return new RegExp(`${prefix}${escaped}${suffix}`, 'i');
 }
 
 function computeSkillScore(
@@ -167,24 +184,31 @@ function computeSkillScore(
     return 0.8 * overlapRatio + 0.2 * domainMatch;
   }
 
-  // Fallback: textBag regex
+  // Fallback: textBag regex with alias-aware matching
   const textBag = [candidate.headlineHint, candidate.searchTitle, candidate.searchSnippet]
     .filter(Boolean)
     .join(' ');
   const lowerBag = textBag.toLowerCase();
   let matchCount = 0;
   for (const skill of topSkills) {
-    const escaped = skill.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const re = new RegExp(`\\b${escaped}\\b`, 'i');
-    if (re.test(lowerBag)) matchCount++;
+    const forms = getSkillSurfaceForms(skill);
+    let matched = false;
+    for (const form of forms) {
+      // Skip short purely-alpha forms not in allowlist to avoid false positives
+      if (form.length <= 2 && /^[a-z]+$/.test(form) && !SHORT_ALIAS_ALLOWLIST.has(form)) continue;
+      if (buildSkillRegex(form).test(lowerBag)) { matched = true; break; }
+    }
+    if (matched) matchCount++;
   }
   const overlapRatio = matchCount / topSkills.length;
 
   let domainMatch = 0;
   if (domain) {
-    const escapedDomain = domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const domainRe = new RegExp(`\\b${escapedDomain}\\b`, 'i');
-    if (domainRe.test(lowerBag)) domainMatch = 1;
+    const domainForms = getSkillSurfaceForms(domain);
+    for (const form of domainForms) {
+      if (form.length <= 2 && /^[a-z]+$/.test(form) && !SHORT_ALIAS_ALLOWLIST.has(form)) continue;
+      if (buildSkillRegex(form).test(lowerBag)) { domainMatch = 1; break; }
+    }
   }
 
   return 0.8 * overlapRatio + 0.2 * domainMatch;

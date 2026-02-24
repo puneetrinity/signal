@@ -10,6 +10,7 @@
 import type { ProfileSummary } from '@/types/linkedin';
 import type { RawSearchResult, SearchProvider, SearchProviderType } from './types';
 import { getProviderLimiter } from './limit';
+import { extractLocationFromSnippet } from '@/lib/enrichment/hint-extraction';
 
 interface SerperOrganicResult {
   title?: string;
@@ -165,19 +166,6 @@ function normalizeLinkedInUrl(url: string): string {
   return id ? `https://www.linkedin.com/in/${id}` : url;
 }
 
-function extractLocationFromSnippet(snippet: string): string | undefined {
-  const locationMatch = snippet.match(/Location:\s*([^·]+)/i);
-  if (locationMatch?.[1]) return locationMatch[1].trim();
-
-  const parts = snippet.split(' · ');
-  if (parts.length > 1) {
-    const candidate = parts[parts.length - 1].trim();
-    if (candidate && candidate.length <= 80) return candidate;
-  }
-
-  return undefined;
-}
-
 function buildProviderMeta(response: SerperResponse): Record<string, unknown> | undefined {
   const meta: Record<string, unknown> = {};
   if (response.knowledgeGraph) meta.knowledgeGraph = response.knowledgeGraph;
@@ -202,7 +190,7 @@ function extractProfileSummary(result: SerperOrganicResult, providerMeta?: Recor
     .replace(' | LinkedIn', '')
     .trim();
   const headline = headlineCandidate || undefined;
-  const location = extractLocationFromSnippet(snippet);
+  const location = extractLocationFromSnippet(snippet) ?? undefined;
 
   return {
     linkedinUrl: url,

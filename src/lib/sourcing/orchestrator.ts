@@ -8,6 +8,7 @@ import { rankCandidates } from './ranking';
 import { discoverCandidates } from './discovery';
 import { getSourcingConfig } from './config';
 import { createEnrichmentSession } from '@/lib/enrichment/queue';
+import { isMeaningfulLocation, isNoisyLocationHint } from './ranking';
 import type { CandidateForRanking, FitBreakdown, MatchTier, LocationMatchType } from './ranking';
 import type { TrackDecision } from './types';
 
@@ -34,8 +35,15 @@ export interface OrchestratorResult {
   snapshotRefreshQueuedCount: number;
   strictMatchedCount: number;
   expandedCount: number;
-  expansionReason: 'insufficient_strict_location_matches' | null;
+  expansionReason: 'insufficient_strict_location_matches' | 'strict_low_quality' | null;
   requestedLocation: string | null;
+  skillScoreDiagnostics: {
+    withSnapshotSkills: number;
+    usingTextFallback: number;
+    avgSkillScoreBySourceType: Record<string, number>;
+  };
+  locationHintCoverage: number;
+  strictDemotedCount: number;
 }
 
 interface AssembledCandidate {
@@ -324,6 +332,21 @@ export async function runSourcingOrchestrator(
   const strictPool = scoredPool.filter((sc) => sc.matchTier === 'strict_location');
   const expandedPool = scoredPool.filter((sc) => sc.matchTier === 'expanded_location');
 
+  // Quality guard: demote strict candidates below fitScore floor to expanded pool
+  let strictDemotedCount = 0;
+  const qualifiedStrict: typeof strictPool = [];
+  for (const sc of strictPool) {
+    if (sc.fitScore < config.bestMatchesMinFitScore) {
+      expandedPool.push(sc);
+      strictDemotedCount++;
+    } else {
+      qualifiedStrict.push(sc);
+    }
+  }
+  if (strictDemotedCount > 0) {
+    expandedPool.sort((a, b) => b.fitScore - a.fitScore);
+  }
+
   // Helper: push pool candidates (enriched first, then non-enriched, by fitScore)
   const pushPoolTier = (tier: typeof scoredPool, limit: number): void => {
     const enriched = tier.filter((sc) => enrichedIds.has(sc.candidateId));
@@ -354,8 +377,8 @@ export async function runSourcingOrchestrator(
     }
   };
 
-  // Pass 1: Fill from strict pool
-  pushPoolTier(strictPool, config.targetCount);
+  // Pass 1: Fill from qualified strict pool (above fitScore floor)
+  pushPoolTier(qualifiedStrict, config.targetCount);
   const strictMatchedCount = assembled.length;
 
   // Pass 2: Expand as needed to reach targetCount; annotate reason when strict
@@ -363,7 +386,7 @@ export async function runSourcingOrchestrator(
   const needsExpansion = assembled.length < config.targetCount;
   let expansionReason: OrchestratorResult['expansionReason'] = null;
   if (hasLocationConstraint && strictMatchedCount < config.targetCount) {
-    expansionReason = 'insufficient_strict_location_matches';
+    expansionReason = strictDemotedCount > 0 ? 'strict_low_quality' : 'insufficient_strict_location_matches';
   }
 
   if (needsExpansion) {
@@ -482,6 +505,55 @@ export async function runSourcingOrchestrator(
     return snap?.staleAfter && snap.staleAfter < now;
   }).length;
 
+  // Skill score diagnostics: snapshot vs text fallback breakdown
+  // Only count scored candidates (exclude discovered — they have no fitScore/skillScore)
+  const poolForRankingById = new Map(poolForRanking.map((r) => [r.id, r]));
+  let withSnapshotSkills = 0;
+  let usingTextFallback = 0;
+  const skillScoreSumBySource: Record<string, { sum: number; count: number }> = {};
+  for (const a of assembled) {
+    if (a.fitScore === null) continue; // discovered candidates — not scored
+    const poolCandidate = poolForRankingById.get(a.candidateId);
+    const hasSnapshot = Boolean(poolCandidate?.snapshot?.skillsNormalized?.length);
+    if (hasSnapshot) withSnapshotSkills++;
+    else usingTextFallback++;
+
+    const scoredEntry = scoredPool.find((sc) => sc.candidateId === a.candidateId);
+    if (scoredEntry) {
+      const bucket = skillScoreSumBySource[a.sourceType] ?? { sum: 0, count: 0 };
+      bucket.sum += scoredEntry.fitBreakdown.skillScore;
+      bucket.count++;
+      skillScoreSumBySource[a.sourceType] = bucket;
+    }
+  }
+  const avgSkillScoreBySourceType: Record<string, number> = {};
+  for (const [sourceType, { sum, count }] of Object.entries(skillScoreSumBySource)) {
+    avgSkillScoreBySourceType[sourceType] = count > 0 ? Number((sum / count).toFixed(4)) : 0;
+  }
+  const total = withSnapshotSkills + usingTextFallback;
+  const skillScoreDiagnostics = {
+    withSnapshotSkills: total > 0 ? Number((withSnapshotSkills / total).toFixed(4)) : 0,
+    usingTextFallback: total > 0 ? Number((usingTextFallback / total).toFixed(4)) : 0,
+    avgSkillScoreBySourceType,
+  };
+
+  // Location hint coverage: fraction of scored candidates with a meaningful, non-noisy location
+  // Excludes discovered candidates (not in pool, no location data yet)
+  function hasMeaningfulLocation(loc: string | null | undefined): boolean {
+    if (!isMeaningfulLocation(loc)) return false;
+    if (isNoisyLocationHint(loc!)) return false;
+    return true;
+  }
+  const scoredAssembled = assembled.filter((a) => a.fitScore !== null);
+  const candidatesWithLocation = scoredAssembled.filter((a) => {
+    const poolCandidate = poolForRankingById.get(a.candidateId);
+    return hasMeaningfulLocation(poolCandidate?.snapshot?.location) ||
+           hasMeaningfulLocation(poolCandidate?.locationHint);
+  }).length;
+  const locationHintCoverage = scoredAssembled.length > 0
+    ? Number((candidatesWithLocation / scoredAssembled.length).toFixed(4))
+    : 0;
+
   const result: OrchestratorResult = {
     candidateCount: assembled.length,
     enrichedCount: assembled.filter((a) => a.sourceType === 'pool_enriched').length,
@@ -505,6 +577,9 @@ export async function runSourcingOrchestrator(
     expandedCount,
     expansionReason,
     requestedLocation: requirements.location,
+    skillScoreDiagnostics,
+    locationHintCoverage,
+    strictDemotedCount,
   };
 
   log.info({ requestId, resolvedTrack: trackDecision?.track ?? null, ...result }, 'Orchestrator complete');

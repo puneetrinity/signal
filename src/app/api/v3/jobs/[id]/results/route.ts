@@ -277,6 +277,7 @@ export async function GET(
     expandedCount,
     expansionReason: (diag.expansionReason as string) ?? null,
     requestedLocation: (diag.requestedLocation as string) ?? null,
+    strictDemotedCount: (diag.strictDemotedCount as number) ?? 0,
   };
 
   return NextResponse.json({
