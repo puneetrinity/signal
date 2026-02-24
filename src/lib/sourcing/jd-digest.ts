@@ -1,6 +1,38 @@
 import { normalizeSeniorityFromText } from '@/lib/taxonomy/seniority';
 import { detectRoleFamilyFromTitle } from '@/lib/taxonomy/role-family';
 
+/**
+ * Canonical skill aliases — maps common abbreviations/variants to a single
+ * canonical form so both JD skills and snapshot skills compare consistently.
+ */
+const SKILL_ALIASES: Record<string, string> = {
+  'nodejs': 'node.js',
+  'node': 'node.js',
+  'reactjs': 'react',
+  'react.js': 'react',
+  'vuejs': 'vue',
+  'vue.js': 'vue',
+  'angularjs': 'angular',
+  'angular.js': 'angular',
+  'golang': 'go',
+  'postgres': 'postgresql',
+  'pg': 'postgresql',
+  'mongo': 'mongodb',
+  'k8s': 'kubernetes',
+  'ts': 'typescript',
+  'js': 'javascript',
+  'cpp': 'c++',
+  'dotnet': '.net',
+  'dot net': '.net',
+  'csharp': 'c#',
+  'c sharp': 'c#',
+};
+
+export function canonicalizeSkill(skill: string): string {
+  const lower = skill.toLowerCase().trim();
+  return SKILL_ALIASES[lower] ?? lower;
+}
+
 export interface JdDigestParsed {
   topSkills: string[];
   seniorityLevel: string | null;
@@ -9,6 +41,7 @@ export interface JdDigestParsed {
 }
 
 export interface JobRequirements {
+  title?: string | null;
   topSkills: string[];
   seniorityLevel: string | null;
   domain: string | null;
@@ -33,8 +66,8 @@ function normalizeSkills(skills: string[]): string[] {
   for (const raw of skills) {
     const cleaned = raw.trim();
     if (!cleaned) continue;
-    const key = cleaned.toLowerCase();
-    if (!deduped.has(key)) deduped.set(key, cleaned);
+    const key = canonicalizeSkill(cleaned);
+    if (!deduped.has(key)) deduped.set(key, key);
   }
   return [...deduped.values()];
 }
@@ -77,7 +110,10 @@ export function parseJdDigest(jdDigest: string): JdDigestParsed {
 
 export function buildJobRequirements(jobContext: SourcingJobContextInput): JobRequirements {
   const parsed = parseJdDigest(jobContext.jdDigest);
-  const fallbackSkills = normalizeSkills([
+  // Merge all skill sources: parsed JD first (highest signal), then structured
+  // skills, then good-to-have. Canonicalization dedupes aliases (e.g. node/nodejs).
+  const mergedSkills = normalizeSkills([
+    ...parsed.topSkills,
     ...(jobContext.skills ?? []),
     ...(jobContext.goodToHaveSkills ?? []),
   ]);
@@ -86,7 +122,8 @@ export function buildJobRequirements(jobContext: SourcingJobContextInput): JobRe
   const parsedTitleRoleFamily = title ? detectRoleFamilyFromTitle(title) : null;
 
   return {
-    topSkills: parsed.topSkills.length > 0 ? parsed.topSkills : fallbackSkills,
+    title,
+    topSkills: mergedSkills.slice(0, 12),
     seniorityLevel: parsed.seniorityLevel ?? parsedTitleSeniority,
     domain: parsed.domain,
     roleFamily: parsed.roleFamily ?? parsedTitleRoleFamily,

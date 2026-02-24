@@ -1,5 +1,7 @@
 import type { JobRequirements } from './jd-digest';
+import { canonicalizeSkill } from './jd-digest';
 import { SENIORITY_LADDER, normalizeSeniorityFromText, seniorityDistance, type SeniorityBand } from '@/lib/taxonomy/seniority';
+import { detectRoleFamilyFromTitle } from '@/lib/taxonomy/role-family';
 
 export interface CandidateForRanking {
   id: string;
@@ -19,10 +21,13 @@ export interface CandidateForRanking {
   } | null;
 }
 
+export type LocationMatchType = 'city_exact' | 'city_alias' | 'country_only' | 'none';
+export type MatchTier = 'strict_location' | 'expanded_location';
+
 export interface FitBreakdown {
   skillScore: number;
+  roleScore: number;
   seniorityScore: number;
-  locationScore: number;
   activityFreshnessScore: number;
 }
 
@@ -30,6 +35,8 @@ export interface ScoredCandidate {
   candidateId: string;
   fitScore: number;
   fitBreakdown: FitBreakdown;
+  matchTier: MatchTier;
+  locationMatchType: LocationMatchType;
 }
 
 const LOCATION_ALIAS_REWRITES: Array<[RegExp, string]> = [
@@ -147,10 +154,10 @@ function computeSkillScore(
 
   // Prefer snapshot skills (set intersection, no regex needed)
   if (candidate.snapshot?.skillsNormalized?.length) {
-    const snapshotSet = new Set(candidate.snapshot.skillsNormalized.map((s) => s.toLowerCase()));
+    const snapshotSet = new Set(candidate.snapshot.skillsNormalized.map((s) => canonicalizeSkill(s)));
     let matchCount = 0;
     for (const skill of topSkills) {
-      if (snapshotSet.has(skill.toLowerCase())) matchCount++;
+      if (snapshotSet.has(canonicalizeSkill(skill))) matchCount++;
     }
     const overlapRatio = matchCount / topSkills.length;
 
@@ -204,29 +211,75 @@ function computeSeniorityScore(candidate: CandidateForRanking, targetLevel: stri
   return 0;
 }
 
-function computeLocationScore(candidate: CandidateForRanking, targetLocation: string | null): number {
-  if (!isMeaningfulLocation(targetLocation)) return 0.5; // neutral
-  const target = targetLocation ?? '';
-  // Prefer snapshot location
-  const loc = candidate.snapshot?.location ?? candidate.locationHint;
-  if (isMeaningfulLocation(loc) && !isNoisyLocationHint(loc ?? '')) {
-    const candidateLocation = loc ?? '';
-    const targetNorm = canonicalizeLocation(target);
-    const candidateNorm = canonicalizeLocation(candidateLocation);
-    const targetCity = extractPrimaryCity(targetNorm);
+interface LocationClassification {
+  matchTier: MatchTier;
+  locationMatchType: LocationMatchType;
+}
 
-    if (
-      targetCity &&
-      candidateNorm &&
-      candidateNorm.includes(targetCity)
-    ) {
-      return 1;
-    }
-
-    // If target is country-only (no city constraint), allow country token overlap.
-    if (!targetCity && hasCountryTokenOverlap(target, candidateLocation)) return 1;
+function classifyLocationMatch(
+  candidate: CandidateForRanking,
+  targetLocation: string | null,
+): LocationClassification {
+  if (!isMeaningfulLocation(targetLocation)) {
+    // No location constraint → everyone is strict (location irrelevant)
+    return { matchTier: 'strict_location', locationMatchType: 'none' };
   }
-  return 0;
+
+  const target = targetLocation!;
+  const loc = candidate.snapshot?.location ?? candidate.locationHint;
+
+  if (!isMeaningfulLocation(loc) || isNoisyLocationHint(loc ?? '')) {
+    return { matchTier: 'expanded_location', locationMatchType: 'none' };
+  }
+
+  const candidateLocation = loc!;
+  const targetNorm = canonicalizeLocation(target);
+  const candidateNorm = canonicalizeLocation(candidateLocation);
+  const targetCity = extractPrimaryCity(targetNorm);
+
+  if (targetCity && candidateNorm && candidateNorm.includes(targetCity)) {
+    // City match after alias normalization. Check if it matched pre-alias.
+    const rawTarget = target.toLowerCase().replace(/[^a-z0-9\s,]/g, ' ').replace(/\s+/g, ' ').trim();
+    const rawCandidate = candidateLocation.toLowerCase().replace(/[^a-z0-9\s,]/g, ' ').replace(/\s+/g, ' ').trim();
+    const rawTargetCity = extractPrimaryCity(rawTarget);
+    const isExact = Boolean(rawTargetCity && rawCandidate.includes(rawTargetCity));
+
+    return {
+      matchTier: 'strict_location',
+      locationMatchType: isExact ? 'city_exact' : 'city_alias',
+    };
+  }
+
+  if (hasCountryTokenOverlap(target, candidateLocation)) {
+    if (!targetCity) {
+      // Target is country-only → country match is strict
+      return { matchTier: 'strict_location', locationMatchType: 'country_only' };
+    }
+    // Target has a city but candidate is same country, different city → expanded
+    return { matchTier: 'expanded_location', locationMatchType: 'country_only' };
+  }
+
+  return { matchTier: 'expanded_location', locationMatchType: 'none' };
+}
+
+function computeRoleScore(candidate: CandidateForRanking, targetRoleFamily: string | null): number {
+  if (!targetRoleFamily) return 0.5; // neutral when job has no role family
+
+  const headline = candidate.headlineHint ?? candidate.searchTitle ?? '';
+  const candidateFamily = detectRoleFamilyFromTitle(headline);
+
+  if (!candidateFamily) return 0.3; // unknown — slight penalty
+  if (candidateFamily === targetRoleFamily) return 1.0;
+
+  // Fullstack is adjacent to both frontend and backend
+  if (
+    (candidateFamily === 'fullstack' && (targetRoleFamily === 'frontend' || targetRoleFamily === 'backend')) ||
+    ((candidateFamily === 'frontend' || candidateFamily === 'backend') && targetRoleFamily === 'fullstack')
+  ) {
+    return 0.7;
+  }
+
+  return 0.1; // mismatch
 }
 
 function computeFreshnessScore(candidate: CandidateForRanking): number {
@@ -244,28 +297,30 @@ export function rankCandidates(
   candidates: CandidateForRanking[],
   requirements: JobRequirements,
 ): ScoredCandidate[] {
-  const hasLocationConstraint = Boolean(requirements.location?.trim());
-  const weights = hasLocationConstraint
-    ? { skill: 0.45, seniority: 0.25, location: 0.20, freshness: 0.10 }
-    : { skill: 0.50, seniority: 0.30, location: 0.00, freshness: 0.20 };
+  // Location is a tier gate, not a score component.
+  // Weights sum to 1.0 regardless of location constraint.
+  const weights = { skill: 0.45, role: 0.15, seniority: 0.25, freshness: 0.15 };
 
   return candidates
     .map((c) => {
       const skillScore = computeSkillScore(c, requirements.topSkills, requirements.domain);
+      const roleScore = computeRoleScore(c, requirements.roleFamily);
       const seniorityScore = computeSeniorityScore(c, requirements.seniorityLevel);
-      const locationScore = computeLocationScore(c, requirements.location);
       const activityFreshnessScore = computeFreshnessScore(c);
+      const { matchTier, locationMatchType } = classifyLocationMatch(c, requirements.location);
 
       const fitScore =
         weights.skill * skillScore +
+        weights.role * roleScore +
         weights.seniority * seniorityScore +
-        weights.location * locationScore +
         weights.freshness * activityFreshnessScore;
 
       return {
         candidateId: c.id,
         fitScore,
-        fitBreakdown: { skillScore, seniorityScore, locationScore, activityFreshnessScore },
+        fitBreakdown: { skillScore, roleScore, seniorityScore, activityFreshnessScore },
+        matchTier,
+        locationMatchType,
       };
     })
     .sort((a, b) => b.fitScore - a.fitScore);

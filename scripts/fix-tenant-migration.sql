@@ -53,3 +53,43 @@ CREATE INDEX IF NOT EXISTS "search_cache_v2_tenantId_queryHash_idx" ON "search_c
 ALTER TABLE "job_sourcing_requests" ADD COLUMN IF NOT EXISTS "quality_gate_triggered" BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE "job_sourcing_requests" ADD COLUMN IF NOT EXISTS "queries_executed" INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE "job_sourcing_requests" ADD COLUMN IF NOT EXISTS "diagnostics" JSONB;
+
+-- Step 8: Cleanup duplicate camelCase columns if present
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'job_sourcing_requests'
+      AND column_name = 'qualityGateTriggered'
+  ) THEN
+    EXECUTE '
+      UPDATE "job_sourcing_requests"
+      SET "quality_gate_triggered" = COALESCE("quality_gate_triggered", false)
+        OR COALESCE("qualityGateTriggered", false)
+    ';
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'job_sourcing_requests'
+      AND column_name = 'queriesExecuted'
+  ) THEN
+    EXECUTE '
+      UPDATE "job_sourcing_requests"
+      SET "queries_executed" = GREATEST(
+        COALESCE("queries_executed", 0),
+        COALESCE("queriesExecuted", 0)
+      )
+    ';
+  END IF;
+END $$;
+
+ALTER TABLE "job_sourcing_requests" DROP COLUMN IF EXISTS "qualityGateTriggered";
+ALTER TABLE "job_sourcing_requests" DROP COLUMN IF EXISTS "queriesExecuted";

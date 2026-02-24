@@ -8,7 +8,7 @@ import { rankCandidates } from './ranking';
 import { discoverCandidates } from './discovery';
 import { getSourcingConfig } from './config';
 import { createEnrichmentSession } from '@/lib/enrichment/queue';
-import type { CandidateForRanking, FitBreakdown } from './ranking';
+import type { CandidateForRanking, FitBreakdown, MatchTier, LocationMatchType } from './ranking';
 import type { TrackDecision } from './types';
 
 const log = createLogger('SourcingOrchestrator');
@@ -25,17 +25,25 @@ export interface OrchestratorResult {
   qualityGateTriggered: boolean;
   avgFitTopK: number;
   countAboveThreshold: number;
+  strictTopKCount: number;
+  strictCoverageRate: number;
   discoveryReason: 'pool_deficit' | 'low_quality_pool' | 'deficit_and_low_quality' | null;
   discoverySkippedReason: 'daily_serp_cap_reached' | 'cap_guard_unavailable' | null;
   snapshotReuseCount: number;
   snapshotStaleServedCount: number;
   snapshotRefreshQueuedCount: number;
+  strictMatchedCount: number;
+  expandedCount: number;
+  expansionReason: 'insufficient_strict_location_matches' | null;
+  requestedLocation: string | null;
 }
 
 interface AssembledCandidate {
   candidateId: string;
   fitScore: number | null;
   fitBreakdown: FitBreakdown | null;
+  matchTier: MatchTier | null;
+  locationMatchType: LocationMatchType | null;
   sourceType: string;
   enrichmentStatus: string;
   rank: number;
@@ -177,17 +185,25 @@ export async function runSourcingOrchestrator(
     };
   });
   const scoredPool = rankCandidates(poolForRanking, requirements);
+  const hasLocationConstraint = Boolean(requirements.location?.trim());
 
   const topK = scoredPool.slice(0, Math.min(scoredPool.length, config.qualityTopK));
   const avgFitTopK = topK.length > 0
     ? topK.reduce((sum, row) => sum + row.fitScore, 0) / topK.length
     : 0;
   const countAboveThreshold = topK.filter((row) => row.fitScore >= config.qualityThreshold).length;
+  const strictTopKCount = topK.filter((row) => row.matchTier === 'strict_location').length;
+  const strictCoverageRate = topK.length > 0 ? strictTopKCount / topK.length : 0;
+  const strictCoverageFloor = hasLocationConstraint
+    ? Math.ceil(config.qualityTopK * (config.minStrictMatchesBeforeExpand / Math.max(1, config.targetCount)))
+    : 0;
+  const strictCoverageTriggered = hasLocationConstraint && topK.length > 0 && strictTopKCount < Math.min(topK.length, strictCoverageFloor);
   const minCountAboveRequired = Math.min(config.qualityMinCountAbove, topK.length);
   const qualityGateTriggered =
     topK.length === 0 ||
     avgFitTopK < config.qualityMinAvgFit ||
-    countAboveThreshold < minCountAboveRequired;
+    countAboveThreshold < minCountAboveRequired ||
+    strictCoverageTriggered;
 
   // 3. Discovery decision (deficit and/or low quality)
   const enrichedCandidates = scoredPool.filter((sc) => poolById.get(sc.candidateId)?.enrichmentStatus === 'completed');
@@ -202,8 +218,16 @@ export async function runSourcingOrchestrator(
 
   const poolSize = scoredPool.length;
   const poolDeficit = Math.max(0, config.targetCount - poolSize);
-  const qualityDrivenTarget = qualityGateTriggered ? Math.ceil(config.targetCount * 0.2) : 0;
-  const desiredDiscoveryTarget = Math.max(poolDeficit, qualityDrivenTarget);
+  const strictPoolCount = scoredPool.filter((sc) => sc.matchTier === 'strict_location').length;
+  const strictCoverageDeficit = hasLocationConstraint
+    ? Math.max(0, config.minStrictMatchesBeforeExpand - strictPoolCount)
+    : 0;
+  // Elevated discovery share when quality gate triggers (configurable, default 40%)
+  const qualityDrivenTarget = qualityGateTriggered
+    ? Math.ceil(config.targetCount * config.minDiscoveryShareLowQuality)
+    : 0;
+  const maxDiscoveryTarget = Math.ceil(config.targetCount * config.maxDiscoveryShare);
+  const desiredDiscoveryTarget = Math.min(Math.max(poolDeficit, qualityDrivenTarget, strictCoverageDeficit), maxDiscoveryTarget);
 
   if (poolDeficit > 0 && qualityGateTriggered) discoveryReason = 'deficit_and_low_quality';
   else if (poolDeficit > 0) discoveryReason = 'pool_deficit';
@@ -282,69 +306,87 @@ export async function runSourcingOrchestrator(
     }
   }
 
-  // 4. Assemble final list with controlled mix in low-quality scenarios
+  // 4. Two-tier assembly: strict location first, expanded second (never interleaved)
   const assembled: AssembledCandidate[] = [];
   const assembledIds = new Set<string>();
   const enrichedIds = new Set(enrichedCandidates.map((row) => row.candidateId));
-  const nonEnrichedPool = scoredPool.filter((sc) => !enrichedIds.has(sc.candidateId));
   let rank = 1;
 
-  const pushCandidate = (candidate: Omit<AssembledCandidate, 'rank'>): void => {
-    if (assembled.length >= config.targetCount) return;
-    if (assembledIds.has(candidate.candidateId)) return;
+  const pushCandidate = (candidate: Omit<AssembledCandidate, 'rank'>): boolean => {
+    if (assembled.length >= config.targetCount) return false;
+    if (assembledIds.has(candidate.candidateId)) return false;
     assembled.push({ ...candidate, rank: rank++ });
     assembledIds.add(candidate.candidateId);
+    return true;
   };
 
-  const discoveredSlotTarget = qualityGateTriggered
-    ? Math.min(discoveredCandidateIds.length, Math.ceil(config.targetCount * 0.2))
-    : 0;
-  const poolSlotTarget = config.targetCount - discoveredSlotTarget;
-  const enrichedCap = qualityGateTriggered ? Math.min(50, poolSlotTarget) : poolSlotTarget;
+  // Partition pool into strict vs expanded tiers (sorted by fitScore within each)
+  const strictPool = scoredPool.filter((sc) => sc.matchTier === 'strict_location');
+  const expandedPool = scoredPool.filter((sc) => sc.matchTier === 'expanded_location');
 
-  for (const sc of enrichedCandidates) {
-    if (assembled.length >= enrichedCap) break;
-    pushCandidate({
-      candidateId: sc.candidateId,
-      fitScore: sc.fitScore,
-      fitBreakdown: sc.fitBreakdown,
-      sourceType: 'pool_enriched',
-      enrichmentStatus: 'completed',
-    });
+  // Helper: push pool candidates (enriched first, then non-enriched, by fitScore)
+  const pushPoolTier = (tier: typeof scoredPool, limit: number): void => {
+    const enriched = tier.filter((sc) => enrichedIds.has(sc.candidateId));
+    const nonEnriched = tier.filter((sc) => !enrichedIds.has(sc.candidateId));
+    for (const sc of enriched) {
+      if (assembled.length >= limit) return;
+      pushCandidate({
+        candidateId: sc.candidateId,
+        fitScore: sc.fitScore,
+        fitBreakdown: sc.fitBreakdown,
+        matchTier: sc.matchTier,
+        locationMatchType: sc.locationMatchType,
+        sourceType: 'pool_enriched',
+        enrichmentStatus: 'completed',
+      });
+    }
+    for (const sc of nonEnriched) {
+      if (assembled.length >= limit) return;
+      pushCandidate({
+        candidateId: sc.candidateId,
+        fitScore: sc.fitScore,
+        fitBreakdown: sc.fitBreakdown,
+        matchTier: sc.matchTier,
+        locationMatchType: sc.locationMatchType,
+        sourceType: 'pool',
+        enrichmentStatus: poolById.get(sc.candidateId)?.enrichmentStatus ?? 'pending',
+      });
+    }
+  };
+
+  // Pass 1: Fill from strict pool
+  pushPoolTier(strictPool, config.targetCount);
+  const strictMatchedCount = assembled.length;
+
+  // Pass 2: Expand as needed to reach targetCount; annotate reason when strict
+  // location matches are insufficient for a location-constrained job.
+  const needsExpansion = assembled.length < config.targetCount;
+  let expansionReason: OrchestratorResult['expansionReason'] = null;
+  if (hasLocationConstraint && strictMatchedCount < config.targetCount) {
+    expansionReason = 'insufficient_strict_location_matches';
   }
 
-  for (const sc of nonEnrichedPool) {
-    if (assembled.length >= poolSlotTarget) break;
-    pushCandidate({
-      candidateId: sc.candidateId,
-      fitScore: sc.fitScore,
-      fitBreakdown: sc.fitBreakdown,
-      sourceType: 'pool',
-      enrichmentStatus: poolById.get(sc.candidateId)?.enrichmentStatus ?? 'pending',
-    });
+  if (needsExpansion) {
+    // Add expanded pool
+    pushPoolTier(expandedPool, config.targetCount);
+
+    // Add discovered candidates (no score yet → expanded tier) as final backfill.
+    // Keep scored expanded-pool candidates ahead of unranked discoveries.
+    for (const candidateId of discoveredCandidateIds) {
+      if (assembled.length >= config.targetCount) break;
+      pushCandidate({
+        candidateId,
+        fitScore: null,
+        fitBreakdown: null,
+        matchTier: 'expanded_location',
+        locationMatchType: 'none',
+        sourceType: 'discovered',
+        enrichmentStatus: 'pending',
+      });
+    }
   }
 
-  for (const candidateId of discoveredCandidateIds) {
-    pushCandidate({
-      candidateId,
-      fitScore: null,
-      fitBreakdown: null,
-      sourceType: 'discovered',
-      enrichmentStatus: 'pending',
-    });
-  }
-
-  // Backfill in case discovery under-delivers reserved slots.
-  for (const sc of nonEnrichedPool) {
-    if (assembled.length >= config.targetCount) break;
-    pushCandidate({
-      candidateId: sc.candidateId,
-      fitScore: sc.fitScore,
-      fitBreakdown: sc.fitBreakdown,
-      sourceType: 'pool',
-      enrichmentStatus: poolById.get(sc.candidateId)?.enrichmentStatus ?? 'pending',
-    });
-  }
+  const expandedCount = assembled.length - strictMatchedCount;
 
   // 5. Persist: deleteMany + createMany for retry idempotency
   await prisma.$transaction([
@@ -357,7 +399,11 @@ export async function runSourcingOrchestrator(
         sourcingRequestId: requestId,
         candidateId: a.candidateId,
         fitScore: a.fitScore,
-        fitBreakdown: a.fitBreakdown ? toJsonValue(a.fitBreakdown) : Prisma.JsonNull,
+        fitBreakdown: a.fitBreakdown
+          ? toJsonValue({ ...a.fitBreakdown, matchTier: a.matchTier, locationMatchType: a.locationMatchType })
+          : a.matchTier
+            ? toJsonValue({ matchTier: a.matchTier, locationMatchType: a.locationMatchType })
+            : Prisma.JsonNull,
         sourceType: a.sourceType,
         enrichmentStatus: a.enrichmentStatus,
         rank: a.rank,
@@ -448,11 +494,17 @@ export async function runSourcingOrchestrator(
     qualityGateTriggered,
     avgFitTopK: Number(avgFitTopK.toFixed(4)),
     countAboveThreshold,
+    strictTopKCount,
+    strictCoverageRate: Number(strictCoverageRate.toFixed(4)),
     discoveryReason,
     discoverySkippedReason,
     snapshotReuseCount,
     snapshotStaleServedCount,
     snapshotRefreshQueuedCount: staleRefreshQueued,
+    strictMatchedCount,
+    expandedCount,
+    expansionReason,
+    requestedLocation: requirements.location,
   };
 
   log.info({ requestId, resolvedTrack: trackDecision?.track ?? null, ...result }, 'Orchestrator complete');

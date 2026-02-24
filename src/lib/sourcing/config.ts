@@ -11,6 +11,10 @@ export interface SourcingConfig {
   qualityThreshold: number;
   qualityMinCountAbove: number;
   dailySerpCapPerTenant: number;
+  // Discovery + tier assembly
+  minDiscoveryShareLowQuality: number;
+  maxDiscoveryShare: number;
+  minStrictMatchesBeforeExpand: number;
   // Track classifier
   trackClassifierVersion: string;
   trackLowConfThreshold: number;
@@ -54,6 +58,10 @@ export function getSourcingConfig(): SourcingConfig {
     qualityThreshold: clamp(parseFloatSafe(process.env.SOURCE_QUALITY_THRESHOLD, 0.55), 0, 1),
     qualityMinCountAbove: parseIntSafe(process.env.SOURCE_QUALITY_MIN_COUNT_ABOVE, 15),
     dailySerpCapPerTenant: parseIntSafe(process.env.SOURCE_DAILY_SERP_CAP_PER_TENANT, 0),
+    // Discovery + tier assembly
+    minDiscoveryShareLowQuality: clamp(parseFloatSafe(process.env.SOURCE_MIN_DISCOVERY_SHARE_LOW_QUALITY, 0.40), 0, 1),
+    maxDiscoveryShare: clamp(parseFloatSafe(process.env.SOURCE_MAX_DISCOVERY_SHARE, 0.70), 0, 1),
+    minStrictMatchesBeforeExpand: parseIntSafe(process.env.SOURCE_MIN_STRICT_MATCHES_BEFORE_EXPAND, 20),
     // Track classifier
     trackClassifierVersion: process.env.TRACK_CLASSIFIER_VERSION || 'v1',
     trackLowConfThreshold: clamp(parseFloatSafe(process.env.TRACK_LOW_CONF_THRESHOLD, 0.60), 0, 1),

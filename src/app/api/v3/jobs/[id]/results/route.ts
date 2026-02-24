@@ -46,6 +46,7 @@ export async function GET(
               headlineHint: true,
               locationHint: true,
               companyHint: true,
+              searchSnippet: true,
               enrichmentStatus: true,
               confidenceScore: true,
               lastEnrichedAt: true,
@@ -192,10 +193,40 @@ export async function GET(
         }
       : null;
 
+    // Extract tier metadata from persisted fitBreakdown JSON
+    const fbRaw = sc.fitBreakdown as Record<string, unknown> | null;
+    const rawMatchTier = (fbRaw?.matchTier as string) ?? null;
+    const matchTier =
+      rawMatchTier === 'strict_location'
+        ? 'best_matches'
+        : rawMatchTier === 'expanded_location'
+          ? 'broader_pool'
+          : null;
+    const rawLocationMatchType = (fbRaw?.locationMatchType as string) ?? null;
+    const locationMatchType =
+      rawLocationMatchType === 'city_exact' ||
+      rawLocationMatchType === 'city_alias' ||
+      rawLocationMatchType === 'country_only' ||
+      rawLocationMatchType === 'none'
+        ? rawLocationMatchType
+        : null;
+
+    // Clean fitBreakdown: only numeric score fields (strip tier metadata)
+    const fitBreakdown = fbRaw
+      ? {
+          skillScore: fbRaw.skillScore ?? null,
+          roleScore: fbRaw.roleScore ?? null,
+          seniorityScore: fbRaw.seniorityScore ?? null,
+          activityFreshnessScore: fbRaw.activityFreshnessScore ?? null,
+        }
+      : null;
+
     return {
       candidateId: sc.candidateId,
       fitScore: sc.fitScore,
-      fitBreakdown: sc.fitBreakdown,
+      fitBreakdown,
+      matchTier,
+      locationMatchType,
       sourceType: sc.sourceType,
       enrichmentStatus: sc.enrichmentStatus,
       rank: sc.rank,
@@ -207,6 +238,7 @@ export async function GET(
         headlineHint: sc.candidate.headlineHint,
         locationHint: sc.candidate.locationHint,
         companyHint: sc.candidate.companyHint,
+        searchSnippet: sc.candidate.searchSnippet ?? null,
         enrichmentStatus: sc.candidate.enrichmentStatus,
         confidenceScore: sc.candidate.confidenceScore,
         lastEnrichedAt: sc.candidate.lastEnrichedAt,
@@ -234,6 +266,19 @@ export async function GET(
   const diagnosticsObj = sourcingRequest.diagnostics as Record<string, unknown> | null;
   const trackDecision = diagnosticsObj?.trackDecision ?? null;
 
+  // Compute group counts from candidate tier data
+  const strictCount = candidateResults.filter((c) => c.matchTier === 'best_matches').length;
+  const expandedCount = candidateResults.filter((c) => c.matchTier === 'broader_pool').length;
+  const diag = diagnosticsObj ?? {};
+  const groupCounts = {
+    bestMatches: strictCount,
+    broaderPool: expandedCount,
+    strictMatchedCount: strictCount,
+    expandedCount,
+    expansionReason: (diag.expansionReason as string) ?? null,
+    requestedLocation: (diag.requestedLocation as string) ?? null,
+  };
+
   return NextResponse.json({
     success: true,
     requestId: sourcingRequest.id,
@@ -246,6 +291,7 @@ export async function GET(
     queriesExecuted: sourcingRequest.queriesExecuted,
     diagnostics: sourcingRequest.diagnostics,
     trackDecision,
+    groupCounts,
     snapshotStats,
     candidates: candidateResults,
   });

@@ -17,55 +17,79 @@ export interface DiscoveryRunResult {
   queriesBuilt: number;
 }
 
-function buildQueries(requirements: JobRequirements, maxQueries: number): string[] {
+function buildQueries(
+  requirements: JobRequirements,
+  maxQueries: number,
+): { strict: string[]; fallback: string[] } {
   const roleFamily = requirements.roleFamily || '';
+  const title = requirements.title?.trim() || '';
   const location = requirements.location || '';
   const skills = requirements.topSkills.slice(0, 3);
-  const queries: string[] = [];
+  const narrowSkills = skills.slice(0, 2);
+  const strict: string[] = [];
+  const fallback: string[] = [];
 
-  // Role-guided queries
+  // Strict pass: location-targeted queries
+  if (location && skills.length > 0) {
+    if (roleFamily) {
+      strict.push(`site:linkedin.com/in "${roleFamily}" "${location}" ${skills.join(' ')}`);
+    } else {
+      strict.push(`site:linkedin.com/in "${location}" ${skills.join(' ')}`);
+    }
+    if (skills.length > 2) {
+      if (roleFamily) {
+        strict.push(`site:linkedin.com/in "${roleFamily}" "${location}" ${narrowSkills.join(' ')}`);
+      } else {
+        strict.push(`site:linkedin.com/in "${location}" ${narrowSkills.join(' ')}`);
+      }
+    }
+  }
+  if (location && title) {
+    strict.push(`site:linkedin.com/in "${title}" "${location}"`);
+  }
+  if (location && roleFamily && skills.length === 0) {
+    strict.push(`site:linkedin.com/in "${roleFamily}" "${location}"`);
+  }
+
+  // Fallback pass: without location (broader reach)
   if (roleFamily && skills.length > 0) {
-    if (location) {
-      queries.push(
-        `site:linkedin.com/in "${roleFamily}" "${location}" ${skills.join(' ')}`,
-      );
-    }
-    if (queries.length < maxQueries) {
-      queries.push(
-        `site:linkedin.com/in "${roleFamily}" ${skills.join(' ')}`,
-      );
+    fallback.push(`site:linkedin.com/in "${roleFamily}" ${skills.join(' ')}`);
+  }
+  if (title) {
+    fallback.push(`site:linkedin.com/in "${title}"`);
+    if (skills.length > 0) {
+      fallback.push(`site:linkedin.com/in "${title}" ${skills.join(' ')}`);
     }
   }
-
-  // Skill-first fallback when role family is unavailable
-  if (!roleFamily && location && skills.length > 0 && queries.length < maxQueries) {
-    queries.push(`site:linkedin.com/in "${location}" ${skills.join(' ')}`);
+  if (skills.length > 0) {
+    fallback.push(`site:linkedin.com/in ${skills.join(' ')}`);
   }
-  if (!roleFamily && skills.length > 0 && queries.length < maxQueries) {
-    queries.push(`site:linkedin.com/in ${skills.join(' ')}`);
+  if (skills.length > 2 && roleFamily) {
+    fallback.push(`site:linkedin.com/in "${roleFamily}" ${narrowSkills.join(' ')}`);
   }
-
-  // Narrow-skills variant (top 2 skills only)
-  if (skills.length > 2 && queries.length < maxQueries) {
-    const narrowSkills = skills.slice(0, 2);
-    if (roleFamily && location) {
-      queries.push(
-        `site:linkedin.com/in "${roleFamily}" "${location}" ${narrowSkills.join(' ')}`,
-      );
-    } else if (roleFamily) {
-      queries.push(
-        `site:linkedin.com/in "${roleFamily}" ${narrowSkills.join(' ')}`,
-      );
-    }
+  if (roleFamily && skills.length === 0) {
+    fallback.push(`site:linkedin.com/in "${roleFamily}"`);
+  }
+  if (!roleFamily && !title && location && skills.length === 0) {
+    fallback.push(`site:linkedin.com/in "${location}"`);
   }
 
-  // Dedupe identical queries
-  const seen = new Set<string>();
-  return queries.filter((q) => {
-    if (seen.has(q)) return false;
-    seen.add(q);
-    return true;
-  }).slice(0, maxQueries);
+  const dedup = (qs: string[]) => {
+    const seen = new Set<string>();
+    return qs.filter((q) => {
+      if (seen.has(q)) return false;
+      seen.add(q);
+      return true;
+    });
+  };
+
+  const strictDeduped = dedup(strict).slice(0, maxQueries);
+  const strictSet = new Set(strictDeduped);
+  const fallbackDeduped = dedup(fallback)
+    .filter((q) => !strictSet.has(q))
+    .slice(0, maxQueries);
+
+  return { strict: strictDeduped, fallback: fallbackDeduped };
 }
 
 export async function discoverCandidates(
@@ -75,27 +99,25 @@ export async function discoverCandidates(
   existingLinkedinIds: Set<string>,
   maxQueries: number = 3,
 ): Promise<DiscoveryRunResult> {
-  const queries = buildQueries(requirements, maxQueries);
+  const { strict, fallback } = buildQueries(requirements, maxQueries);
   const discovered: DiscoveredCandidate[] = [];
   const seenLinkedinIds = new Set(existingLinkedinIds);
   let queriesExecuted = 0;
+  let queryIndex = 0;
 
-  for (let qi = 0; qi < queries.length; qi++) {
-    if (discovered.length >= targetCount) break;
-
-    const query = queries[qi];
+  const runQuery = async (query: string): Promise<void> => {
     queriesExecuted++;
+    const qi = queryIndex++;
     log.info({ query, queryIndex: qi }, 'Running discovery query');
 
     try {
       const profiles = await searchLinkedInProfiles(query, 20);
-      // Filter out already-known candidates
       const newProfiles = profiles.filter((p) => {
         const id = extractLinkedInIdFromUrl(p.linkedinUrl);
         return id && !seenLinkedinIds.has(id);
       });
 
-      if (newProfiles.length === 0) continue;
+      if (newProfiles.length === 0) return;
 
       const candidateMap = await upsertDiscoveredCandidates(tenantId, newProfiles, query);
 
@@ -116,21 +138,39 @@ export async function discoverCandidates(
     } catch (err) {
       log.error({ query, error: err instanceof Error ? err.message : err }, 'Discovery query failed');
     }
+  };
+
+  // Pass 1: Strict (location-targeted) queries
+  for (const query of strict) {
+    if (discovered.length >= targetCount || queriesExecuted >= maxQueries) break;
+    await runQuery(query);
   }
 
-  if (discovered.length === 0 && queries.length > 0) {
+  // Pass 2: Fallback (non-location) queries if strict under-delivers
+  if (discovered.length < targetCount) {
+    log.info(
+      { strictDiscovered: discovered.length, targetCount, fallbackQueriesAvailable: fallback.length },
+      'Strict discovery under-delivered, running fallback queries',
+    );
+    for (const query of fallback) {
+      if (discovered.length >= targetCount || queriesExecuted >= maxQueries) break;
+      await runQuery(query);
+    }
+  }
+
+  if (discovered.length === 0 && (strict.length + fallback.length) > 0) {
     log.warn({
       tenantId,
-      queriesAttempted: queries.length,
+      queriesAttempted: strict.length + fallback.length,
       roleFamily: requirements.roleFamily,
       targetCount,
-    }, 'All discovery queries returned zero new candidates — query refinement needed (Phase 4 LLM)');
+    }, 'All discovery queries returned zero new candidates');
   }
 
   return {
     candidates: discovered,
     queriesExecuted,
-    queriesBuilt: queries.length,
+    queriesBuilt: strict.length + fallback.length,
   };
 }
 

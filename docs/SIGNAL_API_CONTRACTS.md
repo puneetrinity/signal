@@ -180,10 +180,12 @@ GET /api/v3/jobs/{externalJobId}/results?requestId=<id>
       "fitScore": 0.85,
       "fitBreakdown": {
         "skillScore": 0.9,
+        "roleScore": 0.85,
         "seniorityScore": 0.8,
-        "locationScore": 1.0,
-        "freshnessScore": 0.7
+        "activityFreshnessScore": 0.7
       },
+      "matchTier": "best_matches",
+      "locationMatchType": "city_exact",
       "sourceType": "pool_enriched",
       "enrichmentStatus": "completed",
       "rank": 1,
@@ -195,6 +197,7 @@ GET /api/v3/jobs/{externalJobId}/results?requestId=<id>
         "headlineHint": "Senior Software Engineer",
         "locationHint": "San Francisco, CA",
         "companyHint": "Acme Corp",
+        "searchSnippet": "Senior Software Engineer at Acme Corp...",
         "enrichmentStatus": "completed",
         "confidenceScore": 0.92,
         "lastEnrichedAt": "2026-02-17T06:16:01.000Z"
@@ -224,6 +227,14 @@ GET /api/v3/jobs/{externalJobId}/results?requestId=<id>
       }
     }
   ],
+  "groupCounts": {
+    "bestMatches": 14,
+    "broaderPool": 86,
+    "strictMatchedCount": 14,
+    "expandedCount": 86,
+    "expansionReason": "insufficient_strict_location_matches",
+    "requestedLocation": "Delhi, India"
+  },
   "snapshotStats": {
     "totalWithSnapshot": 10,
     "staleCount": 2,
@@ -251,15 +262,25 @@ GET /api/v3/jobs/{externalJobId}/results?requestId=<id>
 | Field | Type | Notes |
 |-------|------|-------|
 | `fitScore` | `number \| null` | null for discovered (not yet ranked) candidates |
-| `fitBreakdown` | `object \| null` | `{skillScore, seniorityScore, locationScore, freshnessScore}` |
+| `fitBreakdown` | `object \| null` | `{skillScore, roleScore, seniorityScore, activityFreshnessScore}` |
+| `matchTier` | `"best_matches" \| "broader_pool" \| null` | Recruiter-facing location tier grouping |
+| `locationMatchType` | `"city_exact" \| "city_alias" \| "country_only" \| "none" \| null` | How location matched |
 | `sourceType` | `string` | `pool_enriched`, `pool`, or `discovered` |
 | `enrichmentStatus` | `string` | `pending`, `completed`, `failed` |
 | `rank` | `number` | 1-based, lower = better |
+| `candidate.searchSnippet` | `string \| null` | SERP snippet from discovery search |
 | `snapshot` | `object \| null` | null if no enrichment has run |
 | `freshness.snapshotAgeDays` | `number \| null` | days since snapshot was computed |
 | `freshness.staleServed` | `boolean` | true if snapshot was stale when served |
 | `freshness.lastEnrichedAt` | `string \| null` | ISO 8601 |
 | `professionalValidation` | `object \| null` | null if no non-tech snapshot exists or shadow mode is on |
+| `groupCounts` | `object` | Request-level tier split metadata |
+| `groupCounts.bestMatches` | `number` | Candidates in best-matches group |
+| `groupCounts.broaderPool` | `number` | Candidates in broader-pool group |
+| `groupCounts.strictMatchedCount` | `number` | Candidates in strict_location tier |
+| `groupCounts.expandedCount` | `number` | Candidates in expanded_location tier |
+| `groupCounts.expansionReason` | `string \| null` | `"insufficient_strict_location_matches"` or null |
+| `groupCounts.requestedLocation` | `string \| null` | Original location from job context |
 | `snapshotStats` | `object` | Request-level snapshot diagnostics |
 
 ### Professional Validation Fields

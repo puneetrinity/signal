@@ -102,7 +102,7 @@ console.log('\n--- JD Digest Parsing ---');
   });
   assert(reqs.location === 'Austin', 'buildJobRequirements: location from context');
   assert(reqs.experienceYears === 8, 'buildJobRequirements: experienceYears');
-  assert(reqs.topSkills[0] === 'Go', 'buildJobRequirements: skills from jdDigest');
+  assert(reqs.topSkills[0] === 'go', 'buildJobRequirements: skills from jdDigest (canonicalized)');
 }
 
 {
@@ -387,7 +387,8 @@ console.log('\n--- Snapshot-Aware Ranking ---');
     },
   };
   const scored = rankCandidates([snapLoc], reqs);
-  assert(scored[0].fitBreakdown.locationScore === 1, 'Snapshot location match = 1');
+  assert(scored[0].matchTier === 'strict_location', 'Snapshot location → strict tier');
+  assert(scored[0].locationMatchType === 'city_exact', 'Snapshot location Austin → city_exact');
 }
 
 {
@@ -398,7 +399,8 @@ console.log('\n--- Snapshot-Aware Ranking ---');
     searchTitle: '', searchSnippet: '', enrichmentStatus: 'pending', lastEnrichedAt: null,
   };
   const scored = rankCandidates([aliasLoc], reqs);
-  assert(scored[0].fitBreakdown.locationScore === 1, 'Location alias Bengaluru↔Bangalore match = 1');
+  assert(scored[0].matchTier === 'strict_location', 'Bengaluru↔Bangalore → strict tier');
+  assert(scored[0].locationMatchType === 'city_alias', 'Bengaluru↔Bangalore → city_alias');
 }
 
 {
@@ -409,7 +411,7 @@ console.log('\n--- Snapshot-Aware Ranking ---');
     searchTitle: '', searchSnippet: '', enrichmentStatus: 'pending', lastEnrichedAt: null,
   };
   const scored = rankCandidates([russiaLoc], reqs);
-  assert(scored[0].fitBreakdown.locationScore === 0, 'Country inference: Russia does not match USA');
+  assert(scored[0].matchTier === 'expanded_location', 'Russia does not match USA → expanded');
 }
 
 {
@@ -420,7 +422,7 @@ console.log('\n--- Snapshot-Aware Ranking ---');
     searchTitle: '', searchSnippet: '', enrichmentStatus: 'pending', lastEnrichedAt: null,
   };
   const scored = rankCandidates([placeholderLoc], reqs);
-  assert(scored[0].fitBreakdown.locationScore === 0, "Placeholder location '...' scores 0");
+  assert(scored[0].matchTier === 'expanded_location', "Placeholder '...' → expanded");
 }
 
 {
@@ -432,29 +434,31 @@ console.log('\n--- Snapshot-Aware Ranking ---');
     searchTitle: '', searchSnippet: '', enrichmentStatus: 'pending', lastEnrichedAt: null,
   };
   const scored = rankCandidates([noisyLoc], reqs);
-  assert(scored[0].fitBreakdown.locationScore === 0, 'Noisy LinkedIn snippet location scores 0');
+  assert(scored[0].matchTier === 'expanded_location', 'Noisy snippet → expanded');
 }
 
 {
-  // City-constrained searches should not pass on country-only overlap
+  // City-constrained searches: same country different city → expanded with country_only
   const reqs = makeRequirements({ location: 'Delhi, India' });
   const sameCountryOtherCity: CandidateForRanking = {
     id: 'same-country-other-city', headlineHint: null, locationHint: 'Bangalore, India',
     searchTitle: '', searchSnippet: '', enrichmentStatus: 'pending', lastEnrichedAt: null,
   };
   const scored = rankCandidates([sameCountryOtherCity], reqs);
-  assert(scored[0].fitBreakdown.locationScore === 0, 'Delhi target does not match Bangalore by country fallback');
+  assert(scored[0].matchTier === 'expanded_location', 'Delhi target, Bangalore candidate → expanded');
+  assert(scored[0].locationMatchType === 'country_only', 'Same country different city → country_only');
 }
 
 {
-  // Country-only targets can still use country overlap
+  // Country-only targets can still use country overlap → strict
   const reqs = makeRequirements({ location: 'India' });
   const countryOnlyMatch: CandidateForRanking = {
     id: 'country-only-match', headlineHint: null, locationHint: 'Bangalore, India',
     searchTitle: '', searchSnippet: '', enrichmentStatus: 'pending', lastEnrichedAt: null,
   };
   const scored = rankCandidates([countryOnlyMatch], reqs);
-  assert(scored[0].fitBreakdown.locationScore === 1, 'Country-only target India matches Bangalore, India');
+  assert(scored[0].matchTier === 'strict_location', 'Country-only India → strict');
+  assert(scored[0].locationMatchType === 'country_only', 'Country-only match type');
 }
 
 {
