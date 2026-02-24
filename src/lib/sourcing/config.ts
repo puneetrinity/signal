@@ -16,6 +16,14 @@ export interface SourcingConfig {
   maxDiscoveryShare: number;
   minStrictMatchesBeforeExpand: number;
   bestMatchesMinFitScore: number;
+  // Discovery query generation + adaptive budget
+  queryGenMode: 'deterministic' | 'hybrid';
+  queryGroqTimeoutMs: number;
+  queryGroqMaxRetries: number;
+  adaptiveMinStrictAttempts: number;
+  adaptiveStrictMinYield: number;
+  adaptiveMinFallbackAttempts: number;
+  adaptiveFallbackMinYield: number;
   // Track classifier
   trackClassifierVersion: string;
   trackLowConfThreshold: number;
@@ -46,6 +54,10 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 export function getSourcingConfig(): SourcingConfig {
+  const rawQueryMode = (process.env.SOURCING_QUERY_GEN_MODE || 'deterministic').toLowerCase();
+  const queryGenMode: SourcingConfig['queryGenMode'] =
+    rawQueryMode === 'hybrid' ? 'hybrid' : 'deterministic';
+
   return {
     targetCount: parseIntSafe(process.env.TARGET_COUNT, 100),
     minGoodEnough: parseIntSafe(process.env.MIN_GOOD_ENOUGH, 30),
@@ -64,6 +76,14 @@ export function getSourcingConfig(): SourcingConfig {
     maxDiscoveryShare: clamp(parseFloatSafe(process.env.SOURCE_MAX_DISCOVERY_SHARE, 0.70), 0, 1),
     minStrictMatchesBeforeExpand: parseIntSafe(process.env.SOURCE_MIN_STRICT_MATCHES_BEFORE_EXPAND, 20),
     bestMatchesMinFitScore: clamp(parseFloatSafe(process.env.SOURCE_BEST_MATCHES_MIN_FIT_SCORE, 0.45), 0, 1),
+    // Discovery query generation + adaptive budget
+    queryGenMode,
+    queryGroqTimeoutMs: parseIntSafe(process.env.SOURCING_QUERY_GROQ_TIMEOUT_MS, 1500),
+    queryGroqMaxRetries: parseIntSafe(process.env.SOURCING_QUERY_GROQ_MAX_RETRIES, 1),
+    adaptiveMinStrictAttempts: parseIntSafe(process.env.SOURCING_ADAPTIVE_MIN_STRICT_ATTEMPTS, 2),
+    adaptiveStrictMinYield: clamp(parseFloatSafe(process.env.SOURCING_ADAPTIVE_STRICT_MIN_YIELD, 0.12), 0, 1),
+    adaptiveMinFallbackAttempts: parseIntSafe(process.env.SOURCING_ADAPTIVE_MIN_FALLBACK_ATTEMPTS, 2),
+    adaptiveFallbackMinYield: clamp(parseFloatSafe(process.env.SOURCING_ADAPTIVE_FALLBACK_MIN_YIELD, 0.05), 0, 1),
     // Track classifier
     trackClassifierVersion: process.env.TRACK_CLASSIFIER_VERSION || 'v1',
     trackLowConfThreshold: clamp(parseFloatSafe(process.env.TRACK_LOW_CONF_THRESHOLD, 0.60), 0, 1),

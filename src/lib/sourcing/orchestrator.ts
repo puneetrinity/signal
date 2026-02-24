@@ -5,7 +5,7 @@ import { toJsonValue } from '@/lib/prisma/json';
 import { createLogger } from '@/lib/logger';
 import { buildJobRequirements, type SourcingJobContextInput } from './jd-digest';
 import { rankCandidates } from './ranking';
-import { discoverCandidates } from './discovery';
+import { discoverCandidates, type DiscoveryTelemetry } from './discovery';
 import { getSourcingConfig } from './config';
 import { createEnrichmentSession } from '@/lib/enrichment/queue';
 import { isMeaningfulLocation, isNoisyLocationHint } from './ranking';
@@ -31,6 +31,7 @@ export interface OrchestratorResult {
   strictCoverageRate: number;
   discoveryReason: 'pool_deficit' | 'low_quality_pool' | 'deficit_and_low_quality' | null;
   discoverySkippedReason: 'daily_serp_cap_reached' | 'cap_guard_unavailable' | null;
+  discoveryTelemetry: DiscoveryTelemetry | null;
   snapshotReuseCount: number;
   snapshotStaleServedCount: number;
   snapshotRefreshQueuedCount: number;
@@ -238,6 +239,7 @@ export async function runSourcingOrchestrator(
   let queriesExecuted = 0;
   let discoveryReason: OrchestratorResult['discoveryReason'] = null;
   let discoverySkippedReason: OrchestratorResult['discoverySkippedReason'] = null;
+  let discoveryTelemetry: DiscoveryTelemetry | null = null;
 
   const poolSize = scoredPool.length;
   const poolDeficit = Math.max(0, config.targetCount - poolSize);
@@ -305,11 +307,13 @@ export async function runSourcingOrchestrator(
           discoveryTarget,
           existingLinkedinIds,
           budget.maxQueries,
+          { config, track: trackDecision?.track },
         );
 
         discoveredCount = discovery.candidates.length;
         discoveredCandidateIds = discovery.candidates.map((d) => d.candidateId);
         queriesExecuted = discovery.queriesExecuted;
+        discoveryTelemetry = discovery.telemetry;
         usedQueries = queriesExecuted;
       } finally {
         await releaseUnusedReservedQueries(budget.key, budget.reservedQueries, usedQueries);
@@ -600,6 +604,7 @@ export async function runSourcingOrchestrator(
     strictCoverageRate: Number(strictCoverageRate.toFixed(4)),
     discoveryReason,
     discoverySkippedReason,
+    discoveryTelemetry,
     snapshotReuseCount,
     snapshotStaleServedCount,
     snapshotRefreshQueuedCount: staleRefreshQueued,

@@ -113,6 +113,7 @@ async function processSourcingJob(
           strictCoverageRate: orchestratorResult.strictCoverageRate,
           discoveryReason: orchestratorResult.discoveryReason,
           discoverySkippedReason: orchestratorResult.discoverySkippedReason,
+          discoveryTelemetry: orchestratorResult.discoveryTelemetry,
           discoveryShortfallRate: orchestratorResult.discoveryShortfallRate,
           discoveredCount: orchestratorResult.discoveredCount,
           poolCount: orchestratorResult.poolCount,
