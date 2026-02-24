@@ -9,7 +9,7 @@
  */
 
 import type { HintWithConfidence, EnrichedHints, HintSource } from './bridge-types';
-import { isNoisyHint } from '@/lib/sourcing/hint-sanitizer';
+import { isNoisyHint, isLikelyLocationHint as isLikelyLocation } from '@/lib/sourcing/hint-sanitizer';
 
 /**
  * Extracted hints from LinkedIn SERP data
@@ -242,7 +242,8 @@ export function extractLocationFromSnippet(snippet: string): string | null {
   // Pattern 1: Explicit "Location: X"
   const locationMatch = snippet.match(/Location:\s*([^·\n]+)/i);
   if (locationMatch) {
-    return locationMatch[1].trim();
+    const loc = locationMatch[1].trim();
+    if (isLikelyLocation(loc)) return loc;
   }
 
   // Pattern 2: City/Country or City, ST pattern with common separators (Unicode-aware)
@@ -264,7 +265,8 @@ export function extractLocationFromSnippet(snippet: string): string | null {
   // Pattern 4: Common geographic patterns (Unicode-aware)
   const geoMatch = snippet.match(/(?:based in|located in|from)\s+([\p{L}][\p{L}\s,]+?)(?:\.|,|\s*·)/iu);
   if (geoMatch) {
-    return geoMatch[1].trim();
+    const loc = geoMatch[1].trim();
+    if (isLikelyLocation(loc)) return loc;
   }
 
   return null;
@@ -387,73 +389,6 @@ function isLikelyCompany(str: string): boolean {
     for (const kw of jobKeywords) {
       if (lower.includes(kw)) return false;
     }
-    return true;
-  }
-
-  return false;
-}
-
-/**
- * Check if a string looks like a location
- */
-function isLikelyLocation(str: string): boolean {
-  if (!str || str.length < 2 || str.length > 60) return false;
-
-  // Shared base noise check (placeholders, linkedin/profile/URL patterns)
-  if (isNoisyHint(str)) return false;
-  // Location-specific boilerplate rejects
-  if (/\bprofessional community\b|\bconnections?\b|\bfollowers?\b/i.test(str)) return false;
-
-  const lower = str.toLowerCase();
-
-  // Location indicators
-  const locationIndicators = [
-    'area', 'region', 'metropolitan', 'greater', 'bay',
-    'city', 'county', 'state', 'province',
-  ];
-
-  for (const indicator of locationIndicators) {
-    if (lower.includes(indicator)) return true;
-  }
-
-  // US states
-  const usStates = [
-    'california', 'new york', 'texas', 'florida', 'washington',
-    'massachusetts', 'illinois', 'georgia', 'colorado', 'virginia',
-    'ca', 'ny', 'tx', 'fl', 'wa', 'ma', 'il', 'ga', 'co', 'va',
-  ];
-
-  for (const state of usStates) {
-    if (lower.includes(state)) return true;
-  }
-
-  // Common cities
-  const cities = [
-    'san francisco', 'new york', 'los angeles', 'seattle', 'austin',
-    'boston', 'chicago', 'denver', 'atlanta', 'miami', 'portland',
-    'london', 'berlin', 'paris', 'amsterdam', 'dublin', 'singapore',
-    'toronto', 'vancouver', 'sydney', 'melbourne', 'bangalore', 'mumbai',
-    'delhi', 'new delhi', 'hyderabad', 'pune', 'chennai', 'kolkata',
-    'noida', 'gurgaon', 'gurugram', 'ahmedabad', 'jaipur', 'lucknow',
-    'chandigarh', 'kochi', 'indore',
-  ];
-
-  for (const city of cities) {
-    if (lower.includes(city)) return true;
-  }
-
-  // Countries
-  const countries = [
-    'india', 'germany', 'france', 'canada', 'australia',
-    'united kingdom', 'japan', 'brazil',
-  ];
-
-  for (const country of countries) {
-    if (lower.includes(country)) return true;
-  }
-
-  // Pattern: "City, State/Country" (Unicode-aware)
-  if (/^\p{L}+(?:\s\p{L}+)*,\s*\p{L}/u.test(str)) {
     return true;
   }
 

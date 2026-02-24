@@ -1,6 +1,6 @@
 import { prisma } from '@/lib/prisma';
 import { extractAllHints, extractCompanyFromHeadline } from '@/lib/enrichment/hint-extraction';
-import { normalizeHint, shouldReplaceHint } from './hint-sanitizer';
+import { normalizeHint, shouldReplaceHint, shouldReplaceLocationHint } from './hint-sanitizer';
 import type { ProfileSummary } from '@/types/linkedin';
 import type { Prisma } from '@prisma/client';
 
@@ -58,7 +58,7 @@ export async function upsertDiscoveredCandidates(
       };
       if (shouldReplaceHint(existing?.nameHint ?? null, nameHint)) updateData.nameHint = nameHint;
       if (shouldReplaceHint(existing?.headlineHint ?? null, headlineHint)) updateData.headlineHint = headlineHint;
-      if (shouldReplaceHint(existing?.locationHint ?? null, locationHint)) updateData.locationHint = locationHint;
+      if (shouldReplaceLocationHint(existing?.locationHint ?? null, locationHint)) updateData.locationHint = locationHint;
       if (shouldReplaceHint(existing?.companyHint ?? null, companyHint)) updateData.companyHint = companyHint;
 
       const candidate = await prisma.candidate.upsert({

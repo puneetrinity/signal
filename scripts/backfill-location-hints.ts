@@ -14,7 +14,7 @@
 
 import { prisma } from '@/lib/prisma';
 import { extractLocationFromSnippet, extractHeadlineFromTitle } from '@/lib/enrichment/hint-extraction';
-import { isNoisyHint } from '@/lib/sourcing/hint-sanitizer';
+import { isNoisyHint, isLikelyLocationHint } from '@/lib/sourcing/hint-sanitizer';
 
 const args = process.argv.slice(2);
 
@@ -56,7 +56,7 @@ async function main() {
     FROM "candidates"
     WHERE "tenantId" = ${tenantId}
       AND (
-        (("locationHint" IS NULL OR btrim("locationHint") = '') AND "searchSnippet" IS NOT NULL)
+        "searchSnippet" IS NOT NULL
         OR
         (("headlineHint" IS NULL OR btrim("headlineHint") = '') AND "searchTitle" IS NOT NULL)
       )
@@ -68,6 +68,7 @@ async function main() {
 
   let updatedLocation = 0;
   let updatedHeadline = 0;
+  let cleanedPolluted = 0;
   let skippedNoisy = 0;
   let skippedNoResult = 0;
 
@@ -77,10 +78,24 @@ async function main() {
     const updates: Promise<unknown>[] = [];
 
     for (const c of batch) {
-      const data: Record<string, string> = {};
+      const data: Record<string, string | null> = {};
 
-      // Re-extract location
-      if ((!c.locationHint || c.locationHint.trim() === '') && c.searchSnippet) {
+      // Re-validate existing non-null locationHint
+      if (c.locationHint && c.locationHint.trim() !== '') {
+        if (!isLikelyLocationHint(c.locationHint)) {
+          data.locationHint = null;
+          cleanedPolluted++;
+          // Attempt re-extraction from snippet
+          if (c.searchSnippet) {
+            const extracted = extractLocationFromSnippet(c.searchSnippet);
+            if (extracted && !isNoisyHint(extracted) && isLikelyLocationHint(extracted)) {
+              data.locationHint = extracted;
+              updatedLocation++;
+            }
+          }
+        }
+      } else if (c.searchSnippet) {
+        // Fill null/empty locationHint
         const extracted = extractLocationFromSnippet(c.searchSnippet);
         if (extracted) {
           if (isNoisyHint(extracted)) {
@@ -125,6 +140,7 @@ async function main() {
   console.log();
   console.log(`Results:`);
   console.log(`  Updated locationHint:  ${updatedLocation}`);
+  console.log(`  Cleaned polluted:      ${cleanedPolluted}`);
   console.log(`  Updated headlineHint:  ${updatedHeadline}`);
   console.log(`  Skipped (noisy):       ${skippedNoisy}`);
   console.log(`  Skipped (no result):   ${skippedNoResult}`);
