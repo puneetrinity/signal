@@ -220,6 +220,10 @@ function extractLinkedInLocale(hostname?: string): string | undefined {
   return match[1].toLowerCase();
 }
 
+function hasLinkedInSiteConstraint(query: string): boolean {
+  return /\bsite:(?:[a-z]{2,3}\.|www\.)?linkedin\.com\/in\b\/?/i.test(query);
+}
+
 function extractProfileSummary(result: SerperOrganicResult, providerMeta?: Record<string, unknown>): ProfileSummary {
   const url = normalizeLinkedInUrl(result.link || '');
   const linkedinId = extractLinkedInId(url) || url;
@@ -287,7 +291,7 @@ export const serperProvider: SearchProvider = {
     try {
       const config = getConfig();
 
-      const scopedQuery = query.includes('site:linkedin.com')
+      const scopedQuery = hasLinkedInSiteConstraint(query)
         ? query
         : `site:linkedin.com/in ${query}`;
 

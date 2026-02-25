@@ -3,6 +3,9 @@ export interface SourcingConfig {
   minGoodEnough: number;
   jobMaxEnrich: number;
   maxSerpQueries: number;
+  minDiscoveryPerRun: number;
+  minDiscoveredInOutput: number;
+  discoveredPromotionMinFitScore: number;
   initialEnrichCount: number;
   snapshotStaleDays: number;
   staleRefreshMaxPerRun: number;
@@ -32,6 +35,7 @@ export interface SourcingConfig {
   noveltyWindowDays: number;
   noveltyEnabled: boolean;
   discoveredEnrichReserve: number;
+  discoveredOrphanEnrichReserve: number;
   dynamicQueryMultiplier: number;
   // Track classifier
   trackClassifierVersion: string;
@@ -50,6 +54,12 @@ function parseIntSafe(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
   const parsed = parseInt(value, 10);
   return Number.isNaN(parsed) || parsed <= 0 ? fallback : parsed;
+}
+
+function parseNonNegativeIntSafe(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const parsed = parseInt(value, 10);
+  return Number.isNaN(parsed) || parsed < 0 ? fallback : parsed;
 }
 
 function parseFloatSafe(value: string | undefined, fallback: number): number {
@@ -72,6 +82,13 @@ export function getSourcingConfig(): SourcingConfig {
     minGoodEnough: parseIntSafe(process.env.MIN_GOOD_ENOUGH, 30),
     jobMaxEnrich: parseIntSafe(process.env.JOB_MAX_ENRICH, 50),
     maxSerpQueries: parseIntSafe(process.env.MAX_SERP_QUERIES, 3),
+    minDiscoveryPerRun: parseNonNegativeIntSafe(process.env.SOURCE_MIN_DISCOVERY_PER_RUN, 20),
+    minDiscoveredInOutput: parseNonNegativeIntSafe(process.env.SOURCE_MIN_DISCOVERED_IN_OUTPUT, 15),
+    discoveredPromotionMinFitScore: clamp(
+      parseFloatSafe(process.env.SOURCE_DISCOVERED_PROMOTION_MIN_FIT_SCORE, 0.45),
+      0,
+      1,
+    ),
     initialEnrichCount: parseIntSafe(process.env.INITIAL_ENRICH_COUNT, 20),
     snapshotStaleDays: parseIntSafe(process.env.SNAPSHOT_STALE_DAYS, 30),
     staleRefreshMaxPerRun: parseIntSafe(process.env.STALE_REFRESH_MAX_PER_RUN, 10),
@@ -101,6 +118,7 @@ export function getSourcingConfig(): SourcingConfig {
     noveltyWindowDays: parseIntSafe(process.env.SOURCE_NOVELTY_WINDOW_DAYS, 21),
     noveltyEnabled: process.env.SOURCE_NOVELTY_ENABLED === 'true',
     discoveredEnrichReserve: parseIntSafe(process.env.SOURCE_DISCOVERED_ENRICH_RESERVE, 5),
+    discoveredOrphanEnrichReserve: parseIntSafe(process.env.SOURCE_DISCOVERED_ORPHAN_ENRICH_RESERVE, 10),
     dynamicQueryMultiplier: clamp(parseIntSafe(process.env.SOURCE_DYNAMIC_QUERY_MULTIPLIER, 2), 1, 5),
     // Track classifier
     trackClassifierVersion: process.env.TRACK_CLASSIFIER_VERSION || 'v1',

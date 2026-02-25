@@ -187,6 +187,10 @@ function normalizeLinkedInUrl(url: string): string {
   return id ? `https://www.linkedin.com/in/${id}` : url;
 }
 
+function hasLinkedInSiteConstraint(query: string): boolean {
+  return /\bsite:(?:[a-z]{2,3}\.|www\.)?linkedin\.com\/in\b\/?/i.test(query);
+}
+
 /**
  * Extract profile summary from search result
  */
@@ -240,7 +244,7 @@ export const braveProvider: SearchProvider = {
 
     try {
       // Build site-scoped query if not already scoped
-      const scopedQuery = query.includes('site:linkedin.com')
+      const scopedQuery = hasLinkedInSiteConstraint(query)
         ? query
         : `site:linkedin.com/in ${query}`;
 

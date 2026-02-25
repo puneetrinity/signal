@@ -136,6 +136,7 @@ const LINKEDIN_SITE_SUBDOMAIN_BY_COUNTRY: Record<string, string> = {
 };
 
 const DEFAULT_STRICT_SERPER_TBS = 'qdr:y2';
+const DEFAULT_FALLBACK_SERPER_TBS = '';
 
 function normalizeLocationToken(text: string): string {
   return text
@@ -176,6 +177,16 @@ function getStrictSerperTbs(): string | null {
   return /^qdr:[dwmy]\d*$/i.test(configured) ? configured.toLowerCase() : null;
 }
 
+function getFallbackSerperTbs(strictTbs: string | null): string | null {
+  const configured = (process.env.SOURCING_FALLBACK_SERPER_TBS ?? DEFAULT_FALLBACK_SERPER_TBS).trim();
+  if (!configured) return strictTbs;
+  return /^qdr:[dwmy]\d*$/i.test(configured) ? configured.toLowerCase() : null;
+}
+
+function hasLinkedInSiteConstraint(query: string): boolean {
+  return /\bsite:(?:[a-z]{2,3}\.|www\.)?linkedin\.com\/in\b\/?/i.test(query);
+}
+
 function toLinkedInCountrySubdomain(countryCode: string | null | undefined): string | null {
   if (!countryCode) return null;
   return LINKEDIN_SITE_SUBDOMAIN_BY_COUNTRY[countryCode.toUpperCase()] ?? null;
@@ -187,16 +198,17 @@ function applyCountryLinkedInSiteConstraint(
 ): string {
   const subdomain = toLinkedInCountrySubdomain(countryCode);
   if (!subdomain) return query;
-  return query.replace(
-    /site:(?:www\.)?linkedin\.com\/in\b/i,
-    `site:${subdomain}.linkedin.com/in`,
-  );
+  const targetSite = `site:${subdomain}.linkedin.com/in`;
+  const withoutLinkedInSite = query
+    .replace(/\bsite:(?:[a-z]{2,3}\.|www\.)?linkedin\.com\/in\b\/?\s*/ig, '')
+    .trim();
+  return `${targetSite} ${withoutLinkedInSite}`.trim();
 }
 
 function normalizeQuery(query: string): string | null {
   const compact = query.replace(/\s+/g, ' ').trim();
   if (!compact) return null;
-  const siteScoped = compact.toLowerCase().includes('site:linkedin.com/in')
+  const siteScoped = hasLinkedInSiteConstraint(compact)
     ? compact
     : `site:linkedin.com/in ${compact}`;
   return siteScoped.slice(0, 240);
@@ -501,6 +513,7 @@ export async function discoverCandidates(
   const locationText = requirements.location?.trim() || null;
   const derivedCountryCode = deriveCountryCodeFromLocation(locationText);
   const strictSerperTbs = getStrictSerperTbs();
+  const fallbackSerperTbs = getFallbackSerperTbs(strictSerperTbs);
   if (strict.length > 0 && derivedCountryCode) {
     const rewrittenStrict = strict.map((query) =>
       applyCountryLinkedInSiteConstraint(query, derivedCountryCode),
@@ -514,8 +527,11 @@ export async function discoverCandidates(
       tbs: strictSerperTbs,
     }
     : undefined;
-  const fallbackGeo: SearchGeoContext | undefined = derivedCountryCode
-    ? { countryCode: derivedCountryCode }
+  const fallbackGeo: SearchGeoContext | undefined = (derivedCountryCode || fallbackSerperTbs)
+    ? {
+      ...(derivedCountryCode ? { countryCode: derivedCountryCode } : {}),
+      ...(fallbackSerperTbs ? { tbs: fallbackSerperTbs } : {}),
+    }
     : undefined;
   const discovered: DiscoveredCandidate[] = [];
   const seenLinkedinIds = new Set(existingLinkedinIds);

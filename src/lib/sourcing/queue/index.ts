@@ -141,7 +141,13 @@ async function processSourcingJob(
           noveltyKey: orchestratorResult.noveltyKey,
           noveltyHint: orchestratorResult.noveltyHint,
           discoveredEnrichedCount: orchestratorResult.discoveredEnrichedCount,
+          discoveredOrphanCount: orchestratorResult.discoveredOrphanCount,
+          discoveredOrphanQueued: orchestratorResult.discoveredOrphanQueued,
           dynamicQueryBudgetUsed: orchestratorResult.dynamicQueryBudgetUsed,
+          minDiscoveryPerRunApplied: orchestratorResult.minDiscoveryPerRunApplied,
+          minDiscoveredInOutputApplied: orchestratorResult.minDiscoveredInOutputApplied,
+          discoveredPromotedCount: orchestratorResult.discoveredPromotedCount,
+          discoveredPromotedInTopCount: orchestratorResult.discoveredPromotedInTopCount,
         }),
       },
     });
