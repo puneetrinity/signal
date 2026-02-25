@@ -24,6 +24,12 @@ export interface SourcingConfig {
   adaptiveStrictMinYield: number;
   adaptiveMinFallbackAttempts: number;
   adaptiveFallbackMinYield: number;
+  // Location coverage + novelty + discovered enrich + dynamic budget
+  locationCoverageFloor: number;
+  noveltyWindowDays: number;
+  noveltyEnabled: boolean;
+  discoveredEnrichReserve: number;
+  dynamicQueryMultiplier: number;
   // Track classifier
   trackClassifierVersion: string;
   trackLowConfThreshold: number;
@@ -84,6 +90,12 @@ export function getSourcingConfig(): SourcingConfig {
     adaptiveStrictMinYield: clamp(parseFloatSafe(process.env.SOURCING_ADAPTIVE_STRICT_MIN_YIELD, 0.12), 0, 1),
     adaptiveMinFallbackAttempts: parseIntSafe(process.env.SOURCING_ADAPTIVE_MIN_FALLBACK_ATTEMPTS, 2),
     adaptiveFallbackMinYield: clamp(parseFloatSafe(process.env.SOURCING_ADAPTIVE_FALLBACK_MIN_YIELD, 0.05), 0, 1),
+    // Location coverage + novelty + discovered enrich + dynamic budget
+    locationCoverageFloor: clamp(parseFloatSafe(process.env.SOURCE_LOCATION_COVERAGE_FLOOR, 0.40), 0, 1),
+    noveltyWindowDays: parseIntSafe(process.env.SOURCE_NOVELTY_WINDOW_DAYS, 21),
+    noveltyEnabled: process.env.SOURCE_NOVELTY_ENABLED === 'true',
+    discoveredEnrichReserve: parseIntSafe(process.env.SOURCE_DISCOVERED_ENRICH_RESERVE, 5),
+    dynamicQueryMultiplier: clamp(parseIntSafe(process.env.SOURCE_DYNAMIC_QUERY_MULTIPLIER, 2), 1, 5),
     // Track classifier
     trackClassifierVersion: process.env.TRACK_CLASSIFIER_VERSION || 'v1',
     trackLowConfThreshold: clamp(parseFloatSafe(process.env.TRACK_LOW_CONF_THRESHOLD, 0.60), 0, 1),

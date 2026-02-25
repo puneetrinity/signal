@@ -80,7 +80,7 @@ const COUNTRY_TOKENS = new Set([
   'france',
 ]);
 
-function canonicalizeLocation(text: string): string {
+export function canonicalizeLocation(text: string): string {
   let normalized = text.toLowerCase().trim();
   for (const [pattern, replacement] of LOCATION_ALIAS_REWRITES) {
     normalized = normalized.replace(pattern, replacement);
@@ -126,7 +126,7 @@ function locationTokens(text: string): string[] {
     .filter((token) => token.length > 1);
 }
 
-function extractPrimaryCity(normalizedLocation: string): string | null {
+export function extractPrimaryCity(normalizedLocation: string): string | null {
   const [firstSegmentRaw] = normalizedLocation.split(',');
   let firstSegment = firstSegmentRaw?.trim() ?? '';
   if (!firstSegment) return null;

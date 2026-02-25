@@ -8,7 +8,8 @@ import { rankCandidates } from './ranking';
 import { discoverCandidates, type DiscoveryTelemetry } from './discovery';
 import { getSourcingConfig } from './config';
 import { createEnrichmentSession } from '@/lib/enrichment/queue';
-import { isMeaningfulLocation, isNoisyLocationHint } from './ranking';
+import { isMeaningfulLocation, isNoisyLocationHint, canonicalizeLocation, extractPrimaryCity } from './ranking';
+import { getRecentlyExposedCandidateIds } from './novelty';
 import type { CandidateForRanking, FitBreakdown, MatchTier, LocationMatchType } from './ranking';
 import type { TrackDecision } from './types';
 import { jobTrackToDbFilter } from './types';
@@ -50,6 +51,13 @@ export interface OrchestratorResult {
   demotedStrictWithCityMatch: number;
   strictBeforeDemotion: number;
   selectedSnapshotTrack: string;
+  locationCoverageTriggered: boolean;
+  noveltySuppressedCount: number;
+  noveltyWindowDays: number;
+  noveltyKey: string | null;
+  noveltyHint: string | null;
+  discoveredEnrichedCount: number;
+  dynamicQueryBudgetUsed: boolean;
 }
 
 interface AssembledCandidate {
@@ -210,6 +218,24 @@ export async function runSourcingOrchestrator(
   });
   const scoredPool = rankCandidates(poolForRanking, requirements);
   const hasLocationConstraint = Boolean(requirements.location?.trim());
+  const poolForRankingById = new Map(poolForRanking.map((r) => [r.id, r]));
+
+  function hasMeaningfulLocation(loc: string | null | undefined): boolean {
+    if (!isMeaningfulLocation(loc)) return false;
+    if (isNoisyLocationHint(loc!)) return false;
+    return true;
+  }
+
+  // Pre-assembly location coverage estimate from scored pool
+  const poolWithLocation = scoredPool.filter((sc) => {
+    const poolCandidate = poolForRankingById.get(sc.candidateId);
+    return hasMeaningfulLocation(poolCandidate?.snapshot?.location) ||
+           hasMeaningfulLocation(poolCandidate?.locationHint);
+  }).length;
+  const poolLocationCoverage = scoredPool.length > 0
+    ? poolWithLocation / scoredPool.length
+    : 0;
+  const locationCoverageTriggered = hasLocationConstraint && poolLocationCoverage < config.locationCoverageFloor;
 
   const topK = scoredPool.slice(0, Math.min(scoredPool.length, config.qualityTopK));
   const avgFitTopK = topK.length > 0
@@ -227,7 +253,8 @@ export async function runSourcingOrchestrator(
     topK.length === 0 ||
     avgFitTopK < config.qualityMinAvgFit ||
     countAboveThreshold < minCountAboveRequired ||
-    strictCoverageTriggered;
+    strictCoverageTriggered ||
+    locationCoverageTriggered;
 
   // 3. Discovery decision (deficit and/or low quality)
   const enrichedCandidates = scoredPool.filter((sc) => poolById.get(sc.candidateId)?.enrichmentStatus === 'completed');
@@ -258,12 +285,18 @@ export async function runSourcingOrchestrator(
   else if (poolDeficit > 0) discoveryReason = 'pool_deficit';
   else if (qualityGateTriggered) discoveryReason = 'low_quality_pool';
 
+  const effectiveMaxQueries = qualityGateTriggered
+    ? config.maxSerpQueries * config.dynamicQueryMultiplier
+    : config.maxSerpQueries;
+  let dynamicQueryBudgetUsed = false;
+
   if (desiredDiscoveryTarget > 0) {
     const aggressive = enrichedCount < config.minGoodEnough;
     discoveryTarget = aggressive ? Math.min(desiredDiscoveryTarget, config.jobMaxEnrich) : desiredDiscoveryTarget;
+    dynamicQueryBudgetUsed = qualityGateTriggered && config.dynamicQueryMultiplier > 1;
     const budget = await getDiscoveryQueryBudget(
       tenantId,
-      config.maxSerpQueries,
+      effectiveMaxQueries,
       config.dailySerpCapPerTenant,
     );
 
@@ -434,6 +467,105 @@ export async function runSourcingOrchestrator(
     }
   }
 
+  // Novelty guard: suppress recently-exposed broader-pool candidates
+  let noveltySuppressedCount = 0;
+  let noveltyKey: string | null = null;
+  let noveltyHint: string | null = null;
+
+  if (config.noveltyEnabled && requirements.roleFamily) {
+    const targetCity = requirements.location
+      ? extractPrimaryCity(canonicalizeLocation(requirements.location))
+      : null;
+    noveltyKey = `${requirements.roleFamily}+${targetCity ?? 'any'}`;
+
+    const exposedIds = await getRecentlyExposedCandidateIds(
+      tenantId,
+      requirements.roleFamily,
+      requirements.location ?? null,
+      config.noveltyWindowDays,
+    );
+
+    if (exposedIds.size > 0) {
+      // Top 10% fitScore threshold (only from scored candidates)
+      const scoredFitScores = assembled
+        .filter((a) => a.fitScore !== null)
+        .map((a) => a.fitScore!)
+        .sort((a, b) => b - a);
+      const top10PctThreshold = scoredFitScores.length > 0
+        ? scoredFitScores[Math.floor(scoredFitScores.length * 0.1)] ?? 0
+        : 0;
+
+      const shouldSuppressNovelty = (
+        candidateId: string,
+        matchTier: MatchTier | null,
+        fitScore: number | null,
+      ): boolean => {
+        const isExpandedTier = matchTier !== 'strict_location';
+        const isExposed = exposedIds.has(candidateId);
+        const isTopFit = fitScore !== null && fitScore >= top10PctThreshold;
+        return isExpandedTier && isExposed && !isTopFit;
+      };
+
+      const kept: AssembledCandidate[] = [];
+      for (const a of assembled) {
+        if (shouldSuppressNovelty(a.candidateId, a.matchTier, a.fitScore)) {
+          noveltySuppressedCount++;
+        } else {
+          kept.push(a);
+        }
+      }
+
+      if (noveltySuppressedCount > 0) {
+        // Rebuild assembled list, removing suppressed candidates
+        const suppressedIds = new Set(
+          assembled
+            .filter((a) => !kept.some((k) => k.candidateId === a.candidateId))
+            .map((a) => a.candidateId),
+        );
+        assembled.length = 0;
+        for (const id of suppressedIds) assembledIds.delete(id);
+        let newRank = 1;
+        for (const a of kept) {
+          a.rank = newRank++;
+          assembled.push(a);
+        }
+        rank = newRank;
+
+        // Refill from expanded pool and discovered candidates to reach targetCount
+        for (const sc of expandedPool) {
+          if (assembled.length >= config.targetCount) break;
+          if (assembledIds.has(sc.candidateId)) continue;
+          if (shouldSuppressNovelty(sc.candidateId, sc.matchTier, sc.fitScore)) continue;
+          pushCandidate({
+            candidateId: sc.candidateId,
+            fitScore: sc.fitScore,
+            fitBreakdown: sc.fitBreakdown,
+            matchTier: sc.matchTier,
+            locationMatchType: sc.locationMatchType,
+            sourceType: enrichedIds.has(sc.candidateId) ? 'pool_enriched' : 'pool',
+            enrichmentStatus: poolById.get(sc.candidateId)?.enrichmentStatus ?? 'pending',
+          });
+        }
+        for (const candidateId of discoveredCandidateIds) {
+          if (assembled.length >= config.targetCount) break;
+          if (assembledIds.has(candidateId)) continue;
+          if (shouldSuppressNovelty(candidateId, 'expanded_location', null)) continue;
+          pushCandidate({
+            candidateId,
+            fitScore: null,
+            fitBreakdown: null,
+            matchTier: 'expanded_location',
+            locationMatchType: 'none',
+            sourceType: 'discovered',
+            enrichmentStatus: 'pending',
+          });
+        }
+
+        noveltyHint = `Suppressed ${noveltySuppressedCount} recently-exposed broader-pool candidates (${noveltyKey}, ${config.noveltyWindowDays}d window)`;
+      }
+    }
+  }
+
   const expandedCount = assembled.length - strictMatchedCount;
 
   // 5. Persist: deleteMany + createMany for retry idempotency
@@ -471,7 +603,11 @@ export async function runSourcingOrchestrator(
     .slice(0, config.staleRefreshMaxPerRun)
     .map((r) => r.id);
 
-  const allPotentialIds = [...new Set([...candidateIdsToEnqueue, ...staleCandidateIds])];
+  const discoveredUnenriched = assembled
+    .filter((a) => a.sourceType === 'discovered' && a.enrichmentStatus !== 'completed')
+    .slice(0, config.discoveredEnrichReserve)
+    .map((a) => a.candidateId);
+  const allPotentialIds = [...new Set([...candidateIdsToEnqueue, ...staleCandidateIds, ...discoveredUnenriched])];
   const activeSessions = allPotentialIds.length > 0
     ? await prisma.enrichmentSession.findMany({
         where: {
@@ -495,6 +631,21 @@ export async function runSourcingOrchestrator(
       autoEnrichQueued++;
     } catch (error) {
       log.warn({ error, candidateId: a.candidateId, requestId }, 'Auto-enrich enqueue failed');
+    }
+  }
+
+  // 6b. Discovered enrichment reserve (additive, separate from top-N)
+  let discoveredEnrichedCount = 0;
+  for (const a of assembled.filter((a) => a.sourceType === 'discovered' && a.enrichmentStatus !== 'completed' && !enqueuedIds.has(a.candidateId))) {
+    if (discoveredEnrichedCount >= config.discoveredEnrichReserve) break;
+    if (alreadyActiveIds.has(a.candidateId)) continue;
+    try {
+      const priority = 30 + discoveredEnrichedCount; // lower priority than rank-based (10+), higher than stale (50)
+      await createEnrichmentSession(tenantId, a.candidateId, { priority });
+      enqueuedIds.add(a.candidateId);
+      discoveredEnrichedCount++;
+    } catch (error) {
+      log.warn({ error, candidateId: a.candidateId, requestId }, 'Discovered enrich enqueue failed');
     }
   }
 
@@ -532,7 +683,6 @@ export async function runSourcingOrchestrator(
 
   // Skill score diagnostics: snapshot vs text fallback breakdown
   // Only count scored candidates (exclude discovered — they have no fitScore/skillScore)
-  const poolForRankingById = new Map(poolForRanking.map((r) => [r.id, r]));
   let withSnapshotSkills = 0;
   let usingTextFallback = 0;
   const skillScoreSumBySource: Record<string, { sum: number; count: number }> = {};
@@ -564,11 +714,6 @@ export async function runSourcingOrchestrator(
 
   // Location hint coverage: fraction of scored candidates with a meaningful, non-noisy location
   // Excludes discovered candidates (not in pool, no location data yet)
-  function hasMeaningfulLocation(loc: string | null | undefined): boolean {
-    if (!isMeaningfulLocation(loc)) return false;
-    if (isNoisyLocationHint(loc!)) return false;
-    return true;
-  }
   const scoredAssembled = assembled.filter((a) => a.fitScore !== null);
   const candidatesWithLocation = scoredAssembled.filter((a) => {
     const poolCandidate = poolForRankingById.get(a.candidateId);
@@ -619,6 +764,13 @@ export async function runSourcingOrchestrator(
     demotedStrictWithCityMatch,
     strictBeforeDemotion,
     selectedSnapshotTrack,
+    locationCoverageTriggered,
+    noveltySuppressedCount,
+    noveltyWindowDays: config.noveltyWindowDays,
+    noveltyKey,
+    noveltyHint,
+    discoveredEnrichedCount,
+    dynamicQueryBudgetUsed,
   };
 
   log.info({ requestId, resolvedTrack: trackDecision?.track ?? null, ...result }, 'Orchestrator complete');

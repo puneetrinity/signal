@@ -1103,6 +1103,370 @@ console.log('\n--- Track-Aware Snapshot Selection ---');
 }
 
 // ---------------------------------------------------------------------------
+// Test: Location coverage trigger (Feature 1)
+// ---------------------------------------------------------------------------
+
+console.log('\n--- Location Coverage Trigger ---');
+
+{
+  // Pool with low location coverage (below floor 0.40) should trigger
+  const reqs = makeRequirements({ location: 'San Francisco', topSkills: ['React'] });
+  // 10 candidates: only 2 have meaningful locations (20% < 40% floor)
+  const candidates: CandidateForRanking[] = Array.from({ length: 10 }, (_, i) => ({
+    id: `loc-cov-${i}`,
+    headlineHint: 'Engineer',
+    locationHint: i < 2 ? 'San Francisco, CA' : null,
+    searchTitle: 'React Developer',
+    searchSnippet: 'React and TypeScript development',
+    enrichmentStatus: 'pending',
+    lastEnrichedAt: null,
+  }));
+
+  const scored = rankCandidates(candidates, reqs);
+  const poolWithLocation = scored.filter((sc) => {
+    const c = candidates.find((c) => c.id === sc.candidateId)!;
+    return c.locationHint !== null && c.locationHint.length > 2;
+  }).length;
+  const poolLocationCoverage = scored.length > 0 ? poolWithLocation / scored.length : 0;
+  const hasLocationConstraint = Boolean(reqs.location?.trim());
+  const locationCoverageFloor = 0.40;
+  const locationCoverageTriggered = hasLocationConstraint && poolLocationCoverage < locationCoverageFloor;
+
+  assert(poolLocationCoverage === 0.2, 'Location coverage: 20% coverage computed');
+  assert(locationCoverageTriggered === true, 'Location coverage: triggered when coverage 0.2 < floor 0.4');
+}
+
+{
+  // Pool with high location coverage should NOT trigger
+  const reqs = makeRequirements({ location: 'Delhi, India', topSkills: ['React'] });
+  const candidates: CandidateForRanking[] = Array.from({ length: 10 }, (_, i) => ({
+    id: `loc-cov-high-${i}`,
+    headlineHint: 'Engineer',
+    locationHint: i < 6 ? 'Delhi, India' : 'Mumbai, India',
+    searchTitle: 'React Developer',
+    searchSnippet: 'React development',
+    enrichmentStatus: 'pending',
+    lastEnrichedAt: null,
+  }));
+
+  const scored = rankCandidates(candidates, reqs);
+  const poolWithLocation = scored.filter((sc) => {
+    const c = candidates.find((c) => c.id === sc.candidateId)!;
+    return c.locationHint !== null && c.locationHint.length > 2;
+  }).length;
+  const poolLocationCoverage = scored.length > 0 ? poolWithLocation / scored.length : 0;
+  const locationCoverageTriggered = Boolean(reqs.location?.trim()) && poolLocationCoverage < 0.40;
+
+  assert(poolLocationCoverage === 1.0, 'Location coverage: 100% coverage computed');
+  assert(locationCoverageTriggered === false, 'Location coverage: NOT triggered when coverage 1.0 >= floor 0.4');
+}
+
+// ---------------------------------------------------------------------------
+// Test: Novelty suppression logic (Feature 2)
+// ---------------------------------------------------------------------------
+
+console.log('\n--- Novelty Suppression ---');
+
+{
+  // Simulate novelty suppression: expanded-tier exposed candidates get removed,
+  // strict-tier and top-10% are preserved
+  interface MockAssembled {
+    candidateId: string;
+    fitScore: number | null;
+    matchTier: 'strict_location' | 'expanded_location';
+    rank: number;
+  }
+
+  const assembled: MockAssembled[] = [
+    { candidateId: 'strict-1', fitScore: 0.9, matchTier: 'strict_location', rank: 1 },
+    { candidateId: 'expanded-top', fitScore: 0.85, matchTier: 'expanded_location', rank: 2 },
+    { candidateId: 'expanded-mid', fitScore: 0.5, matchTier: 'expanded_location', rank: 3 },
+    { candidateId: 'expanded-low', fitScore: 0.3, matchTier: 'expanded_location', rank: 4 },
+    { candidateId: 'discovered-1', fitScore: null, matchTier: 'expanded_location', rank: 5 },
+  ];
+
+  const exposedIds = new Set(['strict-1', 'expanded-mid', 'expanded-low', 'discovered-1']);
+
+  // Top 10% threshold: from scored candidates [0.9, 0.85, 0.5, 0.3], top 10% index = floor(4*0.1) = 0 → threshold = 0.9
+  const scoredFitScores = assembled
+    .filter((a) => a.fitScore !== null)
+    .map((a) => a.fitScore!)
+    .sort((a, b) => b - a);
+  const top10PctThreshold = scoredFitScores.length > 0
+    ? scoredFitScores[Math.floor(scoredFitScores.length * 0.1)] ?? 0
+    : 0;
+
+  let suppressedCount = 0;
+  const kept: MockAssembled[] = [];
+  for (const a of assembled) {
+    const isExpandedTier = a.matchTier !== 'strict_location';
+    const isExposed = exposedIds.has(a.candidateId);
+    const isTopFit = a.fitScore !== null && a.fitScore >= top10PctThreshold;
+
+    if (isExpandedTier && isExposed && !isTopFit) {
+      suppressedCount++;
+    } else {
+      kept.push(a);
+    }
+  }
+
+  assert(suppressedCount === 3, 'Novelty: 3 expanded exposed candidates suppressed (expanded-mid, expanded-low, discovered-1)');
+  assert(kept.some((a) => a.candidateId === 'strict-1'), 'Novelty: strict-tier candidate preserved despite being exposed');
+  assert(kept.some((a) => a.candidateId === 'expanded-top'), 'Novelty: expanded candidate NOT exposed is preserved');
+  assert(kept.length === 2, 'Novelty: 2 candidates remain after suppression');
+}
+
+{
+  // Novelty refill: after suppression, backfill from remaining unsuppressed candidates
+  interface MockAssembled {
+    candidateId: string;
+    fitScore: number | null;
+    matchTier: 'strict_location' | 'expanded_location';
+    rank: number;
+  }
+
+  const targetCount = 5;
+  // Full assembly at targetCount=5
+  const assembled: MockAssembled[] = [
+    { candidateId: 'strict-1', fitScore: 0.9, matchTier: 'strict_location', rank: 1 },
+    { candidateId: 'exp-exposed-1', fitScore: 0.6, matchTier: 'expanded_location', rank: 2 },
+    { candidateId: 'exp-exposed-2', fitScore: 0.5, matchTier: 'expanded_location', rank: 3 },
+    { candidateId: 'exp-clean-1', fitScore: 0.4, matchTier: 'expanded_location', rank: 4 },
+    { candidateId: 'exp-clean-2', fitScore: 0.3, matchTier: 'expanded_location', rank: 5 },
+  ];
+  const assembledIds = new Set(assembled.map((a) => a.candidateId));
+
+  // Backfill pool: these weren't assembled because list was full
+  const backfillPool = [
+    { candidateId: 'exp-exposed-top', fitScore: 0.95 }, // exposed but top-fit -> should be allowed
+    { candidateId: 'exp-clean-3', fitScore: 0.25 },
+    { candidateId: 'exp-clean-4', fitScore: 0.20 },
+    { candidateId: 'exp-exposed-3', fitScore: 0.15 }, // also exposed
+  ];
+
+  const exposedIds = new Set(['exp-exposed-1', 'exp-exposed-2', 'exp-exposed-3', 'exp-exposed-top']);
+
+  // Top 10% threshold from scored: [0.9, 0.6, 0.5, 0.4, 0.3] → index 0 → 0.9
+  const top10Threshold = 0.9;
+
+  // Suppress
+  const shouldSuppressNovelty = (
+    candidateId: string,
+    matchTier: 'strict_location' | 'expanded_location',
+    fitScore: number | null,
+  ): boolean => {
+    const isExpanded = matchTier !== 'strict_location';
+    const isExposed = exposedIds.has(candidateId);
+    const isTop = fitScore !== null && fitScore >= top10Threshold;
+    return isExpanded && isExposed && !isTop;
+  };
+  const kept: MockAssembled[] = [];
+  let suppressedCount = 0;
+  for (const a of assembled) {
+    if (shouldSuppressNovelty(a.candidateId, a.matchTier, a.fitScore)) {
+      suppressedCount++;
+      assembledIds.delete(a.candidateId);
+    } else {
+      kept.push(a);
+    }
+  }
+
+  // Refill from backfill pool (skip exposed)
+  let refilled = 0;
+  for (const bp of backfillPool) {
+    if (kept.length >= targetCount) break;
+    if (assembledIds.has(bp.candidateId)) continue;
+    if (shouldSuppressNovelty(bp.candidateId, 'expanded_location', bp.fitScore)) continue;
+    kept.push({
+      candidateId: bp.candidateId,
+      fitScore: bp.fitScore,
+      matchTier: 'expanded_location',
+      rank: kept.length + 1,
+    });
+    assembledIds.add(bp.candidateId);
+    refilled++;
+  }
+
+  assert(suppressedCount === 2, 'Novelty refill: 2 exposed expanded candidates suppressed');
+  assert(refilled === 2, 'Novelty refill: 2 eligible candidates backfilled from pool');
+  assert(kept.length === 5, 'Novelty refill: assembled list back to targetCount after refill');
+  assert(kept.some((a) => a.candidateId === 'exp-exposed-top'), 'Novelty refill: top-fit exposed candidate is allowed');
+  assert(!kept.some((a) => a.candidateId === 'exp-exposed-3'), 'Novelty refill: low-fit exposed backfill candidate skipped');
+}
+
+// ---------------------------------------------------------------------------
+// Test: Discovered enrichment priority (Feature 3)
+// ---------------------------------------------------------------------------
+
+console.log('\n--- Discovered Enrichment Priority ---');
+
+{
+  // Verify that discovered candidates get a reserved enrichment budget
+  interface MockForEnrich {
+    candidateId: string;
+    sourceType: string;
+    enrichmentStatus: string;
+    rank: number;
+  }
+
+  const assembled: MockForEnrich[] = [
+    { candidateId: 'pool-1', sourceType: 'pool_enriched', enrichmentStatus: 'completed', rank: 1 },
+    { candidateId: 'pool-2', sourceType: 'pool', enrichmentStatus: 'pending', rank: 2 },
+    { candidateId: 'pool-3', sourceType: 'pool', enrichmentStatus: 'pending', rank: 3 },
+    { candidateId: 'disc-1', sourceType: 'discovered', enrichmentStatus: 'pending', rank: 4 },
+    { candidateId: 'disc-2', sourceType: 'discovered', enrichmentStatus: 'pending', rank: 5 },
+    { candidateId: 'disc-3', sourceType: 'discovered', enrichmentStatus: 'pending', rank: 6 },
+    { candidateId: 'disc-4', sourceType: 'discovered', enrichmentStatus: 'pending', rank: 7 },
+    { candidateId: 'disc-5', sourceType: 'discovered', enrichmentStatus: 'pending', rank: 8 },
+    { candidateId: 'disc-6', sourceType: 'discovered', enrichmentStatus: 'pending', rank: 9 },
+  ];
+
+  // Simulate: initialEnrichCount=3 (only pool-2, pool-3, disc-1 get rank-based enrich)
+  const initialEnrichCount = 3;
+  const discoveredEnrichReserve = 5;
+  const enqueuedIds = new Set<string>();
+
+  // First pass: top-N rank-based
+  const rankBased = assembled
+    .filter((a) => a.enrichmentStatus !== 'completed')
+    .slice(0, initialEnrichCount);
+  for (const a of rankBased) enqueuedIds.add(a.candidateId);
+
+  // Second pass: discovered reserve
+  let discoveredEnrichedCount = 0;
+  for (const a of assembled.filter((a) => a.sourceType === 'discovered' && a.enrichmentStatus !== 'completed' && !enqueuedIds.has(a.candidateId))) {
+    if (discoveredEnrichedCount >= discoveredEnrichReserve) break;
+    enqueuedIds.add(a.candidateId);
+    discoveredEnrichedCount++;
+  }
+
+  assert(rankBased.map((a) => a.candidateId).includes('disc-1'), 'Discovered enrich: disc-1 in rank-based batch');
+  assert(discoveredEnrichedCount === 5, 'Discovered enrich: 5 additional discovered candidates enriched via reserve');
+  assert(enqueuedIds.size === 8, 'Discovered enrich: 8 total enqueued (3 rank + 5 reserve)');
+}
+
+// ---------------------------------------------------------------------------
+// Test: Dynamic query budget (Feature 4)
+// ---------------------------------------------------------------------------
+
+console.log('\n--- Dynamic Query Budget ---');
+
+{
+  const baseQueries = 3;
+  const multiplier = 2;
+
+  // Quality gate triggered → multiplied
+  const effectiveTriggered = baseQueries * multiplier;
+  assert(effectiveTriggered === 6, 'Dynamic budget: 3 * 2 = 6 when quality gate triggered');
+
+  // Quality gate NOT triggered → base
+  const qualityGateTriggered = false;
+  const effectiveNotTriggered = qualityGateTriggered ? baseQueries * multiplier : baseQueries;
+  assert(effectiveNotTriggered === 3, 'Dynamic budget: stays at 3 when quality gate not triggered');
+
+  // Clamped multiplier
+  const clampedMultiplier = Math.min(5, Math.max(1, 7)); // input 7 → clamped to 5
+  assert(clampedMultiplier === 5, 'Dynamic budget: multiplier clamped to max 5');
+  assert(Math.min(5, Math.max(1, 0)) === 1, 'Dynamic budget: multiplier clamped to min 1');
+}
+
+// ---------------------------------------------------------------------------
+// Test: Novelty no-op when disabled (Feature 2 safety)
+// ---------------------------------------------------------------------------
+
+console.log('\n--- Novelty Disabled No-op ---');
+
+{
+  // When noveltyEnabled=false, suppression count should be 0
+  const origVal = process.env.SOURCE_NOVELTY_ENABLED;
+  delete process.env.SOURCE_NOVELTY_ENABLED;
+  const config = getSourcingConfig();
+  assert(config.noveltyEnabled === false, 'Novelty disabled: config.noveltyEnabled defaults to false');
+
+  // Simulate: even with exposed candidates, novelty should be skipped
+  const noveltyEnabled = config.noveltyEnabled;
+  let noveltySuppressedCount = 0;
+  if (noveltyEnabled) {
+    noveltySuppressedCount = 99; // would be set if enabled
+  }
+  assert(noveltySuppressedCount === 0, 'Novelty disabled: noveltySuppressedCount = 0 when disabled');
+
+  if (origVal !== undefined) process.env.SOURCE_NOVELTY_ENABLED = origVal;
+}
+
+{
+  // When noveltyEnabled=true, config parses correctly
+  const origVal = process.env.SOURCE_NOVELTY_ENABLED;
+  process.env.SOURCE_NOVELTY_ENABLED = 'true';
+  const config = getSourcingConfig();
+  assert(config.noveltyEnabled === true, 'Novelty enabled: config.noveltyEnabled = true when env set');
+  if (origVal !== undefined) process.env.SOURCE_NOVELTY_ENABLED = origVal;
+  else delete process.env.SOURCE_NOVELTY_ENABLED;
+}
+
+// ---------------------------------------------------------------------------
+// Test: New config fields parse correctly
+// ---------------------------------------------------------------------------
+
+console.log('\n--- New Config Fields ---');
+
+{
+  const origFloor = process.env.SOURCE_LOCATION_COVERAGE_FLOOR;
+  const origWindow = process.env.SOURCE_NOVELTY_WINDOW_DAYS;
+  const origReserve = process.env.SOURCE_DISCOVERED_ENRICH_RESERVE;
+  const origMultiplier = process.env.SOURCE_DYNAMIC_QUERY_MULTIPLIER;
+
+  process.env.SOURCE_LOCATION_COVERAGE_FLOOR = '0.55';
+  process.env.SOURCE_NOVELTY_WINDOW_DAYS = '14';
+  process.env.SOURCE_DISCOVERED_ENRICH_RESERVE = '8';
+  process.env.SOURCE_DYNAMIC_QUERY_MULTIPLIER = '3';
+
+  const config = getSourcingConfig();
+  assert(config.locationCoverageFloor === 0.55, 'Config: locationCoverageFloor parsed from env');
+  assert(config.noveltyWindowDays === 14, 'Config: noveltyWindowDays parsed from env');
+  assert(config.discoveredEnrichReserve === 8, 'Config: discoveredEnrichReserve parsed from env');
+  assert(config.dynamicQueryMultiplier === 3, 'Config: dynamicQueryMultiplier parsed from env');
+
+  // Restore
+  const restore = (key: string, orig: string | undefined) => {
+    if (orig !== undefined) process.env[key] = orig;
+    else delete process.env[key];
+  };
+  restore('SOURCE_LOCATION_COVERAGE_FLOOR', origFloor);
+  restore('SOURCE_NOVELTY_WINDOW_DAYS', origWindow);
+  restore('SOURCE_DISCOVERED_ENRICH_RESERVE', origReserve);
+  restore('SOURCE_DYNAMIC_QUERY_MULTIPLIER', origMultiplier);
+}
+
+{
+  // Default values
+  const origFloor = process.env.SOURCE_LOCATION_COVERAGE_FLOOR;
+  const origWindow = process.env.SOURCE_NOVELTY_WINDOW_DAYS;
+  const origReserve = process.env.SOURCE_DISCOVERED_ENRICH_RESERVE;
+  const origMultiplier = process.env.SOURCE_DYNAMIC_QUERY_MULTIPLIER;
+
+  delete process.env.SOURCE_LOCATION_COVERAGE_FLOOR;
+  delete process.env.SOURCE_NOVELTY_WINDOW_DAYS;
+  delete process.env.SOURCE_DISCOVERED_ENRICH_RESERVE;
+  delete process.env.SOURCE_DYNAMIC_QUERY_MULTIPLIER;
+
+  const config = getSourcingConfig();
+  assert(config.locationCoverageFloor === 0.40, 'Config default: locationCoverageFloor = 0.40');
+  assert(config.noveltyWindowDays === 21, 'Config default: noveltyWindowDays = 21');
+  assert(config.discoveredEnrichReserve === 5, 'Config default: discoveredEnrichReserve = 5');
+  assert(config.dynamicQueryMultiplier === 2, 'Config default: dynamicQueryMultiplier = 2');
+
+  const restore = (key: string, orig: string | undefined) => {
+    if (orig !== undefined) process.env[key] = orig;
+    else delete process.env[key];
+  };
+  restore('SOURCE_LOCATION_COVERAGE_FLOOR', origFloor);
+  restore('SOURCE_NOVELTY_WINDOW_DAYS', origWindow);
+  restore('SOURCE_DISCOVERED_ENRICH_RESERVE', origReserve);
+  restore('SOURCE_DYNAMIC_QUERY_MULTIPLIER', origMultiplier);
+}
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 

@@ -131,6 +131,13 @@ async function processSourcingJob(
           demotedStrictWithCityMatch: orchestratorResult.demotedStrictWithCityMatch,
           strictBeforeDemotion: orchestratorResult.strictBeforeDemotion,
           selectedSnapshotTrack: orchestratorResult.selectedSnapshotTrack,
+          locationCoverageTriggered: orchestratorResult.locationCoverageTriggered,
+          noveltySuppressedCount: orchestratorResult.noveltySuppressedCount,
+          noveltyWindowDays: orchestratorResult.noveltyWindowDays,
+          noveltyKey: orchestratorResult.noveltyKey,
+          noveltyHint: orchestratorResult.noveltyHint,
+          discoveredEnrichedCount: orchestratorResult.discoveredEnrichedCount,
+          dynamicQueryBudgetUsed: orchestratorResult.dynamicQueryBudgetUsed,
         }),
       },
     });
