@@ -107,7 +107,7 @@ export function getSourcingConfig(): SourcingConfig {
     countryGuardEnabled: process.env.SOURCE_COUNTRY_GUARD_ENABLED !== 'false',
     // Discovery query generation + adaptive budget
     queryGenMode,
-    queryGroqTimeoutMs: parseIntSafe(process.env.SOURCING_QUERY_GROQ_TIMEOUT_MS, 1500),
+    queryGroqTimeoutMs: parseIntSafe(process.env.SOURCING_QUERY_GROQ_TIMEOUT_MS, 2500),
     queryGroqMaxRetries: parseIntSafe(process.env.SOURCING_QUERY_GROQ_MAX_RETRIES, 1),
     adaptiveMinStrictAttempts: parseIntSafe(process.env.SOURCING_ADAPTIVE_MIN_STRICT_ATTEMPTS, 2),
     adaptiveStrictMinYield: clamp(parseFloatSafe(process.env.SOURCING_ADAPTIVE_STRICT_MIN_YIELD, 0.12), 0, 1),

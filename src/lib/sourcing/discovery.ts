@@ -187,6 +187,23 @@ function hasLinkedInSiteConstraint(query: string): boolean {
   return /\bsite:(?:[a-z]{2,3}\.|www\.)?linkedin\.com\/in\b\/?/i.test(query);
 }
 
+function normalizeLinkedInSiteToken(raw: string): string {
+  return raw.toLowerCase().replace(/\/+$/, '');
+}
+
+function stripLinkedInSiteConstraints(query: string): string {
+  return query
+    .replace(/\bsite:(?:[a-z0-9-]+\.)?linkedin\.com\/in\/?\b\/?/ig, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function enforceSingleLinkedInSiteConstraint(query: string, preferredSite: string): string {
+  const withoutLinkedInSite = stripLinkedInSiteConstraints(query);
+  const normalizedSite = normalizeLinkedInSiteToken(preferredSite);
+  return `${normalizedSite} ${withoutLinkedInSite}`.trim();
+}
+
 function toLinkedInCountrySubdomain(countryCode: string | null | undefined): string | null {
   if (!countryCode) return null;
   return LINKEDIN_SITE_SUBDOMAIN_BY_COUNTRY[countryCode.toUpperCase()] ?? null;
@@ -199,17 +216,15 @@ function applyCountryLinkedInSiteConstraint(
   const subdomain = toLinkedInCountrySubdomain(countryCode);
   if (!subdomain) return query;
   const targetSite = `site:${subdomain}.linkedin.com/in`;
-  const withoutLinkedInSite = query
-    .replace(/\bsite:(?:[a-z]{2,3}\.|www\.)?linkedin\.com\/in\b\/?\s*/ig, '')
-    .trim();
-  return `${targetSite} ${withoutLinkedInSite}`.trim();
+  return enforceSingleLinkedInSiteConstraint(query, targetSite);
 }
 
 function normalizeQuery(query: string): string | null {
   const compact = query.replace(/\s+/g, ' ').trim();
   if (!compact) return null;
+  const existingSite = compact.match(/\bsite:(?:[a-z0-9-]+\.)?linkedin\.com\/in\/?\b\/?/i)?.[0] ?? null;
   const siteScoped = hasLinkedInSiteConstraint(compact)
-    ? compact
+    ? enforceSingleLinkedInSiteConstraint(compact, existingSite ?? 'site:linkedin.com/in')
     : `site:linkedin.com/in ${compact}`;
   return siteScoped.slice(0, 240);
 }
@@ -429,8 +444,17 @@ async function buildHybridQueries(
       const formatReminder =
         '\nReturn ONLY valid JSON with keys "strictQueries" and "fallbackQueries".';
       let object: QueryPlanSchemaOutput | null = null;
+      const textGenerated = await withTimeout(
+        generateText({
+          model,
+          prompt: `${prompt}${formatReminder}`,
+        }),
+        config.queryGroqTimeoutMs,
+      );
+      object = coerceQueryPlanFromText(textGenerated.text);
 
-      try {
+      if (!object) {
+        // Fallback for providers that can satisfy schema mode better than plain text parsing.
         const generated = await withTimeout(
           generateObject({
             model,
@@ -440,18 +464,6 @@ async function buildHybridQueries(
           config.queryGroqTimeoutMs,
         );
         object = generated.object;
-      } catch (schemaError) {
-        // Some Groq responses are close-but-invalid for strict schema mode.
-        // Fallback to text generation and coerce supported key variants.
-        const textGenerated = await withTimeout(
-          generateText({
-            model,
-            prompt: `${prompt}${formatReminder}`,
-          }),
-          config.queryGroqTimeoutMs,
-        );
-        object = coerceQueryPlanFromText(textGenerated.text);
-        if (!object) throw schemaError;
       }
 
       if (!object) {

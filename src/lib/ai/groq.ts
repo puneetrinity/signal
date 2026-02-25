@@ -11,6 +11,21 @@ function isGroqModule(mod: unknown): mod is { createGroq: GroqFactory } {
 }
 
 const DEFAULT_GROQ_MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct';
+let groqFactoryPromise: Promise<GroqFactory> | null = null;
+
+async function getGroqFactory(): Promise<GroqFactory> {
+  if (!groqFactoryPromise) {
+    groqFactoryPromise = (async () => {
+      const moduleName = '@ai-sdk/groq';
+      const groqSdkModule = await import(/* webpackIgnore: true */ moduleName);
+      if (!isGroqModule(groqSdkModule)) {
+        throw new Error('Invalid @ai-sdk/groq module shape');
+      }
+      return groqSdkModule.createGroq;
+    })();
+  }
+  return groqFactoryPromise;
+}
 
 /**
  * Dynamically load and create a Groq model.
@@ -23,12 +38,8 @@ export async function createGroqModel(
   apiKey: string,
   modelOverride?: string,
 ): Promise<{ model: GenerateObjectModel; modelName: string }> {
-  const moduleName = '@ai-sdk/groq';
-  const groqSdkModule = await import(/* webpackIgnore: true */ moduleName);
-  if (!isGroqModule(groqSdkModule)) {
-    throw new Error('Invalid @ai-sdk/groq module shape');
-  }
-  const groq = groqSdkModule.createGroq({ apiKey });
+  const createGroq = await getGroqFactory();
+  const groq = createGroq({ apiKey });
   const modelName = modelOverride || process.env.GROQ_MODEL || DEFAULT_GROQ_MODEL;
   return { model: groq(modelName), modelName };
 }
