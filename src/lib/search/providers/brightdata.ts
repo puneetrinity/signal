@@ -9,7 +9,12 @@
  */
 
 import type { ProfileSummary } from '@/types/linkedin';
-import type { SearchProvider, RawSearchResult, SearchProviderType } from './types';
+import type {
+  SearchGeoContext,
+  SearchProvider,
+  RawSearchResult,
+  SearchProviderType,
+} from './types';
 import {
   searchLinkedInProfiles as brightdataSearchLinkedIn,
   searchGoogle,
@@ -33,7 +38,8 @@ export const brightdataProvider: SearchProvider = {
   async searchLinkedInProfiles(
     query: string,
     maxResults: number = 10,
-    countryCode?: string | null
+    countryCode?: string | null,
+    _geo?: SearchGeoContext
   ): Promise<ProfileSummary[]> {
     console.log('[BrightData] Searching for LinkedIn profiles:', {
       query,

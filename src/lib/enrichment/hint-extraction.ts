@@ -10,6 +10,7 @@
 
 import type { HintWithConfidence, EnrichedHints, HintSource } from './bridge-types';
 import { isNoisyHint, isLikelyLocationHint as isLikelyLocation } from '@/lib/sourcing/hint-sanitizer';
+import { assessLocationCountryConsistency, extractSerpSignals } from '@/lib/search/serp-signals';
 
 /**
  * Extracted hints from LinkedIn SERP data
@@ -667,6 +668,27 @@ export function mergeHintsFromSerpMeta(
   }
   if (ab?.snippet && ab.snippet.length >= 3 && 0.90 > result.headlineHint.confidence) {
     result.headlineHint = { value: ab.snippet, confidence: 0.90, source: 'serp_answer_box' };
+  }
+
+  // Use LinkedIn locale from SERP metadata as a weak geo cross-check.
+  // Matching locale-country slightly boosts confidence; mismatch penalizes.
+  if (result.locationHint.value) {
+    const serpSignals = extractSerpSignals(serpMeta);
+    const consistency = assessLocationCountryConsistency(
+      result.locationHint.value,
+      serpSignals.localeCountryCode,
+    );
+    if (consistency === 'match') {
+      result.locationHint = {
+        ...result.locationHint,
+        confidence: Math.min(0.99, result.locationHint.confidence + 0.05),
+      };
+    } else if (consistency === 'mismatch') {
+      result.locationHint = {
+        ...result.locationHint,
+        confidence: Math.max(0.10, result.locationHint.confidence - 0.20),
+      };
+    }
   }
 
   return result;

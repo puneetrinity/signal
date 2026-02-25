@@ -18,6 +18,7 @@ import {
   extractCompanyAlignment,
   extractSeniorityValidation,
   extractFreshness,
+  extractSerpContext,
   extractContradictions,
 } from './extractors';
 import { scoreNonTech } from './scoring';
@@ -41,8 +42,10 @@ export async function nonTechEnrichmentNode(
       select: {
         companyHint: true,
         headlineHint: true,
+        locationHint: true,
         searchTitle: true,
         searchSnippet: true,
+        searchMeta: true,
         lastEnrichedAt: true,
       },
     });
@@ -86,12 +89,14 @@ export async function nonTechEnrichmentNode(
     const companyAlignment = extractCompanyAlignment(candidate, identities);
     const seniorityValidation = extractSeniorityValidation(candidate);
     const freshness = extractFreshness(candidate, techSnapshot, config);
+    const serpContext = extractSerpContext(candidate);
     const contradictions = extractContradictions(identities);
 
     const signals: NonTechSignals = {
       companyAlignment,
       seniorityValidation,
       freshness,
+      serpContext,
       contradictions,
     };
 
@@ -119,7 +124,7 @@ export async function nonTechEnrichmentNode(
         roleType: null,
         seniorityBand: seniorityValidation.normalizedBand,
         location: null,
-        activityRecencyDays: freshness.ageDays ?? 0,
+        activityRecencyDays: freshness.ageDays,
         computedAt: now,
         staleAfter,
         sourceSessionId: state.sessionId,
@@ -137,7 +142,7 @@ export async function nonTechEnrichmentNode(
       },
       update: {
         seniorityBand: seniorityValidation.normalizedBand,
-        activityRecencyDays: freshness.ageDays ?? 0,
+        activityRecencyDays: freshness.ageDays,
         computedAt: now,
         staleAfter,
         sourceSessionId: state.sessionId,

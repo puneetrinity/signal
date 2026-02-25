@@ -37,6 +37,24 @@ export interface SearchProviderConfig {
 }
 
 /**
+ * Optional geo-targeting context forwarded to providers.
+ */
+export interface SearchGeoContext {
+  /**
+   * Optional 2-letter country code (ISO-3166 alpha-2), e.g. "IN", "US".
+   */
+  countryCode?: string | null;
+  /**
+   * Optional free-form location text, e.g. "Hyderabad, Telangana, India".
+   */
+  locationText?: string | null;
+  /**
+   * Optional Serper-compatible time filter, e.g. "qdr:y2" (last 2 years).
+   */
+  tbs?: string | null;
+}
+
+/**
  * Search provider interface
  *
  * All providers must implement this interface to be interchangeable.
@@ -58,7 +76,8 @@ export interface SearchProvider {
   searchLinkedInProfiles(
     query: string,
     maxResults?: number,
-    countryCode?: string | null
+    countryCode?: string | null,
+    geo?: SearchGeoContext
   ): Promise<ProfileSummary[]>;
 
   /**

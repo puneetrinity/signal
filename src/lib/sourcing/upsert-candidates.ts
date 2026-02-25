@@ -1,6 +1,11 @@
 import { prisma } from '@/lib/prisma';
 import { extractAllHints, extractCompanyFromHeadline } from '@/lib/enrichment/hint-extraction';
-import { normalizeHint, shouldReplaceHint, shouldReplaceLocationHint } from './hint-sanitizer';
+import {
+  normalizeHint,
+  shouldReplaceHint,
+  shouldReplaceLocationHint,
+  shouldReplaceCompanyHint,
+} from './hint-sanitizer';
 import type { ProfileSummary } from '@/types/linkedin';
 import type { Prisma } from '@prisma/client';
 
@@ -21,6 +26,7 @@ export async function upsertDiscoveredCandidates(
   tenantId: string,
   profiles: ProfileSummary[],
   searchQuery: string,
+  searchProvider: string,
 ): Promise<Map<string, string>> {
   const candidateMap = new Map<string, string>();
 
@@ -54,12 +60,13 @@ export async function upsertDiscoveredCandidates(
         searchTitle: result.title,
         searchSnippet: result.snippet,
         searchMeta: (result.providerMeta ?? undefined) as Prisma.InputJsonValue | undefined,
+        searchProvider,
         updatedAt: new Date(),
       };
       if (shouldReplaceHint(existing?.nameHint ?? null, nameHint)) updateData.nameHint = nameHint;
       if (shouldReplaceHint(existing?.headlineHint ?? null, headlineHint)) updateData.headlineHint = headlineHint;
       if (shouldReplaceLocationHint(existing?.locationHint ?? null, locationHint)) updateData.locationHint = locationHint;
-      if (shouldReplaceHint(existing?.companyHint ?? null, companyHint)) updateData.companyHint = companyHint;
+      if (shouldReplaceCompanyHint(existing?.companyHint ?? null, companyHint)) updateData.companyHint = companyHint;
 
       const candidate = await prisma.candidate.upsert({
         where: { tenantId_linkedinId: { tenantId, linkedinId } },
@@ -77,7 +84,7 @@ export async function upsertDiscoveredCandidates(
           companyHint,
           captureSource: 'sourcing',
           searchQuery,
-          searchProvider: 'serper',
+          searchProvider,
         },
       });
 

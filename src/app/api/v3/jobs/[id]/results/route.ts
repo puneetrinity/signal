@@ -12,6 +12,30 @@ import { prisma } from '@/lib/prisma';
 import { summarizeIdentitySignals } from '@/lib/sourcing/identity-summary';
 import { isNonTechShadow } from '@/lib/enrichment/config';
 
+function safeObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object'
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function safeOptionalString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+function readSearchSignals(searchMeta: unknown): {
+  serpDate: string | null;
+  linkedinHost: string | null;
+  linkedinLocale: string | null;
+} {
+  const metaObj = safeObject(searchMeta);
+  const serperObj = safeObject(metaObj?.serper);
+  return {
+    serpDate: safeOptionalString(serperObj?.resultDate),
+    linkedinHost: safeOptionalString(serperObj?.linkedinHost),
+    linkedinLocale: safeOptionalString(serperObj?.linkedinLocale),
+  };
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -47,6 +71,8 @@ export async function GET(
               locationHint: true,
               companyHint: true,
               searchSnippet: true,
+              searchMeta: true,
+              searchProvider: true,
               enrichmentStatus: true,
               confidenceScore: true,
               lastEnrichedAt: true,
@@ -140,6 +166,7 @@ export async function GET(
       identityByCandidateId.get(sc.candidateId) ?? [],
       confirmedByCandidateId.get(sc.candidateId) ?? [],
     );
+    const searchSignals = readSearchSignals(sc.candidate.searchMeta);
 
     let snapshotAgeDays: number | null = null;
     let staleServed = false;
@@ -238,6 +265,9 @@ export async function GET(
         locationHint: sc.candidate.locationHint,
         companyHint: sc.candidate.companyHint,
         searchSnippet: sc.candidate.searchSnippet ?? null,
+        searchMeta: sc.candidate.searchMeta ?? null,
+        searchProvider: sc.candidate.searchProvider ?? null,
+        searchSignals,
         enrichmentStatus: sc.candidate.enrichmentStatus,
         confidenceScore: sc.candidate.confidenceScore,
         lastEnrichedAt: sc.candidate.lastEnrichedAt,
@@ -277,6 +307,10 @@ export async function GET(
     expansionReason: (diag.expansionReason as string) ?? null,
     requestedLocation: (diag.requestedLocation as string) ?? null,
     strictDemotedCount: (diag.strictDemotedCount as number) ?? 0,
+    strictRescuedCount: (diag.strictRescuedCount as number) ?? 0,
+    strictRescueApplied: (diag.strictRescueApplied as boolean) ?? false,
+    strictRescueMinFitScoreUsed: (diag.strictRescueMinFitScoreUsed as number) ?? null,
+    countryGuardFilteredCount: (diag.countryGuardFilteredCount as number) ?? 0,
     locationMatchCounts: (diag.locationMatchCounts as Record<string, number>) ?? null,
     demotedStrictWithCityMatch: (diag.demotedStrictWithCityMatch as number) ?? 0,
     strictBeforeDemotion: (diag.strictBeforeDemotion as number) ?? 0,

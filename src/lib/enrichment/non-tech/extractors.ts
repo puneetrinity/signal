@@ -4,12 +4,15 @@
 
 import { normalizeSeniorityFromText, type SeniorityBand } from '@/lib/taxonomy/seniority';
 import type { NonTechConfig } from '../config';
+import { assessLocationCountryConsistency, extractSerpSignals } from '@/lib/search/serp-signals';
 
 interface CandidateData {
   companyHint: string | null;
   headlineHint: string | null;
+  locationHint: string | null;
   searchTitle: string | null;
   searchSnippet: string | null;
+  searchMeta: unknown;
   lastEnrichedAt: Date | null;
 }
 
@@ -131,7 +134,9 @@ export function extractFreshness(
 } {
   const timestamps: number[] = [];
   if (candidate.lastEnrichedAt) timestamps.push(candidate.lastEnrichedAt.getTime());
-  if (snapshot) timestamps.push(snapshot.computedAt.getTime());
+  const serpSignals = extractSerpSignals(candidate.searchMeta);
+  if (serpSignals.resultDate) timestamps.push(serpSignals.resultDate.getTime());
+  if (timestamps.length === 0 && snapshot) timestamps.push(snapshot.computedAt.getTime());
 
   if (timestamps.length === 0) {
     return { lastValidatedAt: null, ageDays: null, stale: true };
@@ -144,6 +149,28 @@ export function extractFreshness(
     lastValidatedAt: new Date(mostRecent).toISOString(),
     ageDays,
     stale: ageDays > config.maxSourceAgeDays,
+  };
+}
+
+export function extractSerpContext(
+  candidate: CandidateData,
+): {
+  resultDate: string | null;
+  ageDays: number | null;
+  linkedinHost: string | null;
+  linkedinLocale: string | null;
+  locationConsistency: 'match' | 'mismatch' | 'unknown';
+} {
+  const signals = extractSerpSignals(candidate.searchMeta);
+  return {
+    resultDate: signals.resultDateRaw,
+    ageDays: signals.resultDateDays,
+    linkedinHost: signals.linkedinHost,
+    linkedinLocale: signals.linkedinLocale,
+    locationConsistency: assessLocationCountryConsistency(
+      candidate.locationHint,
+      signals.localeCountryCode,
+    ),
   };
 }
 

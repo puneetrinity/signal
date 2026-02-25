@@ -11,8 +11,14 @@
  */
 
 import type { ProfileSummary } from '@/types/linkedin';
-import type { SearchProvider, RawSearchResult, SearchProviderType } from './types';
+import type {
+  SearchGeoContext,
+  SearchProvider,
+  RawSearchResult,
+  SearchProviderType,
+} from './types';
 import { getProviderLimiter } from './limit';
+import { extractLocationFromSnippet } from '@/lib/enrichment/hint-extraction';
 
 interface BraveWebResult {
   url: string;
@@ -200,7 +206,7 @@ function extractProfileSummary(result: BraveWebResult): ProfileSummary {
   const headline = headlineCandidate || undefined;
 
   // Extract location from description
-  const location = extractLocationFromSnippet(result.description || '');
+  const location = extractLocationFromSnippet(result.description || '') ?? undefined;
 
   return {
     linkedinUrl,
@@ -214,28 +220,6 @@ function extractProfileSummary(result: BraveWebResult): ProfileSummary {
 }
 
 /**
- * Extract location from search snippet
- */
-function extractLocationFromSnippet(snippet: string): string | undefined {
-  // Try "Location: X" pattern
-  const locationMatch = snippet.match(/Location:\s*([^·]+)/i);
-  if (locationMatch?.[1]) {
-    return locationMatch[1].trim();
-  }
-
-  // Try last segment after " · "
-  const parts = snippet.split(' · ');
-  if (parts.length > 1) {
-    const candidate = parts[parts.length - 1].trim();
-    if (candidate && candidate.length <= 80) {
-      return candidate;
-    }
-  }
-
-  return undefined;
-}
-
-/**
  * Brave Search API Provider Implementation
  */
 export const braveProvider: SearchProvider = {
@@ -244,7 +228,8 @@ export const braveProvider: SearchProvider = {
   async searchLinkedInProfiles(
     query: string,
     maxResults: number = 10,
-    countryCode?: string | null
+    countryCode?: string | null,
+    _geo?: SearchGeoContext
   ): Promise<ProfileSummary[]> {
     console.log('[Brave] Searching for LinkedIn profiles:', { query, maxResults, countryCode });
 

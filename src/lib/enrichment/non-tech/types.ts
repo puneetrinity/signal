@@ -16,6 +16,13 @@ export interface NonTechSignals {
     ageDays: number | null;
     stale: boolean;
   };
+  serpContext: {
+    resultDate: string | null;
+    ageDays: number | null;
+    linkedinHost: string | null;
+    linkedinLocale: string | null;
+    locationConsistency: 'match' | 'mismatch' | 'unknown';
+  };
   contradictions: {
     count: number;
     details: string[];

@@ -8,6 +8,7 @@ import { prisma } from '@/lib/prisma';
 import { createLogger } from '@/lib/logger';
 import { normalizeSeniorityFromText } from '@/lib/taxonomy/seniority';
 import { getSourcingConfig } from '@/lib/sourcing/config';
+import { extractSerpSignals } from '@/lib/search/serp-signals';
 import type { EnrichmentState, PartialEnrichmentState } from './types';
 
 const log = createLogger('SnapshotNode');
@@ -33,6 +34,8 @@ export async function computeSnapshotNode(
 
     const hints = state.hints;
     const seniorityBand = normalizeSeniorityFromText(hints?.headlineHint);
+    const serpSignals = extractSerpSignals(hints?.serpMeta);
+    const activityRecencyDays = serpSignals.resultDateDays;
 
     // Build fingerprint from summaryMeta or identity keys
     const meta = state.summaryMeta as Record<string, unknown> | null;
@@ -62,7 +65,7 @@ export async function computeSnapshotNode(
         roleType: hints?.roleType ?? null,
         seniorityBand,
         location: hints?.locationHint ?? null,
-        activityRecencyDays: 0,
+        activityRecencyDays,
         computedAt: now,
         staleAfter,
         sourceSessionId: state.sessionId,
@@ -73,7 +76,7 @@ export async function computeSnapshotNode(
         roleType: hints?.roleType ?? null,
         seniorityBand,
         location: hints?.locationHint ?? null,
-        activityRecencyDays: 0,
+        activityRecencyDays,
         computedAt: now,
         staleAfter,
         sourceSessionId: state.sessionId,
@@ -82,7 +85,12 @@ export async function computeSnapshotNode(
     });
 
     log.info(
-      { candidateId: state.candidateId, sessionId: state.sessionId, skillCount: skills.length },
+      {
+        candidateId: state.candidateId,
+        sessionId: state.sessionId,
+        skillCount: skills.length,
+        activityRecencyDays,
+      },
       'Snapshot computed',
     );
   } catch (error) {

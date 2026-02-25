@@ -8,7 +8,12 @@
  */
 
 import type { ProfileSummary } from '@/types/linkedin';
-import type { RawSearchResult, SearchProvider, SearchProviderType } from './types';
+import type {
+  RawSearchResult,
+  SearchGeoContext,
+  SearchProvider,
+  SearchProviderType,
+} from './types';
 import { getProviderLimiter } from './limit';
 import { extractLocationFromSnippet } from '@/lib/enrichment/hint-extraction';
 
@@ -17,6 +22,7 @@ interface SerperOrganicResult {
   link?: string;
   snippet?: string;
   position?: number;
+  date?: string;
 }
 
 interface SerperKnowledgeGraph {
@@ -64,7 +70,7 @@ function sleep(ms: number) {
 
 async function executeSerperSearch(
   query: string,
-  options: { num: number; page: number }
+  options: { num: number; page: number; gl?: string; location?: string; tbs?: string }
 ): Promise<SerperResponse> {
   const config = getConfig();
   if (!config.apiKey) {
@@ -89,6 +95,9 @@ async function executeSerperSearch(
           q: query,
           num: options.num,
           page: options.page,
+          ...(options.gl ? { gl: options.gl } : {}),
+          ...(options.location ? { location: options.location } : {}),
+          ...(options.tbs ? { tbs: options.tbs } : {}),
         }),
         signal: controller.signal,
       });
@@ -173,9 +182,49 @@ function buildProviderMeta(response: SerperResponse): Record<string, unknown> | 
   return Object.keys(meta).length > 0 ? meta : undefined;
 }
 
+function normalizeCountryCode(countryCode?: string | null): string | undefined {
+  if (!countryCode) return undefined;
+  const trimmed = countryCode.trim().toLowerCase();
+  if (!/^[a-z]{2}$/.test(trimmed)) return undefined;
+  return trimmed;
+}
+
+function normalizeLocationText(locationText?: string | null): string | undefined {
+  if (!locationText) return undefined;
+  const cleaned = locationText.replace(/\s+/g, ' ').trim();
+  if (!cleaned) return undefined;
+  return cleaned.slice(0, 120);
+}
+
+function normalizeSerperTbs(tbs?: string | null): string | undefined {
+  if (!tbs) return undefined;
+  const trimmed = tbs.trim().toLowerCase();
+  if (!/^qdr:[dwmy]\d*$/i.test(trimmed)) return undefined;
+  return trimmed;
+}
+
+function extractLinkedInHost(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname.toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+function extractLinkedInLocale(hostname?: string): string | undefined {
+  if (!hostname) return undefined;
+  if (hostname === 'linkedin.com' || hostname === 'www.linkedin.com') return undefined;
+  const match = hostname.match(/^([a-z]{2,3})\.linkedin\.com$/i);
+  if (!match) return undefined;
+  return match[1].toLowerCase();
+}
+
 function extractProfileSummary(result: SerperOrganicResult, providerMeta?: Record<string, unknown>): ProfileSummary {
   const url = normalizeLinkedInUrl(result.link || '');
   const linkedinId = extractLinkedInId(url) || url;
+  const linkedinHost = extractLinkedInHost(result.link || '');
+  const linkedinLocale = extractLinkedInLocale(linkedinHost);
 
   const title = result.title || '';
   const snippet = result.snippet || '';
@@ -191,6 +240,18 @@ function extractProfileSummary(result: SerperOrganicResult, providerMeta?: Recor
     .trim();
   const headline = headlineCandidate || undefined;
   const location = extractLocationFromSnippet(snippet) ?? undefined;
+  const perResultSerperMeta: Record<string, unknown> = {
+    ...(result.date ? { resultDate: result.date } : {}),
+    ...(linkedinHost ? { linkedinHost } : {}),
+    ...(linkedinLocale ? { linkedinLocale } : {}),
+  };
+  const mergedProviderMeta = {
+    ...(providerMeta ?? {}),
+    ...(Object.keys(perResultSerperMeta).length > 0 ? { serper: perResultSerperMeta } : {}),
+  };
+  const finalProviderMeta = Object.keys(mergedProviderMeta).length > 0
+    ? mergedProviderMeta
+    : undefined;
 
   return {
     linkedinUrl: url,
@@ -200,7 +261,7 @@ function extractProfileSummary(result: SerperOrganicResult, providerMeta?: Recor
     name,
     headline,
     location,
-    ...(providerMeta ? { providerMeta } : {}),
+    ...(finalProviderMeta ? { providerMeta: finalProviderMeta } : {}),
   };
 }
 
@@ -210,9 +271,13 @@ export const serperProvider: SearchProvider = {
   async searchLinkedInProfiles(
     query: string,
     maxResults: number = 10,
-    _countryCode?: string | null
+    countryCode?: string | null,
+    geo?: SearchGeoContext
   ): Promise<ProfileSummary[]> {
-    console.log('[Serper] Searching for LinkedIn profiles:', { query, maxResults });
+    const gl = normalizeCountryCode(geo?.countryCode ?? countryCode);
+    const location = normalizeLocationText(geo?.locationText);
+    const tbs = normalizeSerperTbs(geo?.tbs);
+    console.log('[Serper] Searching for LinkedIn profiles:', { query, maxResults, gl, location, tbs });
 
     if (!isConfigured()) {
       console.warn('[Serper] API key not configured, returning empty results');
@@ -238,7 +303,13 @@ export const serperProvider: SearchProvider = {
       let page = 1;
 
       while (page <= maxPages && summaries.length < maxResults) {
-        const response = await executeSerperSearch(scopedQuery, { num: numPerPage, page });
+        const response = await executeSerperSearch(scopedQuery, {
+          num: numPerPage,
+          page,
+          gl,
+          location,
+          tbs,
+        });
         const organic = response.organic ?? [];
         if (organic.length === 0) break;
 

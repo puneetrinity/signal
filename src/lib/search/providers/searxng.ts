@@ -11,7 +11,13 @@
  */
 
 import type { ProfileSummary } from '@/types/linkedin';
-import type { SearchProvider, RawSearchResult, SearchProviderType } from './types';
+import type {
+  SearchGeoContext,
+  SearchProvider,
+  RawSearchResult,
+  SearchProviderType,
+} from './types';
+import { extractLocationFromSnippet } from '@/lib/enrichment/hint-extraction';
 
 interface SearXNGResult {
   url: string;
@@ -150,7 +156,7 @@ function extractProfileSummary(result: SearXNGResult): ProfileSummary {
   const headline = headlineCandidate || undefined;
 
   // Extract location from snippet
-  const location = extractLocationFromSnippet(result.content || '');
+  const location = extractLocationFromSnippet(result.content || '') ?? undefined;
 
   return {
     linkedinUrl,
@@ -164,28 +170,6 @@ function extractProfileSummary(result: SearXNGResult): ProfileSummary {
 }
 
 /**
- * Extract location from search snippet
- */
-function extractLocationFromSnippet(snippet: string): string | undefined {
-  // Try "Location: X" pattern
-  const locationMatch = snippet.match(/Location:\s*([^·]+)/i);
-  if (locationMatch?.[1]) {
-    return locationMatch[1].trim();
-  }
-
-  // Try last segment after " · "
-  const parts = snippet.split(' · ');
-  if (parts.length > 1) {
-    const candidate = parts[parts.length - 1].trim();
-    if (candidate && candidate.length <= 80) {
-      return candidate;
-    }
-  }
-
-  return undefined;
-}
-
-/**
  * SearXNG Search Provider Implementation
  */
 export const searxngProvider: SearchProvider = {
@@ -194,7 +178,8 @@ export const searxngProvider: SearchProvider = {
   async searchLinkedInProfiles(
     query: string,
     maxResults: number = 10,
-    countryCode?: string | null
+    countryCode?: string | null,
+    _geo?: SearchGeoContext
   ): Promise<ProfileSummary[]> {
     console.log('[SearXNG] Searching for LinkedIn profiles:', { query, maxResults, countryCode });
 

@@ -26,6 +26,25 @@ const SKILL_ALIASES: Record<string, string> = {
   'dot net': '.net',
   'csharp': 'c#',
   'c sharp': 'c#',
+  'micro-service': 'microservices',
+  'micro services': 'microservices',
+  'event driven': 'event-driven architecture',
+  'event-driven': 'event-driven architecture',
+  'event streaming': 'event-driven architecture',
+  'event driven architecture': 'event-driven architecture',
+  'distributed system': 'distributed systems',
+  'distributed architectures': 'distributed systems',
+  'message queue': 'message queues',
+  'msg queue': 'message queues',
+  'pub/sub': 'message queues',
+  'pubsub': 'message queues',
+};
+
+const SKILL_CONCEPT_SURFACE_FORMS: Record<string, string[]> = {
+  'microservices': ['microservices', 'microservice', 'service oriented', 'soa'],
+  'event-driven architecture': ['event-driven architecture', 'event driven architecture', 'event-driven', 'event driven', 'event streaming'],
+  'distributed systems': ['distributed systems', 'distributed system', 'distributed architecture', 'scalable systems'],
+  'message queues': ['message queues', 'message queue', 'pubsub', 'pub sub'],
 };
 
 export function canonicalizeSkill(skill: string): string {
@@ -43,7 +62,33 @@ export function getSkillSurfaceForms(skill: string): string[] {
   for (const [alias, target] of Object.entries(SKILL_ALIASES)) {
     if (target === canonical) forms.add(alias);
   }
+  for (const form of SKILL_CONCEPT_SURFACE_FORMS[canonical] ?? []) {
+    forms.add(form);
+  }
   return [...forms];
+}
+
+export function getDiscoverySkillTerms(skills: string[], maxTerms: number = 6): string[] {
+  const terms: string[] = [];
+  const seen = new Set<string>();
+
+  for (const raw of skills) {
+    if (terms.length >= maxTerms) break;
+    const canonical = canonicalizeSkill(raw);
+    if (!seen.has(canonical)) {
+      terms.push(canonical);
+      seen.add(canonical);
+    }
+
+    const conceptForms = (SKILL_CONCEPT_SURFACE_FORMS[canonical] ?? [])
+      .filter((form) => !seen.has(form));
+    if (conceptForms.length > 0 && terms.length < maxTerms) {
+      terms.push(conceptForms[0]);
+      seen.add(conceptForms[0]);
+    }
+  }
+
+  return terms.slice(0, maxTerms);
 }
 
 export interface JdDigestParsed {

@@ -45,6 +45,10 @@ const BIO_REJECT_PATTERNS = [
   /\b(seeking|hiring|looking|open to)\b/i,
   /\b(proficient|expertise|responsible)\b/i,
   /\bprofessional community\b|\bconnections?\b|\bfollowers?\b/i,
+  /\bcurrently (working|at)\b/i,
+  /\bopen to work\b/i,
+  /\bskills?\b/i,
+  /\bcertified\b/i,
 ];
 
 const KNOWN_CITIES = new Set([
@@ -97,6 +101,12 @@ function containsGeoToken(lower: string, original: string): boolean {
 export function isLikelyLocationHint(value: string): boolean {
   if (!value || value.length < 2 || value.length > 60) return false;
   if (isNoisyHint(value)) return false;
+  if (/[|]/.test(value)) return false;
+  if (/^\s*(experience|education|skills?)\s*:/i.test(value)) return false;
+  if (/(·|•).*(experience|education|skills?|connections?)/i.test(value)) return false;
+  if ((value.match(/,/g) || []).length > 2) return false;
+  if (value.split(/\s+/).filter(Boolean).length > 7) return false;
+  if (/\d{2,}/.test(value) && !/\b\d{5,6}\b/.test(value)) return false;
 
   for (const pattern of BIO_REJECT_PATTERNS) {
     if (pattern.test(value)) return false;
@@ -152,4 +162,72 @@ export function shouldReplaceLocationHint(existing: string | null, incoming: str
   const incomingScore = locationHintQualityScore(normalizedIncoming);
   if (incomingScore === 0) return false;
   return incomingScore > locationHintQualityScore(existing);
+}
+
+// ---------------------------------------------------------------------------
+// Company-specific validators
+// ---------------------------------------------------------------------------
+
+const COMPANY_REJECT_PATTERNS = [
+  /\b(linkedin|profile|connections?|followers?)\b/i,
+  /\b(experience|education|university|college|degree|certified)\b/i,
+  /\b(open to work|seeking|hiring|looking for)\b/i,
+  /\b(engineer|developer|manager|director|analyst|consultant|architect|specialist|coordinator)\b/i,
+  /\b(currently|responsible|proficient|expertise)\b/i,
+  /https?:\/\//i,
+];
+
+const COMPANY_SUFFIXES = [
+  'inc',
+  'llc',
+  'ltd',
+  'limited',
+  'corp',
+  'corporation',
+  'technologies',
+  'technology',
+  'systems',
+  'solutions',
+  'labs',
+  'software',
+  'services',
+  'group',
+  'private limited',
+];
+
+export function isLikelyCompanyHint(value: string): boolean {
+  if (!value || value.length < 2 || value.length > 70) return false;
+  if (isNoisyHint(value)) return false;
+  if (/[|]/.test(value)) return false;
+  if (/[@]/.test(value)) return false;
+  if ((value.match(/[,\-]/g) || []).length > 2) return false;
+  if (value.split(/\s+/).filter(Boolean).length > 6) return false;
+  if (/^\s*(experience|education|skills?)\s*:/i.test(value)) return false;
+
+  for (const pattern of COMPANY_REJECT_PATTERNS) {
+    if (pattern.test(value)) return false;
+  }
+
+  return true;
+}
+
+export function companyHintQualityScore(value: string | null): number {
+  if (!value) return 0;
+  if (!isLikelyCompanyHint(value)) return 0;
+
+  const lower = value.toLowerCase();
+  const hasSuffix = COMPANY_SUFFIXES.some((suffix) => lower.includes(suffix));
+  if (hasSuffix) return 3;
+
+  const wordCount = value.split(/\s+/).filter(Boolean).length;
+  if (wordCount <= 2) return 2;
+  return 1;
+}
+
+export function shouldReplaceCompanyHint(existing: string | null, incoming: string | undefined): boolean {
+  const normalizedIncoming = normalizeHint(incoming);
+  if (!normalizedIncoming) return false;
+  const incomingScore = companyHintQualityScore(normalizedIncoming);
+  if (incomingScore === 0) return false;
+  return incomingScore > companyHintQualityScore(existing);
 }

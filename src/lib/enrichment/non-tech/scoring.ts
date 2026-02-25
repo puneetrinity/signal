@@ -14,6 +14,24 @@
 import type { NonTechConfig } from '../config';
 import type { NonTechSignals, NonTechScore, NonTechGateResults } from './types';
 
+function computeSerpContextScore(
+  signals: NonTechSignals,
+  maxSourceAgeDays: number,
+): number {
+  let score = 0;
+  const serpAgeDays = signals.serpContext.ageDays;
+  if (serpAgeDays !== null) {
+    const freshnessWindow = Math.max(1, maxSourceAgeDays);
+    const freshnessRatio = Math.max(0, 1 - serpAgeDays / freshnessWindow);
+    score += freshnessRatio * 0.07;
+  }
+
+  if (signals.serpContext.locationConsistency === 'match') score += 0.03;
+  else if (signals.serpContext.locationConsistency === 'mismatch') score -= 0.03;
+
+  return Math.max(0, Math.min(0.10, score));
+}
+
 function computeOverallScore(
   signals: NonTechSignals,
   maxSourceAgeDays: number,
@@ -40,7 +58,11 @@ function computeOverallScore(
     score += 0.20;
   }
 
-  return Math.round(score * 100) / 100;
+  // Lightweight SERP-stage signal: recency + locale/location consistency.
+  score += computeSerpContextScore(signals, maxSourceAgeDays);
+
+  const bounded = Math.max(0, Math.min(1, score));
+  return Math.round(bounded * 100) / 100;
 }
 
 export function scoreNonTech(

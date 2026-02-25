@@ -27,6 +27,12 @@ import {
 } from '@/lib/rate-limit';
 import { logSearch } from '@/lib/audit';
 import { withAuth, requireTenantId } from '@/lib/auth';
+import {
+  normalizeHint,
+  shouldReplaceHint,
+  shouldReplaceLocationHint,
+  shouldReplaceCompanyHint,
+} from '@/lib/sourcing/hint-sanitizer';
 
 /**
  * Search result with candidate ID for API response
@@ -151,30 +157,40 @@ async function upsertCandidates(
     }
 
     const extractedHints = extractAllHints(linkedinId, result.title, result.snippet);
-    const nameHint = result.name ?? extractedHints.nameHint ?? undefined;
-    const headlineHint = result.headline ?? extractedHints.headlineHint ?? undefined;
-    const locationHint = result.location ?? extractedHints.locationHint ?? undefined;
-    let companyHint = extractedHints.companyHint ?? undefined;
+    const nameHint = normalizeHint(result.name ?? extractedHints.nameHint ?? undefined) ?? undefined;
+    const headlineHint = normalizeHint(result.headline ?? extractedHints.headlineHint ?? undefined) ?? undefined;
+    const locationHint = normalizeHint(result.location ?? extractedHints.locationHint ?? undefined) ?? undefined;
+    let companyHint = normalizeHint(extractedHints.companyHint ?? undefined) ?? undefined;
     if (!companyHint && headlineHint) {
-      companyHint = extractCompanyFromHeadline(headlineHint) ?? undefined;
+      companyHint = normalizeHint(extractCompanyFromHeadline(headlineHint) ?? undefined) ?? undefined;
     }
 
     try {
+      const existing = await prisma.candidate.findUnique({
+        where: { tenantId_linkedinId: { tenantId, linkedinId } },
+        select: {
+          nameHint: true,
+          headlineHint: true,
+          locationHint: true,
+          companyHint: true,
+        },
+      });
+
+      const updateData: Prisma.CandidateUpdateInput = {
+        searchTitle: result.title,
+        searchSnippet: result.snippet,
+        searchMeta: (result.providerMeta ?? undefined) as Prisma.InputJsonValue | undefined,
+        searchProvider: provider,
+        updatedAt: new Date(),
+      };
+      if (shouldReplaceHint(existing?.nameHint ?? null, nameHint)) updateData.nameHint = nameHint;
+      if (shouldReplaceHint(existing?.headlineHint ?? null, headlineHint)) updateData.headlineHint = headlineHint;
+      if (shouldReplaceLocationHint(existing?.locationHint ?? null, locationHint)) updateData.locationHint = locationHint;
+      if (shouldReplaceCompanyHint(existing?.companyHint ?? null, companyHint)) updateData.companyHint = companyHint;
+
       const candidate = await prisma.candidate.upsert({
         where: { tenantId_linkedinId: { tenantId, linkedinId } },
-        update: {
-          // Update search metadata if this is a new search
-          searchTitle: result.title,
-          searchSnippet: result.snippet,
-          searchMeta: (result.providerMeta ?? undefined) as Prisma.InputJsonValue | undefined,
-          nameHint,
-          headlineHint,
-          locationHint,
-          companyHint,
-          searchProvider: provider, // Track last provider that found this candidate
-          // Don't overwrite roleType if already set
-          updatedAt: new Date(),
-        },
+        update: updateData,
         create: {
           tenantId,
           linkedinUrl: result.linkedinUrl,
@@ -182,10 +198,10 @@ async function upsertCandidates(
           searchTitle: result.title,
           searchSnippet: result.snippet,
           searchMeta: (result.providerMeta ?? undefined) as Prisma.InputJsonValue | undefined,
-          nameHint,
-          headlineHint,
-          locationHint,
-          companyHint,
+          nameHint: shouldReplaceHint(null, nameHint) ? nameHint : undefined,
+          headlineHint: shouldReplaceHint(null, headlineHint) ? headlineHint : undefined,
+          locationHint: shouldReplaceLocationHint(null, locationHint) ? locationHint : undefined,
+          companyHint: shouldReplaceCompanyHint(null, companyHint) ? companyHint : undefined,
           roleType: roleType || undefined,
           captureSource: 'search',
           searchQuery,
@@ -311,7 +327,11 @@ export async function POST(request: NextRequest) {
     const searchResult = await searchLinkedInProfilesWithMeta(
       parsedQuery.searchQuery,
       parsedQuery.count,
-      parsedQuery.countryCode
+      parsedQuery.countryCode,
+      {
+        countryCode: parsedQuery.countryCode,
+        locationText: parsedQuery.location,
+      }
     );
 
     const { results: summaries, providerUsed, usedFallback } = searchResult;

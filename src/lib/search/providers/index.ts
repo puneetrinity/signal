@@ -16,6 +16,7 @@ import type {
   SearchProvider,
   SearchProviderType,
   RawSearchResult,
+  SearchGeoContext,
 } from './types';
 import { brightdataProvider } from './brightdata';
 import { searxngProvider } from './searxng';
@@ -91,7 +92,8 @@ export function getCurrentProvider(): SearchProvider {
 export async function searchLinkedInProfiles(
   query: string,
   maxResults: number = 10,
-  countryCode?: string | null
+  countryCode?: string | null,
+  geo?: SearchGeoContext
 ): Promise<ProfileSummary[]> {
   const primaryType = getPrimaryProvider();
   const fallbackType = getFallbackProvider();
@@ -104,7 +106,8 @@ export async function searchLinkedInProfiles(
     const results = await primary.searchLinkedInProfiles(
       query,
       maxResults,
-      countryCode
+      countryCode,
+      geo
     );
 
     if (results.length > 0) {
@@ -129,7 +132,8 @@ export async function searchLinkedInProfiles(
       const results = await fallback.searchLinkedInProfiles(
         query,
         maxResults,
-        countryCode
+        countryCode,
+        geo
       );
 
       if (results.length > 0) {
@@ -290,7 +294,8 @@ export interface SearchResultWithMeta {
 export async function searchLinkedInProfilesWithMeta(
   query: string,
   maxResults: number = 10,
-  countryCode?: string | null
+  countryCode?: string | null,
+  geo?: SearchGeoContext
 ): Promise<SearchResultWithMeta> {
   const primaryType = getPrimaryProvider();
   const fallbackType = getFallbackProvider();
@@ -303,7 +308,8 @@ export async function searchLinkedInProfilesWithMeta(
     const results = await primary.searchLinkedInProfiles(
       query,
       maxResults,
-      countryCode
+      countryCode,
+      geo
     );
 
     if (results.length > 0) {
@@ -332,7 +338,8 @@ export async function searchLinkedInProfilesWithMeta(
       const results = await fallback.searchLinkedInProfiles(
         query,
         maxResults,
-        countryCode
+        countryCode,
+        geo
       );
 
       if (results.length > 0) {

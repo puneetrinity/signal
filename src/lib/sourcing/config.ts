@@ -16,6 +16,9 @@ export interface SourcingConfig {
   maxDiscoveryShare: number;
   minStrictMatchesBeforeExpand: number;
   bestMatchesMinFitScore: number;
+  strictRescueCount: number;
+  strictRescueMinFitScore: number;
+  countryGuardEnabled: boolean;
   // Discovery query generation + adaptive budget
   queryGenMode: 'deterministic' | 'hybrid';
   queryGroqTimeoutMs: number;
@@ -82,6 +85,9 @@ export function getSourcingConfig(): SourcingConfig {
     maxDiscoveryShare: clamp(parseFloatSafe(process.env.SOURCE_MAX_DISCOVERY_SHARE, 0.70), 0, 1),
     minStrictMatchesBeforeExpand: parseIntSafe(process.env.SOURCE_MIN_STRICT_MATCHES_BEFORE_EXPAND, 20),
     bestMatchesMinFitScore: clamp(parseFloatSafe(process.env.SOURCE_BEST_MATCHES_MIN_FIT_SCORE, 0.45), 0, 1),
+    strictRescueCount: parseIntSafe(process.env.SOURCE_STRICT_RESCUE_COUNT, 5),
+    strictRescueMinFitScore: clamp(parseFloatSafe(process.env.SOURCE_STRICT_RESCUE_MIN_FIT_SCORE, 0.30), 0, 1),
+    countryGuardEnabled: process.env.SOURCE_COUNTRY_GUARD_ENABLED !== 'false',
     // Discovery query generation + adaptive budget
     queryGenMode,
     queryGroqTimeoutMs: parseIntSafe(process.env.SOURCING_QUERY_GROQ_TIMEOUT_MS, 1500),

@@ -13,6 +13,11 @@ import { getRecentlyExposedCandidateIds } from './novelty';
 import type { CandidateForRanking, FitBreakdown, MatchTier, LocationMatchType } from './ranking';
 import type { TrackDecision } from './types';
 import { jobTrackToDbFilter } from './types';
+import {
+  assessLocationCountryConsistency,
+  deriveCountryCodeFromLocationText,
+  extractSerpSignals,
+} from '@/lib/search/serp-signals';
 
 const log = createLogger('SourcingOrchestrator');
 
@@ -47,9 +52,13 @@ export interface OrchestratorResult {
   };
   locationHintCoverage: number;
   strictDemotedCount: number;
+  strictRescuedCount: number;
+  strictRescueApplied: boolean;
+  strictRescueMinFitScoreUsed: number | null;
   locationMatchCounts: { city_exact: number; city_alias: number; country_only: number; none: number };
   demotedStrictWithCityMatch: number;
   strictBeforeDemotion: number;
+  countryGuardFilteredCount: number;
   selectedSnapshotTrack: string;
   locationCoverageTriggered: boolean;
   noveltySuppressedCount: number;
@@ -175,6 +184,7 @@ export async function runSourcingOrchestrator(
       searchSnippet: true,
       enrichmentStatus: true,
       lastEnrichedAt: true,
+      searchMeta: true,
       intelligenceSnapshots: {
         where: { track: { in: snapshotTrackFilter } },
         orderBy: { computedAt: 'desc' },
@@ -210,15 +220,54 @@ export async function runSourcingOrchestrator(
             roleType: snap.roleType,
             seniorityBand: snap.seniorityBand,
             location: snap.location,
+            activityRecencyDays: snap.activityRecencyDays ?? null,
             computedAt: snap.computedAt,
             staleAfter: snap.staleAfter,
           }
         : null,
     };
   });
-  const scoredPool = rankCandidates(poolForRanking, requirements);
   const hasLocationConstraint = Boolean(requirements.location?.trim());
   const poolForRankingById = new Map(poolForRanking.map((r) => [r.id, r]));
+  const requestedCountryCode = config.countryGuardEnabled && hasLocationConstraint
+    ? deriveCountryCodeFromLocationText(requirements.location)
+    : null;
+
+  const scoredPoolRaw = rankCandidates(poolForRanking, requirements);
+  const countryGuardFilteredCandidateIds = new Set<string>();
+  let scoredPool = scoredPoolRaw;
+  if (requestedCountryCode) {
+    scoredPool = scoredPoolRaw.filter((sc) => {
+      const poolCandidate = poolForRankingById.get(sc.candidateId);
+      const poolRow = poolById.get(sc.candidateId);
+      const candidateLocation = poolCandidate?.snapshot?.location ?? poolCandidate?.locationHint ?? null;
+      const locationCountryCode = deriveCountryCodeFromLocationText(candidateLocation);
+      const serpLocaleCountryCode = extractSerpSignals(poolRow?.searchMeta).localeCountryCode;
+
+      if (locationCountryCode && locationCountryCode !== requestedCountryCode) {
+        countryGuardFilteredCandidateIds.add(sc.candidateId);
+        return false;
+      }
+
+      if (!locationCountryCode && serpLocaleCountryCode && serpLocaleCountryCode !== requestedCountryCode) {
+        countryGuardFilteredCandidateIds.add(sc.candidateId);
+        return false;
+      }
+
+      return true;
+    });
+  }
+  let countryGuardFilteredCount = countryGuardFilteredCandidateIds.size;
+  if (countryGuardFilteredCount > 0) {
+    log.info(
+      {
+        requestId,
+        requestedCountryCode,
+        countryGuardFilteredCount,
+      },
+      'Country guard filtered pool candidates',
+    );
+  }
 
   function hasMeaningfulLocation(loc: string | null | undefined): boolean {
     if (!isMeaningfulLocation(loc)) return false;
@@ -348,6 +397,44 @@ export async function runSourcingOrchestrator(
         queriesExecuted = discovery.queriesExecuted;
         discoveryTelemetry = discovery.telemetry;
         usedQueries = queriesExecuted;
+
+        if (requestedCountryCode && discoveredCandidateIds.length > 0) {
+          const discoveredRows = await prisma.candidate.findMany({
+            where: { id: { in: discoveredCandidateIds } },
+            select: { id: true, locationHint: true, searchMeta: true },
+          });
+          const discoveredById = new Map(discoveredRows.map((row) => [row.id, row]));
+          const allowedDiscoveredIds: string[] = [];
+
+          for (const candidateId of discoveredCandidateIds) {
+            const row = discoveredById.get(candidateId);
+            if (!row) {
+              allowedDiscoveredIds.push(candidateId);
+              continue;
+            }
+
+            const locationCountryCode = deriveCountryCodeFromLocationText(row.locationHint);
+            const serpLocaleCountryCode = extractSerpSignals(row.searchMeta).localeCountryCode;
+            const locationMismatch = Boolean(
+              locationCountryCode && locationCountryCode !== requestedCountryCode,
+            );
+            const localeMismatch = Boolean(
+              !locationCountryCode &&
+              serpLocaleCountryCode &&
+              serpLocaleCountryCode !== requestedCountryCode,
+            );
+
+            if (locationMismatch || localeMismatch) {
+              countryGuardFilteredCandidateIds.add(candidateId);
+              continue;
+            }
+            allowedDiscoveredIds.push(candidateId);
+          }
+
+          discoveredCandidateIds = allowedDiscoveredIds;
+          discoveredCount = discoveredCandidateIds.length;
+          countryGuardFilteredCount = countryGuardFilteredCandidateIds.size;
+        }
       } finally {
         await releaseUnusedReservedQueries(budget.key, budget.reservedQueries, usedQueries);
       }
@@ -382,17 +469,22 @@ export async function runSourcingOrchestrator(
 
   // Partition pool into strict vs expanded tiers (sorted by fitScore within each)
   const strictPool = scoredPool.filter((sc) => sc.matchTier === 'strict_location');
-  const expandedPool = scoredPool.filter((sc) => sc.matchTier === 'expanded_location');
+  let expandedPool = scoredPool.filter((sc) => sc.matchTier === 'expanded_location');
 
   // Quality guard: demote strict candidates below fitScore floor to expanded pool
   let strictDemotedCount = 0;
   const qualifiedStrict: typeof strictPool = [];
   const strictBeforeDemotion = strictPool.length;
+  const demotedStrictCandidates: typeof strictPool = [];
   let demotedStrictWithCityMatch = 0;
+  let strictRescuedCount = 0;
+  let strictRescueApplied = false;
+  let strictRescueMinFitScoreUsed: number | null = null;
   for (const sc of strictPool) {
     if (sc.fitScore < config.bestMatchesMinFitScore) {
       sc.matchTier = 'expanded_location';
       expandedPool.push(sc);
+      demotedStrictCandidates.push(sc);
       strictDemotedCount++;
       if (sc.locationMatchType === 'city_exact' || sc.locationMatchType === 'city_alias') {
         demotedStrictWithCityMatch++;
@@ -403,6 +495,29 @@ export async function runSourcingOrchestrator(
   }
   if (strictDemotedCount > 0) {
     expandedPool.sort((a, b) => b.fitScore - a.fitScore);
+  }
+
+  // Strict rescue: avoid zero best-pool when all strict candidates miss the default floor.
+  if (
+    qualifiedStrict.length === 0 &&
+    demotedStrictCandidates.length > 0 &&
+    config.strictRescueCount > 0
+  ) {
+    const rescuedStrict = demotedStrictCandidates
+      .filter((sc) => sc.fitScore >= config.strictRescueMinFitScore)
+      .slice(0, config.strictRescueCount);
+
+    if (rescuedStrict.length > 0) {
+      const rescuedIds = new Set(rescuedStrict.map((sc) => sc.candidateId));
+      for (const sc of rescuedStrict) {
+        sc.matchTier = 'strict_location';
+      }
+      expandedPool = expandedPool.filter((sc) => !rescuedIds.has(sc.candidateId));
+      qualifiedStrict.push(...rescuedStrict);
+      strictRescuedCount = rescuedStrict.length;
+      strictRescueApplied = true;
+      strictRescueMinFitScoreUsed = config.strictRescueMinFitScore;
+    }
   }
 
   // Helper: push pool candidates (enriched first, then non-enriched, by fitScore)
@@ -608,6 +723,21 @@ export async function runSourcingOrchestrator(
     .slice(0, config.discoveredEnrichReserve)
     .map((a) => a.candidateId);
   const allPotentialIds = [...new Set([...candidateIdsToEnqueue, ...staleCandidateIds, ...discoveredUnenriched])];
+  const candidateSearchMetaById = new Map<string, unknown>(
+    poolRows.map((row) => [row.id, row.searchMeta]),
+  );
+  if (candidateIdsToEnqueue.length > 0) {
+    const missingSearchMetaIds = candidateIdsToEnqueue.filter((id) => !candidateSearchMetaById.has(id));
+    if (missingSearchMetaIds.length > 0) {
+      const missingCandidates = await prisma.candidate.findMany({
+        where: { id: { in: missingSearchMetaIds } },
+        select: { id: true, searchMeta: true },
+      });
+      for (const candidate of missingCandidates) {
+        candidateSearchMetaById.set(candidate.id, candidate.searchMeta);
+      }
+    }
+  }
   const activeSessions = allPotentialIds.length > 0
     ? await prisma.enrichmentSession.findMany({
         where: {
@@ -620,12 +750,33 @@ export async function runSourcingOrchestrator(
     : [];
   const alreadyActiveIds = new Set(activeSessions.map((s) => s.candidateId));
 
+  const computeAutoEnrichPriority = (candidate: AssembledCandidate): number => {
+    const basePriority = 10 + (candidate.rank - 1); // rank 1 → 10
+    const serpSignals = extractSerpSignals(candidateSearchMetaById.get(candidate.candidateId));
+    let adjustment = 0;
+
+    if (serpSignals.resultDateDays !== null) {
+      if (serpSignals.resultDateDays <= 30) adjustment -= 3;
+      else if (serpSignals.resultDateDays <= 90) adjustment -= 1;
+      else if (serpSignals.resultDateDays > 365) adjustment += 2;
+    }
+
+    const locationConsistency = assessLocationCountryConsistency(
+      requirements.location,
+      serpSignals.localeCountryCode,
+    );
+    if (locationConsistency === 'match') adjustment -= 4;
+    else if (locationConsistency === 'mismatch') adjustment += 4;
+
+    return Math.max(1, Math.min(99, basePriority + adjustment));
+  };
+
   const enqueuedIds = new Set<string>();
   let autoEnrichQueued = 0;
   for (const a of assembled.filter((a) => a.enrichmentStatus !== 'completed').slice(0, config.initialEnrichCount)) {
     if (alreadyActiveIds.has(a.candidateId) || enqueuedIds.has(a.candidateId)) continue;
     try {
-      const priority = 10 + (a.rank - 1); // rank 1 → priority 10
+      const priority = computeAutoEnrichPriority(a);
       await createEnrichmentSession(tenantId, a.candidateId, { priority });
       enqueuedIds.add(a.candidateId);
       autoEnrichQueued++;
@@ -760,9 +911,13 @@ export async function runSourcingOrchestrator(
     skillScoreDiagnostics,
     locationHintCoverage,
     strictDemotedCount,
+    strictRescuedCount,
+    strictRescueApplied,
+    strictRescueMinFitScoreUsed,
     locationMatchCounts,
     demotedStrictWithCityMatch,
     strictBeforeDemotion,
+    countryGuardFilteredCount,
     selectedSnapshotTrack,
     locationCoverageTriggered,
     noveltySuppressedCount,

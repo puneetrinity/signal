@@ -17,6 +17,7 @@ export interface CandidateForRanking {
     roleType: string | null;
     seniorityBand: string | null;
     location: string | null;
+    activityRecencyDays?: number | null;
     computedAt: Date;
     staleAfter: Date;
   } | null;
@@ -305,10 +306,17 @@ function computeRoleScore(candidate: CandidateForRanking, targetRoleFamily: stri
 }
 
 function computeFreshnessScore(candidate: CandidateForRanking): number {
-  // Prefer snapshot computedAt
-  const ts = candidate.snapshot?.computedAt ?? candidate.lastEnrichedAt;
-  if (!ts) return 0.1;
-  const daysSince = (Date.now() - ts.getTime()) / (1000 * 60 * 60 * 24);
+  // Prefer explicit activity recency derived from SERP signals.
+  const recencyDays = candidate.snapshot?.activityRecencyDays;
+  const daysSince = typeof recencyDays === 'number' && Number.isFinite(recencyDays)
+    ? Math.max(0, recencyDays)
+    : (() => {
+      const ts = candidate.snapshot?.computedAt ?? candidate.lastEnrichedAt;
+      if (!ts) return Number.POSITIVE_INFINITY;
+      return (Date.now() - ts.getTime()) / (1000 * 60 * 60 * 24);
+    })();
+
+  if (!Number.isFinite(daysSince)) return 0.1;
   if (daysSince <= 30) return 1.0;
   if (daysSince <= 90) return 0.7;
   if (daysSince <= 180) return 0.4;
