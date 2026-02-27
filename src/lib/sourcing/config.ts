@@ -22,6 +22,8 @@ export interface SourcingConfig {
   strictRescueCount: number;
   strictRescueMinFitScore: number;
   countryGuardEnabled: boolean;
+  countryGuardSerpLocaleEnabled: boolean;
+  fitScoreEpsilon: number;
   // Discovery query generation + adaptive budget
   queryGenMode: 'deterministic' | 'hybrid';
   queryGroqTimeoutMs: number;
@@ -48,6 +50,11 @@ export interface SourcingConfig {
   trackCbThreshold: number;
   trackCbWindowSec: number;
   trackCbCooldownSec: number;
+  // Post-enrichment rerank
+  rerankAfterEnrichment: boolean;
+  rerankDelayMs: number;
+  // Location soft boost
+  locationBoostWeight: number;
 }
 
 function parseIntSafe(value: string | undefined, fallback: number): number {
@@ -105,6 +112,8 @@ export function getSourcingConfig(): SourcingConfig {
     strictRescueCount: parseIntSafe(process.env.SOURCE_STRICT_RESCUE_COUNT, 5),
     strictRescueMinFitScore: clamp(parseFloatSafe(process.env.SOURCE_STRICT_RESCUE_MIN_FIT_SCORE, 0.30), 0, 1),
     countryGuardEnabled: process.env.SOURCE_COUNTRY_GUARD_ENABLED !== 'false',
+    countryGuardSerpLocaleEnabled: process.env.SOURCE_COUNTRY_GUARD_SERP_LOCALE_ENABLED === 'true',
+    fitScoreEpsilon: clamp(parseFloatSafe(process.env.SOURCE_FIT_SCORE_EPSILON, 0.03), 0, 0.2),
     // Discovery query generation + adaptive budget
     queryGenMode,
     queryGroqTimeoutMs: parseIntSafe(process.env.SOURCING_QUERY_GROQ_TIMEOUT_MS, 2500),
@@ -131,5 +140,10 @@ export function getSourcingConfig(): SourcingConfig {
     trackCbThreshold: parseIntSafe(process.env.TRACK_CB_THRESHOLD, 5),
     trackCbWindowSec: parseIntSafe(process.env.TRACK_CB_WINDOW_SEC, 300),
     trackCbCooldownSec: parseIntSafe(process.env.TRACK_CB_COOLDOWN_SEC, 60),
+    // Post-enrichment rerank
+    rerankAfterEnrichment: process.env.SOURCE_RERANK_AFTER_ENRICHMENT !== 'false',
+    rerankDelayMs: clamp(parseIntSafe(process.env.SOURCE_RERANK_DELAY_MS, 90_000), 10_000, 300_000),
+    // Location soft boost
+    locationBoostWeight: clamp(parseFloatSafe(process.env.SOURCE_LOCATION_BOOST_WEIGHT, 0), 0, 0.15),
   };
 }

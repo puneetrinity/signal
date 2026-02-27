@@ -8,13 +8,14 @@ import { rankCandidates } from './ranking';
 import { discoverCandidates, type DiscoveryTelemetry } from './discovery';
 import { getSourcingConfig } from './config';
 import { createEnrichmentSession } from '@/lib/enrichment/queue';
-import { isMeaningfulLocation, isNoisyLocationHint, canonicalizeLocation, extractPrimaryCity } from './ranking';
+import { isMeaningfulLocation, isNoisyLocationHint, canonicalizeLocation, extractPrimaryCity, compareFitWithConfidence } from './ranking';
 import { getRecentlyExposedCandidateIds } from './novelty';
 import type { CandidateForRanking, FitBreakdown, MatchTier, LocationMatchType, ScoredCandidate } from './ranking';
 import type { TrackDecision } from './types';
 import { jobTrackToDbFilter } from './types';
 import {
   assessLocationCountryConsistency,
+  computeSerpEvidence,
   deriveCountryCodeFromLocationText,
   extractSerpSignals,
 } from '@/lib/search/serp-signals';
@@ -59,6 +60,7 @@ export interface OrchestratorResult {
   demotedStrictWithCityMatch: number;
   strictBeforeDemotion: number;
   countryGuardFilteredCount: number;
+  countryGuardSerpLocaleSkippedCount: number;
   selectedSnapshotTrack: string;
   locationCoverageTriggered: boolean;
   noveltySuppressedCount: number;
@@ -83,6 +85,7 @@ interface AssembledCandidate {
   locationMatchType: LocationMatchType | null;
   sourceType: string;
   enrichmentStatus: string;
+  dataConfidence: 'high' | 'medium' | 'low';
   rank: number;
 }
 
@@ -260,8 +263,9 @@ export async function runSourcingOrchestrator(
     ? deriveCountryCodeFromLocationText(requirements.location)
     : null;
 
-  const scoredPoolRaw = rankCandidates(poolForRanking, requirements);
+  const scoredPoolRaw = rankCandidates(poolForRanking, requirements, { fitScoreEpsilon: config.fitScoreEpsilon, locationBoostWeight: config.locationBoostWeight });
   const countryGuardFilteredCandidateIds = new Set<string>();
+  let countryGuardSerpLocaleSkippedCount = 0;
   let scoredPool = scoredPoolRaw;
   if (requestedCountryCode) {
     scoredPool = scoredPoolRaw.filter((sc) => {
@@ -269,6 +273,7 @@ export async function runSourcingOrchestrator(
       const poolRow = poolById.get(sc.candidateId);
       const candidateLocation = poolCandidate?.snapshot?.location ?? poolCandidate?.locationHint ?? null;
       const locationCountryCode = deriveCountryCodeFromLocationText(candidateLocation);
+      // TODO(Phase 3b): consolidate via computeSerpEvidence(). See serp-signals.ts.
       const serpLocaleCountryCode = extractSerpSignals(poolRow?.searchMeta).localeCountryCode;
 
       if (locationCountryCode && locationCountryCode !== requestedCountryCode) {
@@ -277,8 +282,11 @@ export async function runSourcingOrchestrator(
       }
 
       if (!locationCountryCode && serpLocaleCountryCode && serpLocaleCountryCode !== requestedCountryCode) {
-        countryGuardFilteredCandidateIds.add(sc.candidateId);
-        return false;
+        if (config.countryGuardSerpLocaleEnabled) {
+          countryGuardFilteredCandidateIds.add(sc.candidateId);
+          return false;
+        }
+        countryGuardSerpLocaleSkippedCount++;
       }
 
       return true;
@@ -342,6 +350,7 @@ export async function runSourcingOrchestrator(
   let discoveredPromotedCount = 0;
   let discoveredPromotedInTopCount = 0;
   const promotedDiscoveredById = new Map<string, ScoredCandidate>();
+  const scoredDiscoveredById = new Map<string, ScoredCandidate>();
   const discoveredRowsById = new Map<string, {
     id: string;
     enrichmentStatus: string;
@@ -467,19 +476,25 @@ export async function runSourcingOrchestrator(
 
             if (requestedCountryCode) {
               const locationCountryCode = deriveCountryCodeFromLocationText(row.locationHint);
+              // TODO(Phase 3b): consolidate via computeSerpEvidence(). See serp-signals.ts.
               const serpLocaleCountryCode = extractSerpSignals(row.searchMeta).localeCountryCode;
               const locationMismatch = Boolean(
                 locationCountryCode && locationCountryCode !== requestedCountryCode,
               );
-              const localeMismatch = Boolean(
-                !locationCountryCode &&
+              const serpLocaleMismatch = !locationCountryCode &&
                 serpLocaleCountryCode &&
-                serpLocaleCountryCode !== requestedCountryCode,
-              );
+                serpLocaleCountryCode !== requestedCountryCode;
 
-              if (locationMismatch || localeMismatch) {
+              if (locationMismatch) {
                 countryGuardFilteredCandidateIds.add(candidateId);
                 continue;
+              }
+              if (serpLocaleMismatch) {
+                if (config.countryGuardSerpLocaleEnabled) {
+                  countryGuardFilteredCandidateIds.add(candidateId);
+                  continue;
+                }
+                countryGuardSerpLocaleSkippedCount++;
               }
             }
 
@@ -500,8 +515,9 @@ export async function runSourcingOrchestrator(
             .map((candidateId) => discoveredById.get(candidateId))
             .filter((row): row is NonNullable<typeof row> => Boolean(row))
             .map((row) => toRankingCandidate(row));
-          const scoredDiscovered = rankCandidates(discoveredForRanking, requirements);
+          const scoredDiscovered = rankCandidates(discoveredForRanking, requirements, { fitScoreEpsilon: config.fitScoreEpsilon, locationBoostWeight: config.locationBoostWeight });
           for (const sc of scoredDiscovered) {
+            scoredDiscoveredById.set(sc.candidateId, sc);
             const passesLocationGate = !hasLocationConstraint || sc.locationMatchType !== 'none';
             const passesFitGate = sc.fitScore >= config.discoveredPromotionMinFitScore;
             if (passesLocationGate && passesFitGate) {
@@ -534,10 +550,21 @@ export async function runSourcingOrchestrator(
   const enrichedIds = new Set(enrichedCandidates.map((row) => row.candidateId));
   let rank = 1;
 
-  const pushCandidate = (candidate: Omit<AssembledCandidate, 'rank'>): boolean => {
+  const computeDataConfidence = (candidate: Omit<AssembledCandidate, 'rank' | 'dataConfidence'>): 'high' | 'medium' | 'low' => {
+    if (candidate.enrichmentStatus === 'completed' && candidate.fitBreakdown?.skillScoreMethod === 'snapshot') {
+      return 'high';
+    }
+    if (candidate.fitScore !== null && (candidate.fitBreakdown?.skillScoreMethod === 'text_fallback' || (candidate.enrichmentStatus === 'completed' && candidate.fitBreakdown?.skillScoreMethod !== 'snapshot'))) {
+      return 'medium';
+    }
+    return 'low';
+  };
+
+  const pushCandidate = (candidate: Omit<AssembledCandidate, 'rank' | 'dataConfidence'>): boolean => {
     if (assembled.length >= config.targetCount) return false;
     if (assembledIds.has(candidate.candidateId)) return false;
-    assembled.push({ ...candidate, rank: rank++ });
+    const dataConfidence = computeDataConfidence(candidate);
+    assembled.push({ ...candidate, dataConfidence, rank: rank++ });
     assembledIds.add(candidate.candidateId);
     return true;
   };
@@ -569,7 +596,7 @@ export async function runSourcingOrchestrator(
     }
   }
   if (strictDemotedCount > 0) {
-    expandedPool.sort((a, b) => b.fitScore - a.fitScore);
+    expandedPool.sort((a, b) => compareFitWithConfidence(a, b, config.fitScoreEpsilon));
   }
 
   // Strict rescue: avoid zero best-pool when all strict candidates miss the default floor.
@@ -595,32 +622,19 @@ export async function runSourcingOrchestrator(
     }
   }
 
-  // Helper: push pool candidates (enriched first, then non-enriched, by fitScore)
+  // Helper: push pool candidates in fitScore order (no enriched-first bias)
   const pushPoolTier = (tier: typeof scoredPool, limit: number): void => {
-    const enriched = tier.filter((sc) => enrichedIds.has(sc.candidateId));
-    const nonEnriched = tier.filter((sc) => !enrichedIds.has(sc.candidateId));
-    for (const sc of enriched) {
+    for (const sc of tier) {
       if (assembled.length >= limit) return;
+      const isEnriched = enrichedIds.has(sc.candidateId);
       pushCandidate({
         candidateId: sc.candidateId,
         fitScore: sc.fitScore,
         fitBreakdown: sc.fitBreakdown,
         matchTier: sc.matchTier,
         locationMatchType: sc.locationMatchType,
-        sourceType: 'pool_enriched',
-        enrichmentStatus: 'completed',
-      });
-    }
-    for (const sc of nonEnriched) {
-      if (assembled.length >= limit) return;
-      pushCandidate({
-        candidateId: sc.candidateId,
-        fitScore: sc.fitScore,
-        fitBreakdown: sc.fitBreakdown,
-        matchTier: sc.matchTier,
-        locationMatchType: sc.locationMatchType,
-        sourceType: 'pool',
-        enrichmentStatus: poolById.get(sc.candidateId)?.enrichmentStatus ?? 'pending',
+        sourceType: isEnriched ? 'pool_enriched' : 'pool',
+        enrichmentStatus: isEnriched ? 'completed' : (poolById.get(sc.candidateId)?.enrichmentStatus ?? 'pending'),
       });
     }
   };
@@ -631,7 +645,9 @@ export async function runSourcingOrchestrator(
     discoveredCandidateIds.length,
     config.targetCount,
   );
-  const promotedDiscoveredTopIds = promotedDiscoveredIdsOrdered.slice(0, discoveredReservedInOutput);
+  const promotedDiscoveredTopIds = promotedDiscoveredIdsOrdered
+    .filter((id) => promotedDiscoveredById.get(id)?.matchTier === 'strict_location')
+    .slice(0, discoveredReservedInOutput);
   discoveredPromotedInTopCount = promotedDiscoveredTopIds.length;
   const discoveredReserveRemaining = Math.max(0, discoveredReservedInOutput - discoveredPromotedInTopCount);
   const poolFillLimit = Math.max(0, config.targetCount - discoveredReserveRemaining);
@@ -651,12 +667,13 @@ export async function runSourcingOrchestrator(
       });
       return;
     }
+    const scored = scoredDiscoveredById.get(candidateId);
     pushCandidate({
       candidateId,
-      fitScore: null,
-      fitBreakdown: null,
-      matchTier: 'expanded_location',
-      locationMatchType: 'none',
+      fitScore: scored?.fitScore ?? null,
+      fitBreakdown: scored?.fitBreakdown ?? null,
+      matchTier: scored?.matchTier ?? 'expanded_location',
+      locationMatchType: scored?.locationMatchType ?? 'none',
       sourceType: 'discovered',
       enrichmentStatus,
     });
@@ -702,9 +719,9 @@ export async function runSourcingOrchestrator(
   let noveltyKey: string | null = null;
   let noveltyHint: string | null = null;
   const getDiscoveredNoveltyContext = (candidateId: string): { matchTier: MatchTier; fitScore: number | null } => {
-    const promoted = promotedDiscoveredById.get(candidateId);
-    if (promoted) {
-      return { matchTier: promoted.matchTier, fitScore: promoted.fitScore };
+    const scored = scoredDiscoveredById.get(candidateId);
+    if (scored) {
+      return { matchTier: scored.matchTier, fitScore: scored.fitScore };
     }
     return { matchTier: 'expanded_location', fitScore: null };
   };
@@ -810,9 +827,9 @@ export async function runSourcingOrchestrator(
         candidateId: a.candidateId,
         fitScore: a.fitScore,
         fitBreakdown: a.fitBreakdown
-          ? toJsonValue({ ...a.fitBreakdown, matchTier: a.matchTier, locationMatchType: a.locationMatchType })
+          ? toJsonValue({ ...a.fitBreakdown, matchTier: a.matchTier, locationMatchType: a.locationMatchType, dataConfidence: a.dataConfidence })
           : a.matchTier
-            ? toJsonValue({ matchTier: a.matchTier, locationMatchType: a.locationMatchType })
+            ? toJsonValue({ matchTier: a.matchTier, locationMatchType: a.locationMatchType, dataConfidence: a.dataConfidence })
             : Prisma.JsonNull,
         sourceType: a.sourceType,
         enrichmentStatus: a.enrichmentStatus,
@@ -875,18 +892,24 @@ export async function runSourcingOrchestrator(
 
   const computeAutoEnrichPriority = (candidate: AssembledCandidate): number => {
     const basePriority = 10 + (candidate.rank - 1); // rank 1 → 10
-    const serpSignals = extractSerpSignals(candidateSearchMetaById.get(candidate.candidateId));
+    const searchMeta = candidateSearchMetaById.get(candidate.candidateId);
+    const evidence = computeSerpEvidence(searchMeta);
     let adjustment = 0;
 
-    if (serpSignals.resultDateDays !== null) {
-      if (serpSignals.resultDateDays <= 30) adjustment -= 3;
-      else if (serpSignals.resultDateDays <= 90) adjustment -= 1;
-      else if (serpSignals.resultDateDays > 365) adjustment += 2;
+    // Recency adjustment — maps evidence buckets to original adjustments:
+    //   fresh (≤30d, confidence ≥ 0.7): -3
+    //   recent (≤90d, confidence ≥ 0.55): -1
+    //   stale (>365d, has date): +2
+    if (evidence.hasResultDate) {
+      if (evidence.resultDateDays !== null && evidence.resultDateDays <= 30) adjustment -= 3;
+      else if (evidence.resultDateDays !== null && evidence.resultDateDays <= 90) adjustment -= 1;
+      else if (evidence.resultDateDays !== null && evidence.resultDateDays > 365) adjustment += 2;
     }
 
+    // Location consistency via SERP locale
     const locationConsistency = assessLocationCountryConsistency(
       requirements.location,
-      serpSignals.localeCountryCode,
+      evidence.localeCountryCode,
     );
     if (locationConsistency === 'match') adjustment -= 4;
     else if (locationConsistency === 'mismatch') adjustment += 4;
@@ -970,12 +993,12 @@ export async function runSourcingOrchestrator(
   }).length;
 
   // Skill score diagnostics: snapshot vs text fallback breakdown
-  // Only count scored candidates (exclude discovered — they have no fitScore/skillScore)
+  // Only count pool candidates (discovered have separate scoring context)
   let withSnapshotSkills = 0;
   let usingTextFallback = 0;
   const skillScoreSumBySource: Record<string, { sum: number; count: number }> = {};
   for (const a of assembled) {
-    if (a.fitScore === null) continue; // discovered candidates — not scored
+    if (a.sourceType === 'discovered') continue; // discovered candidates scored separately
     const poolCandidate = poolForRankingById.get(a.candidateId);
     const hasSnapshot = Boolean(poolCandidate?.snapshot?.skillsNormalized?.length);
     if (hasSnapshot) withSnapshotSkills++;
@@ -1000,9 +1023,9 @@ export async function runSourcingOrchestrator(
     avgSkillScoreBySourceType,
   };
 
-  // Location hint coverage: fraction of scored candidates with a meaningful, non-noisy location
+  // Location hint coverage: fraction of pool candidates with a meaningful, non-noisy location
   // Excludes discovered candidates (not in pool, no location data yet)
-  const scoredAssembled = assembled.filter((a) => a.fitScore !== null);
+  const scoredAssembled = assembled.filter((a) => a.sourceType !== 'discovered');
   const candidatesWithLocation = scoredAssembled.filter((a) => {
     const poolCandidate = poolForRankingById.get(a.candidateId);
     return hasMeaningfulLocation(poolCandidate?.snapshot?.location) ||
@@ -1055,6 +1078,7 @@ export async function runSourcingOrchestrator(
     demotedStrictWithCityMatch,
     strictBeforeDemotion,
     countryGuardFilteredCount,
+    countryGuardSerpLocaleSkippedCount,
     selectedSnapshotTrack,
     locationCoverageTriggered,
     noveltySuppressedCount,

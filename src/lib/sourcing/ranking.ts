@@ -28,9 +28,11 @@ export type MatchTier = 'strict_location' | 'expanded_location';
 
 export interface FitBreakdown {
   skillScore: number;
+  skillScoreMethod: 'snapshot' | 'text_fallback';
   roleScore: number;
   seniorityScore: number;
   activityFreshnessScore: number;
+  locationBoost: number;
 }
 
 export interface ScoredCandidate {
@@ -39,6 +41,21 @@ export interface ScoredCandidate {
   fitBreakdown: FitBreakdown;
   matchTier: MatchTier;
   locationMatchType: LocationMatchType;
+}
+
+export function compareFitWithConfidence(a: ScoredCandidate, b: ScoredCandidate, epsilon: number): number {
+  const delta = b.fitScore - a.fitScore;
+  if (Math.abs(delta) >= epsilon) return delta;
+
+  // Within epsilon: prefer snapshot-scored (higher confidence) over text fallback
+  const confA = a.fitBreakdown.skillScoreMethod === 'snapshot' ? 1 : 0;
+  const confB = b.fitBreakdown.skillScoreMethod === 'snapshot' ? 1 : 0;
+  if (confA !== confB) return confB - confA;
+
+  // Deterministic tie-breaker: stable ordering across runs
+  if (a.candidateId < b.candidateId) return -1;
+  if (a.candidateId > b.candidateId) return 1;
+  return 0;
 }
 
 const LOCATION_ALIAS_REWRITES: Array<[RegExp, string]> = [
@@ -165,8 +182,8 @@ function computeSkillScore(
   candidate: CandidateForRanking,
   topSkills: string[],
   domain: string | null,
-): number {
-  if (topSkills.length === 0) return 0;
+): { score: number; method: 'snapshot' | 'text_fallback' } {
+  if (topSkills.length === 0) return { score: 0, method: 'text_fallback' };
 
   // Prefer snapshot skills (set intersection, no regex needed)
   if (candidate.snapshot?.skillsNormalized?.length) {
@@ -180,7 +197,7 @@ function computeSkillScore(
     let domainMatch = 0;
     if (domain && snapshotSet.has(domain.toLowerCase())) domainMatch = 1;
 
-    return 0.8 * overlapRatio + 0.2 * domainMatch;
+    return { score: 0.8 * overlapRatio + 0.2 * domainMatch, method: 'snapshot' };
   }
 
   // Fallback: textBag regex with alias-aware matching
@@ -210,7 +227,7 @@ function computeSkillScore(
     }
   }
 
-  return 0.8 * overlapRatio + 0.2 * domainMatch;
+  return { score: 0.8 * overlapRatio + 0.2 * domainMatch, method: 'text_fallback' };
 }
 
 function computeSeniorityScore(candidate: CandidateForRanking, targetLevel: string | null): number {
@@ -306,6 +323,8 @@ function computeRoleScore(candidate: CandidateForRanking, targetRoleFamily: stri
 }
 
 function computeFreshnessScore(candidate: CandidateForRanking): number {
+  // TODO(Phase 3b): use computeSerpEvidence() confidence to weight freshness
+  // when SOURCE_SERP_EVIDENCE_IN_FRESHNESS=true. See serp-signals.ts.
   // Prefer explicit activity recency derived from SERP signals.
   const recencyDays = candidate.snapshot?.activityRecencyDays;
   const daysSince = typeof recencyDays === 'number' && Number.isFinite(recencyDays)
@@ -323,35 +342,61 @@ function computeFreshnessScore(candidate: CandidateForRanking): number {
   return 0.1;
 }
 
+function computeLocationBoost(
+  locationMatchType: LocationMatchType,
+  hasLocationRequirement: boolean,
+): number {
+  if (!hasLocationRequirement) return 0.5; // neutral
+  switch (locationMatchType) {
+    case 'city_exact': return 1.0;
+    case 'city_alias': return 0.85;
+    case 'country_only': return 0.5;
+    case 'none': return 0.1;
+  }
+}
+
 export function rankCandidates(
   candidates: CandidateForRanking[],
   requirements: JobRequirements,
+  options?: { fitScoreEpsilon?: number; locationBoostWeight?: number },
 ): ScoredCandidate[] {
-  // Location is a tier gate, not a score component.
-  // Weights sum to 1.0 regardless of location constraint.
-  const weights = { skill: 0.45, role: 0.15, seniority: 0.25, freshness: 0.15 };
+  // Location boost weight: 0 (default/disabled) preserves existing weights exactly.
+  const locationWeight = options?.locationBoostWeight ?? 0;
+  const remaining = 1.0 - locationWeight;
+  const weights = {
+    skill: 0.45 * remaining,
+    role: 0.15 * remaining,
+    seniority: 0.25 * remaining,
+    freshness: 0.15 * remaining,
+    location: locationWeight,
+  };
 
   return candidates
     .map((c) => {
-      const skillScore = computeSkillScore(c, requirements.topSkills, requirements.domain);
+      const { score: skillScore, method: skillScoreMethod } = computeSkillScore(c, requirements.topSkills, requirements.domain);
       const roleScore = computeRoleScore(c, requirements.roleFamily);
       const seniorityScore = computeSeniorityScore(c, requirements.seniorityLevel);
       const activityFreshnessScore = computeFreshnessScore(c);
       const { matchTier, locationMatchType } = classifyLocationMatch(c, requirements.location);
+      const locationBoost = computeLocationBoost(locationMatchType, !!requirements.location);
 
       const fitScore =
         weights.skill * skillScore +
         weights.role * roleScore +
         weights.seniority * seniorityScore +
-        weights.freshness * activityFreshnessScore;
+        weights.freshness * activityFreshnessScore +
+        weights.location * locationBoost;
 
       return {
         candidateId: c.id,
         fitScore,
-        fitBreakdown: { skillScore, roleScore, seniorityScore, activityFreshnessScore },
+        fitBreakdown: { skillScore, skillScoreMethod, roleScore, seniorityScore, activityFreshnessScore, locationBoost },
         matchTier,
         locationMatchType,
       };
     })
-    .sort((a, b) => b.fitScore - a.fitScore);
+    .sort((a, b) => {
+      const epsilon = options?.fitScoreEpsilon ?? 0;
+      return epsilon > 0 ? compareFitWithConfidence(a, b, epsilon) : b.fitScore - a.fitScore;
+    });
 }

@@ -26,6 +26,7 @@ import { generateCandidateSummary } from '../summary/generate';
 import { shouldPersistIdentity, type ScoreBreakdown } from '../scoring';
 import { extractAllHints, extractNameFromSlug, applySerpMetaOverrides } from '../hint-extraction';
 import { getEnrichmentMinConfidenceThreshold } from '../config';
+import { enqueueRerankForCandidate } from '@/lib/sourcing/rerank';
 import {
   type EnrichmentState,
   type PartialEnrichmentState,
@@ -1660,6 +1661,20 @@ export async function persistSummaryNode(
           'Failed to finalize candidate status'
         );
       });
+
+    // Enqueue post-enrichment rerank for all sourcing requests containing this candidate.
+    if (state.status !== 'failed') {
+      await enqueueRerankForCandidate(state.tenantId, state.candidateId).catch((error) => {
+        log.warn(
+          {
+            tenantId: state.tenantId,
+            candidateId: state.candidateId,
+            error: error instanceof Error ? error.message : error,
+          },
+          'Failed to enqueue rerank after enrichment',
+        );
+      });
+    }
 
     const progressComplete: EnrichmentProgressEvent = {
       type: 'node_complete',

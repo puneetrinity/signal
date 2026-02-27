@@ -470,6 +470,7 @@ model JobSourcingRequest {
   qualityGateTriggered Boolean @default(false) @map("quality_gate_triggered")
   queriesExecuted      Int     @default(0) @map("queries_executed")
   diagnostics          Json?
+  lastRerankedAt    DateTime? @map("last_reranked_at")
 
   candidates        JobSourcingCandidate[]
 

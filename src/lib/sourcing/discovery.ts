@@ -1,4 +1,4 @@
-import { generateObject, generateText } from 'ai';
+import { generateText } from 'ai';
 import { z } from 'zod';
 import { createGroqModel } from '@/lib/ai/groq';
 import { searchLinkedInProfilesWithMeta, type SearchGeoContext } from '@/lib/search/providers';
@@ -454,20 +454,7 @@ async function buildHybridQueries(
       object = coerceQueryPlanFromText(textGenerated.text);
 
       if (!object) {
-        // Fallback for providers that can satisfy schema mode better than plain text parsing.
-        const generated = await withTimeout(
-          generateObject({
-            model,
-            schema: QueryPlanSchema,
-            prompt,
-          }),
-          config.queryGroqTimeoutMs,
-        );
-        object = generated.object;
-      }
-
-      if (!object) {
-        throw new Error('Groq query generation produced empty plan');
+        throw new Error('Groq query plan parse_failed');
       }
 
       groqMeta.latencyMs = Date.now() - startedAt;
@@ -495,7 +482,9 @@ async function buildHybridQueries(
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       groqMeta.error = message;
-      log.warn({ attempt, maxAttempts: attempts, error: message }, 'Hybrid query generation attempt failed');
+      if (attempt >= attempts) {
+        log.warn({ maxAttempts: attempts, error: message }, 'Hybrid query generation fallback to deterministic');
+      }
       if (attempt >= attempts) break;
     }
   }

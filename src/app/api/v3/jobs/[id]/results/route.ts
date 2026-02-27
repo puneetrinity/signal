@@ -237,15 +237,23 @@ export async function GET(
         ? rawLocationMatchType
         : null;
 
-    // Clean fitBreakdown: only numeric score fields (strip tier metadata)
+    // Clean fitBreakdown: score fields + method flag (strip tier metadata)
     const fitBreakdown = fbRaw
       ? {
           skillScore: fbRaw.skillScore ?? null,
+          skillScoreMethod: fbRaw.skillScoreMethod ?? null,
           roleScore: fbRaw.roleScore ?? null,
           seniorityScore: fbRaw.seniorityScore ?? null,
           activityFreshnessScore: fbRaw.activityFreshnessScore ?? null,
+          locationBoost: fbRaw.locationBoost ?? null,
         }
       : null;
+
+    const rawDataConfidence = fbRaw?.dataConfidence;
+    const dataConfidence =
+      rawDataConfidence === 'high' || rawDataConfidence === 'medium' || rawDataConfidence === 'low'
+        ? rawDataConfidence
+        : 'low';
 
     return {
       candidateId: sc.candidateId,
@@ -253,6 +261,7 @@ export async function GET(
       fitBreakdown,
       matchTier,
       locationMatchType,
+      dataConfidence,
       sourceType: sc.sourceType,
       enrichmentStatus: sc.enrichmentStatus,
       rank: sc.rank,
@@ -330,6 +339,7 @@ export async function GET(
     status: sourcingRequest.status,
     requestedAt: sourcingRequest.requestedAt.toISOString(),
     completedAt: sourcingRequest.completedAt?.toISOString() ?? null,
+    lastRerankedAt: sourcingRequest.lastRerankedAt?.toISOString() ?? null,
     resultCount: sourcingRequest.resultCount,
     qualityGateTriggered: sourcingRequest.qualityGateTriggered,
     queriesExecuted: sourcingRequest.queriesExecuted,

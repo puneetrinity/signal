@@ -134,6 +134,7 @@ async function processSourcingJob(
           demotedStrictWithCityMatch: orchestratorResult.demotedStrictWithCityMatch,
           strictBeforeDemotion: orchestratorResult.strictBeforeDemotion,
           countryGuardFilteredCount: orchestratorResult.countryGuardFilteredCount,
+          countryGuardSerpLocaleSkippedCount: orchestratorResult.countryGuardSerpLocaleSkippedCount,
           selectedSnapshotTrack: orchestratorResult.selectedSnapshotTrack,
           locationCoverageTriggered: orchestratorResult.locationCoverageTriggered,
           noveltySuppressedCount: orchestratorResult.noveltySuppressedCount,

@@ -138,6 +138,46 @@ export function assessLocationCountryConsistency(
   return locationCountryCode === localeCountryCode ? 'match' : 'mismatch';
 }
 
+// ---------------------------------------------------------------------------
+// SERP evidence confidence — consolidated score from scattered SERP signals
+// ---------------------------------------------------------------------------
+
+export interface SerpEvidence {
+  confidence: number;           // 0-1 composite, 0 = no evidence
+  hasResultDate: boolean;
+  resultDateDays: number | null;
+  hasLocale: boolean;
+  localeCountryCode: string | null;
+}
+
+export function computeSerpEvidence(searchMeta: unknown): SerpEvidence {
+  const signals = extractSerpSignals(searchMeta);
+
+  let confidence = 0;
+
+  if (signals.resultDateDays !== null) {
+    confidence += 0.4;
+    if (signals.resultDateDays <= 30) confidence += 0.3;
+    else if (signals.resultDateDays <= 90) confidence += 0.15;
+  }
+
+  if (signals.localeCountryCode) {
+    confidence += 0.3;
+  }
+
+  return {
+    confidence: Math.min(1.0, confidence),
+    hasResultDate: signals.resultDateDays !== null,
+    resultDateDays: signals.resultDateDays,
+    hasLocale: !!signals.localeCountryCode,
+    localeCountryCode: signals.localeCountryCode,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Core extraction
+// ---------------------------------------------------------------------------
+
 export function extractSerpSignals(
   searchMeta: unknown,
   now: Date = new Date(),
