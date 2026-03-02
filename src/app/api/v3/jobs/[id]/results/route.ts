@@ -337,6 +337,8 @@ export async function GET(
     requestId: sourcingRequest.id,
     externalJobId: sourcingRequest.externalJobId,
     status: sourcingRequest.status,
+    callbackStatus: sourcingRequest.callbackStatus ?? null,
+    callbackSentAt: sourcingRequest.callbackSentAt?.toISOString() ?? null,
     requestedAt: sourcingRequest.requestedAt.toISOString(),
     completedAt: sourcingRequest.completedAt?.toISOString() ?? null,
     lastRerankedAt: sourcingRequest.lastRerankedAt?.toISOString() ?? null,

@@ -43,9 +43,9 @@ export type SourcingRequestStatus =
   | 'queued'
   | 'processing'
   | 'complete'
-  | 'callback_sent'
-  | 'callback_failed'
   | 'failed';
+
+export type CallbackDeliveryStatus = 'pending' | 'delivered' | 'failed';
 
 export interface SourcingJobData {
   requestId: string;

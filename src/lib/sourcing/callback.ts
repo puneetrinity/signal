@@ -85,7 +85,7 @@ export async function deliverCallback(
         await prisma.jobSourcingRequest.update({
           where: { id: requestId },
           data: {
-            ...(updateStatus ? { status: 'callback_sent' } : {}),
+            ...(updateStatus ? { callbackStatus: 'delivered', callbackSentAt: new Date(), lastCallbackError: null } : {}),
             callbackAttempts: attempt + 1,
           },
         });
@@ -119,7 +119,7 @@ export async function deliverCallback(
   if (updateStatus) {
     await prisma.jobSourcingRequest.update({
       where: { id: requestId },
-      data: { status: 'callback_failed' },
+      data: { callbackStatus: 'failed' },
     });
   }
   log.error({ requestId }, 'Callback delivery failed after all attempts');
@@ -137,7 +137,8 @@ export async function redeliverStaleCallbacks(opts: {
 
   const staleRequests = await prisma.jobSourcingRequest.findMany({
     where: {
-      status: 'callback_failed',
+      callbackStatus: 'failed',
+      status: 'complete',
       completedAt: { lt: cutoff },
       ...(opts.tenantId ? { tenantId: opts.tenantId } : {}),
     },

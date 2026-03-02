@@ -100,6 +100,8 @@ async function processSourcingJob(
       where: { id: requestId },
       data: {
         status: 'complete',
+        callbackStatus: 'pending',
+        callbackSentAt: null,
         completedAt: new Date(),
         resultCount: candidateCount,
         qualityGateTriggered: orchestratorResult.qualityGateTriggered,

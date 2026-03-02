@@ -112,7 +112,7 @@ export async function POST(
 
   if (existing) {
     // Allow re-queue for terminal failure states
-    const retryable = existing.status === 'failed' || existing.status === 'callback_failed';
+    const retryable = existing.status === 'failed';
     if (!retryable) {
       // Return persisted trackDecision, not freshly computed one, for consistency with GET /results
       const existingDiag = existing.diagnostics as Record<string, unknown> | null;
@@ -134,6 +134,8 @@ export async function POST(
         completedAt: null,
         callbackAttempts: 0,
         lastCallbackError: null,
+        callbackStatus: null,
+        callbackSentAt: null,
         resultCount: null,
         qualityGateTriggered: false,
         queriesExecuted: 0,
