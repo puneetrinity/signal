@@ -61,6 +61,7 @@ export interface OrchestratorResult {
   strictBeforeDemotion: number;
   countryGuardFilteredCount: number;
   countryGuardSerpLocaleSkippedCount: number;
+  countryGuardEscapeCounts: { no_location: number; country_match: number; city_only_unknown_country: number };
   selectedSnapshotTrack: string;
   locationCoverageTriggered: boolean;
   noveltySuppressedCount: number;
@@ -263,9 +264,10 @@ export async function runSourcingOrchestrator(
     ? deriveCountryCodeFromLocationText(requirements.location)
     : null;
 
-  const scoredPoolRaw = rankCandidates(poolForRanking, requirements, { fitScoreEpsilon: config.fitScoreEpsilon, locationBoostWeight: config.locationBoostWeight });
+  const scoredPoolRaw = rankCandidates(poolForRanking, requirements, { fitScoreEpsilon: config.fitScoreEpsilon, locationBoostWeight: config.locationBoostWeight, track: trackDecision?.track });
   const countryGuardFilteredCandidateIds = new Set<string>();
   let countryGuardSerpLocaleSkippedCount = 0;
+  const countryGuardEscapeCounts = { no_location: 0, country_match: 0, city_only_unknown_country: 0 };
   let scoredPool = scoredPoolRaw;
   if (requestedCountryCode) {
     scoredPool = scoredPoolRaw.filter((sc) => {
@@ -289,16 +291,26 @@ export async function runSourcingOrchestrator(
         countryGuardSerpLocaleSkippedCount++;
       }
 
+      // Track why candidate escaped the guard
+      if (!candidateLocation) {
+        countryGuardEscapeCounts.no_location++;
+      } else if (locationCountryCode === requestedCountryCode) {
+        countryGuardEscapeCounts.country_match++;
+      } else if (!locationCountryCode) {
+        countryGuardEscapeCounts.city_only_unknown_country++;
+      }
+
       return true;
     });
   }
   let countryGuardFilteredCount = countryGuardFilteredCandidateIds.size;
-  if (countryGuardFilteredCount > 0) {
+  if (countryGuardFilteredCount > 0 || countryGuardEscapeCounts.city_only_unknown_country > 0) {
     log.info(
       {
         requestId,
         requestedCountryCode,
         countryGuardFilteredCount,
+        countryGuardEscapeCounts,
       },
       'Country guard filtered pool candidates',
     );
@@ -515,7 +527,7 @@ export async function runSourcingOrchestrator(
             .map((candidateId) => discoveredById.get(candidateId))
             .filter((row): row is NonNullable<typeof row> => Boolean(row))
             .map((row) => toRankingCandidate(row));
-          const scoredDiscovered = rankCandidates(discoveredForRanking, requirements, { fitScoreEpsilon: config.fitScoreEpsilon, locationBoostWeight: config.locationBoostWeight });
+          const scoredDiscovered = rankCandidates(discoveredForRanking, requirements, { fitScoreEpsilon: config.fitScoreEpsilon, locationBoostWeight: config.locationBoostWeight, track: trackDecision?.track });
           for (const sc of scoredDiscovered) {
             scoredDiscoveredById.set(sc.candidateId, sc);
             const passesLocationGate = !hasLocationConstraint || sc.locationMatchType !== 'none';
@@ -1079,6 +1091,7 @@ export async function runSourcingOrchestrator(
     strictBeforeDemotion,
     countryGuardFilteredCount,
     countryGuardSerpLocaleSkippedCount,
+    countryGuardEscapeCounts,
     selectedSnapshotTrack,
     locationCoverageTriggered,
     noveltySuppressedCount,

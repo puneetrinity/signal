@@ -1,5 +1,6 @@
 import type { JobRequirements } from './jd-digest';
-import { canonicalizeSkill, getSkillSurfaceForms } from './jd-digest';
+import { canonicalizeSkill, getSkillSurfaceForms, buildSkillMatchSet } from './jd-digest';
+import type { JobTrack } from './types';
 import { isNoisyHint, PLACEHOLDER_HINTS } from './hint-sanitizer';
 import { SENIORITY_LADDER, normalizeSeniorityFromText, seniorityDistance, type SeniorityBand } from '@/lib/taxonomy/seniority';
 import { detectRoleFamilyFromTitle } from '@/lib/taxonomy/role-family';
@@ -185,17 +186,21 @@ function computeSkillScore(
 ): { score: number; method: 'snapshot' | 'text_fallback' } {
   if (topSkills.length === 0) return { score: 0, method: 'text_fallback' };
 
-  // Prefer snapshot skills (set intersection, no regex needed)
+  // Prefer snapshot skills (concept-expanded set intersection)
   if (candidate.snapshot?.skillsNormalized?.length) {
-    const snapshotSet = new Set(candidate.snapshot.skillsNormalized.map((s) => canonicalizeSkill(s)));
+    const snapshotSet = buildSkillMatchSet(candidate.snapshot.skillsNormalized);
     let matchCount = 0;
     for (const skill of topSkills) {
-      if (snapshotSet.has(canonicalizeSkill(skill))) matchCount++;
+      const forms = getSkillSurfaceForms(skill);
+      if (forms.some((form) => snapshotSet.has(canonicalizeSkill(form)))) matchCount++;
     }
     const overlapRatio = matchCount / topSkills.length;
 
     let domainMatch = 0;
-    if (domain && snapshotSet.has(domain.toLowerCase())) domainMatch = 1;
+    if (domain) {
+      const domainForms = getSkillSurfaceForms(domain);
+      if (domainForms.some((form) => snapshotSet.has(canonicalizeSkill(form)))) domainMatch = 1;
+    }
 
     return { score: 0.8 * overlapRatio + 0.2 * domainMatch, method: 'snapshot' };
   }
@@ -355,19 +360,26 @@ function computeLocationBoost(
   }
 }
 
+const TRACK_WEIGHTS: Record<JobTrack, { skill: number; role: number; seniority: number; freshness: number }> = {
+  tech:     { skill: 0.45, role: 0.15, seniority: 0.25, freshness: 0.15 },
+  non_tech: { skill: 0.25, role: 0.30, seniority: 0.30, freshness: 0.15 },
+  blended:  { skill: 0.35, role: 0.25, seniority: 0.25, freshness: 0.15 },
+};
+
 export function rankCandidates(
   candidates: CandidateForRanking[],
   requirements: JobRequirements,
-  options?: { fitScoreEpsilon?: number; locationBoostWeight?: number },
+  options?: { fitScoreEpsilon?: number; locationBoostWeight?: number; track?: JobTrack },
 ): ScoredCandidate[] {
   // Location boost weight: 0 (default/disabled) preserves existing weights exactly.
   const locationWeight = options?.locationBoostWeight ?? 0;
   const remaining = 1.0 - locationWeight;
+  const base = TRACK_WEIGHTS[options?.track ?? 'tech'];
   const weights = {
-    skill: 0.45 * remaining,
-    role: 0.15 * remaining,
-    seniority: 0.25 * remaining,
-    freshness: 0.15 * remaining,
+    skill: base.skill * remaining,
+    role: base.role * remaining,
+    seniority: base.seniority * remaining,
+    freshness: base.freshness * remaining,
     location: locationWeight,
   };
 

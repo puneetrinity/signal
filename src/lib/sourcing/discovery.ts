@@ -4,7 +4,7 @@ import { createGroqModel } from '@/lib/ai/groq';
 import { searchLinkedInProfilesWithMeta, type SearchGeoContext } from '@/lib/search/providers';
 import { upsertDiscoveredCandidates } from './upsert-candidates';
 import type { JobRequirements } from './jd-digest';
-import { getDiscoverySkillTerms } from './jd-digest';
+import { getDiscoverySkillBuckets } from './jd-digest';
 import type { SourcingConfig } from './config';
 import type { JobTrack } from './types';
 import { createLogger } from '@/lib/logger';
@@ -59,6 +59,9 @@ export interface DiscoveryTelemetry {
     modelName: string | null;
     latencyMs: number | null;
     error: string | null;
+    parseStage: 'none' | 'labeled_sections' | 'inline_buckets' | 'json' | 'repair' | null;
+    rawPreview: string | null;
+    repaired: boolean;
   };
   queryRuns: DiscoveryQueryRunTelemetry[];
 }
@@ -74,15 +77,7 @@ const QueryPlanSchema = z.object({
 });
 
 type QueryPlanSchemaOutput = z.infer<typeof QueryPlanSchema>;
-
-const QUERY_PROMPT = `Generate LinkedIn profile search queries for candidate sourcing.
-
-Rules:
-- Always target public LinkedIn profiles with site:linkedin.com/in
-- "strictQueries" must prioritize location-constrained matches
-- "fallbackQueries" should broaden while preserving role/skills intent
-- Keep each query concise (no long prose), plain search terms only
-- Return valid JSON matching schema`;
+type QueryPlanParseStage = DiscoveryTelemetry['groq']['parseStage'];
 
 const COUNTRY_CODE_BY_LOCATION_TOKEN: Record<string, string> = {
   india: 'IN',
@@ -136,6 +131,82 @@ const LINKEDIN_SITE_SUBDOMAIN_BY_COUNTRY: Record<string, string> = {
 };
 
 const DEFAULT_STRICT_SERPER_TBS = 'qdr:y2';
+
+function isTechLikeQueryTrack(track: JobTrack | null | undefined, requirements: JobRequirements): boolean {
+  if (track === 'tech' || track === 'blended') return true;
+  const roleFamily = (requirements.roleFamily ?? '').toLowerCase();
+  return ['backend', 'frontend', 'fullstack', 'devops', 'sre', 'data', 'ml'].includes(roleFamily);
+}
+
+function buildStructuredQueryPrompt(
+  requirements: JobRequirements,
+  maxQueries: number,
+  track?: JobTrack | null,
+): string {
+  const example = isTechLikeQueryTrack(track, requirements)
+    ? [
+        'Example:',
+        'STRICT:',
+        '- site:linkedin.com/in "staff platform engineer" "Hyderabad, India" kubernetes aws go',
+        '- site:linkedin.com/in "platform engineer" "Hyderabad, India" distributed systems microservices',
+        'FALLBACK:',
+        '- site:linkedin.com/in "staff platform engineer" kubernetes aws go',
+        '- site:linkedin.com/in "platform engineer" distributed systems microservices',
+      ].join('\n')
+    : [
+        'Example:',
+        'STRICT:',
+        '- site:linkedin.com/in "account executive" "Mumbai, India" salesforce outbound quota',
+        '- site:linkedin.com/in "enterprise account executive" "Mumbai, India" pipeline closing',
+        'FALLBACK:',
+        '- site:linkedin.com/in "account executive" salesforce outbound quota',
+        '- site:linkedin.com/in "enterprise account executive" pipeline closing',
+      ].join('\n');
+
+  return [
+    'Generate LinkedIn profile search queries for candidate sourcing.',
+    'Return exactly this format and nothing else:',
+    'STRICT:',
+    '- <query>',
+    '- <query>',
+    'FALLBACK:',
+    '- <query>',
+    '- <query>',
+    '',
+    'Rules:',
+    '- Always target public LinkedIn profiles using site:linkedin.com/in',
+    '- STRICT queries must prioritize requested location when one exists',
+    '- FALLBACK queries should broaden while preserving role and core skills',
+    '- Keep queries concise and search-engine friendly',
+    '- No prose, no commentary, no markdown fences',
+    `- Maximum ${maxQueries} STRICT queries and ${maxQueries} FALLBACK queries`,
+    '',
+    `Track: ${track ?? 'unknown'}`,
+    `Title: ${requirements.title ?? ''}`,
+    `Role family: ${requirements.roleFamily ?? ''}`,
+    `Seniority: ${requirements.seniorityLevel ?? ''}`,
+    `Domain: ${requirements.domain ?? ''}`,
+    `Location: ${requirements.location ?? ''}`,
+    `Top skills: ${requirements.topSkills.slice(0, 8).join(', ')}`,
+    '',
+    example,
+  ].join('\n');
+}
+
+function buildRepairPrompt(rawOutput: string, maxQueries: number): string {
+  return [
+    'Reformat the text below into this exact structure and nothing else:',
+    'STRICT:',
+    '- <query>',
+    'FALLBACK:',
+    '- <query>',
+    '',
+    `Maximum ${maxQueries} STRICT queries and ${maxQueries} FALLBACK queries.`,
+    '',
+    'Text to reformat:',
+    rawOutput.trim().slice(0, 1200),
+  ].join('\n');
+}
 const DEFAULT_FALLBACK_SERPER_TBS = '';
 
 function normalizeLocationToken(text: string): string {
@@ -229,9 +300,12 @@ function normalizeQuery(query: string): string | null {
   return siteScoped.slice(0, 240);
 }
 
-function formatQueryTerm(term: string): string {
+export function formatQueryTerm(term: string, kind: 'exact' | 'concept' = 'exact'): string {
   const trimmed = term.trim();
   if (!trimmed) return '';
+  if (kind === 'concept') {
+    return trimmed.replace(/^"(.*)"$/, '$1');
+  }
   if (/\s/.test(trimmed) && !/^".*"$/.test(trimmed)) {
     return `"${trimmed}"`;
   }
@@ -306,16 +380,87 @@ function coerceQueryPlanFromUnknown(raw: unknown): QueryPlanSchemaOutput | null 
   return parsed.success ? parsed.data : null;
 }
 
-function coerceQueryPlanFromText(text: string): QueryPlanSchemaOutput | null {
+function normalizeQueryLine(value: string): string | null {
+  const cleaned = value
+    .replace(/^[-*•]\s*/, '')
+    .replace(/^\d+[\].)\-:]\s*/, '')
+    .trim();
+  return cleaned || null;
+}
+
+function parseLabeledQueryPlan(text: string): QueryPlanSchemaOutput | null {
+  const stripped = text
+    .replace(/```(?:json|text)?/gi, '')
+    .replace(/```/g, '')
+    .trim();
+  if (!stripped) return null;
+
+  const strictQueries: string[] = [];
+  const fallbackQueries: string[] = [];
+  let currentBucket: 'strict' | 'fallback' | null = null;
+
+  for (const rawLine of stripped.split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    const headerMatch = line.match(/^(strict|fallback)\s*:\s*(.*)$/i);
+    if (headerMatch) {
+      currentBucket = headerMatch[1].toLowerCase() as 'strict' | 'fallback';
+      const inlineValue = normalizeQueryLine(headerMatch[2] ?? '');
+      if (inlineValue) {
+        (currentBucket === 'strict' ? strictQueries : fallbackQueries).push(inlineValue);
+      }
+      continue;
+    }
+
+    const inlineBucketMatch = line.match(/^(strict|fallback)\s*[-:]\s*(.+)$/i);
+    if (inlineBucketMatch) {
+      const bucket = inlineBucketMatch[1].toLowerCase() as 'strict' | 'fallback';
+      const value = normalizeQueryLine(inlineBucketMatch[2]);
+      if (value) {
+        (bucket === 'strict' ? strictQueries : fallbackQueries).push(value);
+      }
+      continue;
+    }
+
+    if (!currentBucket) continue;
+    const value = normalizeQueryLine(line);
+    if (!value) continue;
+    (currentBucket === 'strict' ? strictQueries : fallbackQueries).push(value);
+  }
+
+  const parsed = QueryPlanSchema.safeParse({ strictQueries, fallbackQueries });
+  if (!parsed.success) return null;
+  if (parsed.data.strictQueries.length === 0 && parsed.data.fallbackQueries.length === 0) return null;
+  return parsed.data;
+}
+
+export function parseQueryPlanFromText(text: string): { plan: QueryPlanSchemaOutput | null; parseStage: QueryPlanParseStage } {
+  const labeled = parseLabeledQueryPlan(text);
+  if (labeled) {
+    const nonEmptyInlineBucket = /^(strict|fallback)[ \t]*[-:][ \t]+\S.+$/im.test(text);
+    return {
+      plan: labeled,
+      parseStage: nonEmptyInlineBucket ? 'inline_buckets' : 'labeled_sections',
+    };
+  }
+
   const jsonCandidate = extractJsonCandidate(text);
-  if (!jsonCandidate) return null;
+  if (!jsonCandidate) return { plan: null, parseStage: 'none' };
 
   try {
     const parsed = JSON.parse(jsonCandidate) as unknown;
-    return coerceQueryPlanFromUnknown(parsed);
+    return { plan: coerceQueryPlanFromUnknown(parsed), parseStage: 'json' };
   } catch {
-    return null;
+    return { plan: null, parseStage: 'json' };
   }
+}
+
+function buildGroqRawPreview(text: string): string {
+  return text
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 240);
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -327,28 +472,36 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
-function buildDeterministicQueries(
+export function buildDeterministicQueries(
   requirements: JobRequirements,
   maxQueries: number,
 ): QueryPlan {
   const roleFamily = requirements.roleFamily || '';
   const title = requirements.title?.trim() || '';
   const location = requirements.location || '';
-  const skills = getDiscoverySkillTerms(requirements.topSkills.slice(0, 6), 4)
-    .map(formatQueryTerm)
+  const skillBuckets = getDiscoverySkillBuckets(requirements.topSkills.slice(0, 8), 4, 2);
+  const exactSkills = skillBuckets.exactTerms
+    .map((term) => formatQueryTerm(term, 'exact'))
     .filter(Boolean);
-  const narrowSkills = skills.slice(0, 2);
+  const conceptSkills = skillBuckets.conceptTerms
+    .map((term) => formatQueryTerm(term, 'concept'))
+    .filter(Boolean);
+  const strictSkills = [...exactSkills, ...conceptSkills.slice(0, 1)].slice(0, 4);
+  const fallbackSkills = [...exactSkills, ...conceptSkills].slice(0, 6);
+  const narrowSkills = exactSkills.slice(0, 2).length > 0
+    ? exactSkills.slice(0, 2)
+    : conceptSkills.slice(0, 2);
   const strict: string[] = [];
   const fallback: string[] = [];
 
   // Strict pass: location-targeted queries
-  if (location && skills.length > 0) {
+  if (location && strictSkills.length > 0) {
     if (roleFamily) {
-      strict.push(`site:linkedin.com/in "${roleFamily}" "${location}" ${skills.join(' ')}`);
+      strict.push(`site:linkedin.com/in "${roleFamily}" "${location}" ${strictSkills.join(' ')}`);
     } else {
-      strict.push(`site:linkedin.com/in "${location}" ${skills.join(' ')}`);
+      strict.push(`site:linkedin.com/in "${location}" ${strictSkills.join(' ')}`);
     }
-    if (skills.length > 2) {
+    if (strictSkills.length > 2) {
       if (roleFamily) {
         strict.push(`site:linkedin.com/in "${roleFamily}" "${location}" ${narrowSkills.join(' ')}`);
       } else {
@@ -359,30 +512,30 @@ function buildDeterministicQueries(
   if (location && title) {
     strict.push(`site:linkedin.com/in "${title}" "${location}"`);
   }
-  if (location && roleFamily && skills.length === 0) {
+  if (location && roleFamily && exactSkills.length === 0 && conceptSkills.length === 0) {
     strict.push(`site:linkedin.com/in "${roleFamily}" "${location}"`);
   }
 
   // Fallback pass: without location (broader reach)
-  if (roleFamily && skills.length > 0) {
-    fallback.push(`site:linkedin.com/in "${roleFamily}" ${skills.join(' ')}`);
+  if (roleFamily && fallbackSkills.length > 0) {
+    fallback.push(`site:linkedin.com/in "${roleFamily}" ${fallbackSkills.join(' ')}`);
   }
   if (title) {
     fallback.push(`site:linkedin.com/in "${title}"`);
-    if (skills.length > 0) {
-      fallback.push(`site:linkedin.com/in "${title}" ${skills.join(' ')}`);
+    if (fallbackSkills.length > 0) {
+      fallback.push(`site:linkedin.com/in "${title}" ${fallbackSkills.join(' ')}`);
     }
   }
-  if (skills.length > 0) {
-    fallback.push(`site:linkedin.com/in ${skills.join(' ')}`);
+  if (fallbackSkills.length > 0) {
+    fallback.push(`site:linkedin.com/in ${fallbackSkills.join(' ')}`);
   }
-  if (skills.length > 2 && roleFamily) {
+  if (fallbackSkills.length > 2 && roleFamily) {
     fallback.push(`site:linkedin.com/in "${roleFamily}" ${narrowSkills.join(' ')}`);
   }
-  if (roleFamily && skills.length === 0) {
+  if (roleFamily && fallbackSkills.length === 0) {
     fallback.push(`site:linkedin.com/in "${roleFamily}"`);
   }
-  if (!roleFamily && !title && location && skills.length === 0) {
+  if (!roleFamily && !title && location && fallbackSkills.length === 0) {
     fallback.push(`site:linkedin.com/in "${location}"`);
   }
 
@@ -410,6 +563,9 @@ async function buildHybridQueries(
     modelName: null,
     latencyMs: null,
     error: null,
+    parseStage: null,
+    rawPreview: null,
+    repaired: false,
   };
 
   if (config.queryGenMode !== 'hybrid') {
@@ -430,28 +586,32 @@ async function buildHybridQueries(
       const { model, modelName } = await createGroqModel(apiKey);
       groqMeta.modelName = modelName;
 
-      const prompt = [
-        QUERY_PROMPT,
-        `Track: ${track ?? 'unknown'}`,
-        `Title: ${requirements.title ?? ''}`,
-        `Role family: ${requirements.roleFamily ?? ''}`,
-        `Seniority: ${requirements.seniorityLevel ?? ''}`,
-        `Domain: ${requirements.domain ?? ''}`,
-        `Location: ${requirements.location ?? ''}`,
-        `Top skills: ${requirements.topSkills.slice(0, 8).join(', ')}`,
-        `Generate up to ${maxQueries} strict and ${maxQueries} fallback queries.`,
-      ].join('\n');
-      const formatReminder =
-        '\nReturn ONLY valid JSON with keys "strictQueries" and "fallbackQueries".';
-      let object: QueryPlanSchemaOutput | null = null;
+      const prompt = buildStructuredQueryPrompt(requirements, maxQueries, track);
       const textGenerated = await withTimeout(
         generateText({
           model,
-          prompt: `${prompt}${formatReminder}`,
+          prompt,
         }),
         config.queryGroqTimeoutMs,
       );
-      object = coerceQueryPlanFromText(textGenerated.text);
+      let { plan: object, parseStage } = parseQueryPlanFromText(textGenerated.text);
+      groqMeta.parseStage = parseStage;
+      groqMeta.rawPreview = buildGroqRawPreview(textGenerated.text);
+
+      if (!object) {
+        const repairedText = await withTimeout(
+          generateText({
+            model,
+            prompt: buildRepairPrompt(textGenerated.text, maxQueries),
+          }),
+          config.queryGroqTimeoutMs,
+        );
+        const repaired = parseQueryPlanFromText(repairedText.text);
+        groqMeta.rawPreview = buildGroqRawPreview(repairedText.text);
+        groqMeta.parseStage = repaired.plan ? 'repair' : (repaired.parseStage ?? 'repair');
+        groqMeta.repaired = repaired.plan !== null;
+        object = repaired.plan;
+      }
 
       if (!object) {
         throw new Error('Groq query plan parse_failed');
@@ -482,10 +642,11 @@ async function buildHybridQueries(
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       groqMeta.error = message;
-      if (attempt >= attempts) {
+      const isParseFailure = typeof message === 'string' && message.includes('parse_failed');
+      if (attempt >= attempts || isParseFailure) {
         log.warn({ maxAttempts: attempts, error: message }, 'Hybrid query generation fallback to deterministic');
       }
-      if (attempt >= attempts) break;
+      if (attempt >= attempts || isParseFailure) break;
     }
   }
 
@@ -742,6 +903,9 @@ export async function discoverCandidates(
       modelName: null,
       latencyMs: null,
       error: null,
+      parseStage: null,
+      rawPreview: null,
+      repaired: false,
     },
     queryRuns,
   };

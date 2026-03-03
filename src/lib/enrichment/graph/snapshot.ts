@@ -9,6 +9,7 @@ import { createLogger } from '@/lib/logger';
 import { normalizeSeniorityFromText } from '@/lib/taxonomy/seniority';
 import { getSourcingConfig } from '@/lib/sourcing/config';
 import { extractSerpSignals } from '@/lib/search/serp-signals';
+import { isLikelyLocationHint } from '@/lib/sourcing/hint-sanitizer';
 import type { EnrichmentState, PartialEnrichmentState } from './types';
 
 const log = createLogger('SnapshotNode');
@@ -37,6 +38,11 @@ export async function computeSnapshotNode(
     const serpSignals = extractSerpSignals(hints?.serpMeta);
     const activityRecencyDays = serpSignals.resultDateDays;
 
+    // Validate location before storing — reject noisy values like job titles,
+    // "500+ connections", etc. that pollute ranking location match.
+    const rawLocation = hints?.locationHint ?? null;
+    const snapshotLocation = rawLocation && isLikelyLocationHint(rawLocation) ? rawLocation : null;
+
     // Build fingerprint from summaryMeta or identity keys
     const meta = state.summaryMeta as Record<string, unknown> | null;
     let sourceFingerprint: string | null = null;
@@ -64,7 +70,7 @@ export async function computeSnapshotNode(
         skillsNormalized: skills,
         roleType: hints?.roleType ?? null,
         seniorityBand,
-        location: hints?.locationHint ?? null,
+        location: snapshotLocation,
         activityRecencyDays,
         computedAt: now,
         staleAfter,
@@ -75,7 +81,7 @@ export async function computeSnapshotNode(
         skillsNormalized: skills,
         roleType: hints?.roleType ?? null,
         seniorityBand,
-        location: hints?.locationHint ?? null,
+        location: snapshotLocation,
         activityRecencyDays,
         computedAt: now,
         staleAfter,

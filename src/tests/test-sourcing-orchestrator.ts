@@ -586,6 +586,144 @@ console.log('\n--- Alias-Aware Text Fallback ---');
 }
 
 // ---------------------------------------------------------------------------
+// Test: Track-specific ranking weights + concept-expanded snapshot matching
+// ---------------------------------------------------------------------------
+
+console.log('\n--- Track Weights + Snapshot Concepts ---');
+
+{
+  const requirements: JobRequirements = {
+    title: 'Technical Account Manager',
+    topSkills: ['Salesforce', 'Outbound', 'Pipeline Management', 'Consultative Selling'],
+    seniorityLevel: 'senior',
+    domain: null,
+    roleFamily: 'devops',
+    location: null,
+    experienceYears: null,
+    education: null,
+  };
+
+  const skillHeavy: CandidateForRanking = {
+    id: 'skill-heavy',
+    headlineHint: 'Account Manager',
+    locationHint: null,
+    searchTitle: 'Account Manager',
+    searchSnippet: 'Salesforce outbound pipeline management consultative selling',
+    enrichmentStatus: 'completed',
+    lastEnrichedAt: null,
+    snapshot: {
+      skillsNormalized: ['salesforce', 'outbound', 'pipeline management', 'consultative selling'],
+      roleType: null,
+      seniorityBand: 'mid',
+      location: null,
+      activityRecencyDays: 10,
+      computedAt: new Date('2025-01-01'),
+      staleAfter: new Date('2025-07-01'),
+    },
+  };
+
+  const roleHeavy: CandidateForRanking = {
+    id: 'role-heavy',
+    headlineHint: 'Senior Platform Engineer',
+    locationHint: null,
+    searchTitle: 'Senior Platform Engineer',
+    searchSnippet: 'Platform engineering and sre',
+    enrichmentStatus: 'completed',
+    lastEnrichedAt: null,
+    snapshot: {
+      skillsNormalized: ['excel'],
+      roleType: null,
+      seniorityBand: 'senior',
+      location: null,
+      activityRecencyDays: 10,
+      computedAt: new Date('2025-01-01'),
+      staleAfter: new Date('2025-07-01'),
+    },
+  };
+
+  const techScores = rankCandidates([skillHeavy, roleHeavy], requirements, { track: 'tech' });
+  const nonTechScores = rankCandidates([skillHeavy, roleHeavy], requirements, { track: 'non_tech' });
+  const blendedScores = rankCandidates([skillHeavy, roleHeavy], requirements, { track: 'blended' });
+
+  const techSkillHeavy = techScores.find((c) => c.candidateId === 'skill-heavy')!;
+  const techRoleHeavy = techScores.find((c) => c.candidateId === 'role-heavy')!;
+  const nonTechSkillHeavy = nonTechScores.find((c) => c.candidateId === 'skill-heavy')!;
+  const nonTechRoleHeavy = nonTechScores.find((c) => c.candidateId === 'role-heavy')!;
+  const blendedSkillHeavy = blendedScores.find((c) => c.candidateId === 'skill-heavy')!;
+  const blendedRoleHeavy = blendedScores.find((c) => c.candidateId === 'role-heavy')!;
+
+  assert(techSkillHeavy.fitScore > techRoleHeavy.fitScore, 'Track weights: tech favors stronger skill overlap');
+  assert(nonTechRoleHeavy.fitScore > nonTechSkillHeavy.fitScore, 'Track weights: non_tech favors role/seniority more heavily');
+
+  const techDelta = techSkillHeavy.fitScore - techRoleHeavy.fitScore;
+  const nonTechDelta = nonTechSkillHeavy.fitScore - nonTechRoleHeavy.fitScore;
+  const blendedDelta = blendedSkillHeavy.fitScore - blendedRoleHeavy.fitScore;
+  assert(blendedDelta < techDelta && blendedDelta > nonTechDelta, 'Track weights: blended sits between tech and non_tech');
+
+  const defaultScores = rankCandidates([skillHeavy], requirements);
+  const explicitTechScores = rankCandidates([skillHeavy], requirements, { track: 'tech' });
+  assert(
+    Math.abs(defaultScores[0].fitScore - explicitTechScores[0].fitScore) < 1e-9,
+    'Track weights: omitting track preserves tech-default behavior',
+  );
+}
+
+{
+  const makeSnapshotCandidate = (
+    id: string,
+    skillsNormalized: string[],
+  ): CandidateForRanking => ({
+    id,
+    headlineHint: 'Staff Platform Engineer',
+    locationHint: null,
+    searchTitle: 'Staff Platform Engineer',
+    searchSnippet: null,
+    enrichmentStatus: 'completed',
+    lastEnrichedAt: null,
+    snapshot: {
+      skillsNormalized,
+      roleType: null,
+      seniorityBand: 'staff',
+      location: null,
+      activityRecencyDays: 5,
+      computedAt: new Date('2025-01-01'),
+      staleAfter: new Date('2025-07-01'),
+    },
+  });
+
+  const commonReq = {
+    title: 'Staff Platform Engineer',
+    seniorityLevel: 'staff',
+    roleFamily: 'devops',
+    location: null,
+    experienceYears: null,
+    education: null,
+  };
+
+  const microVsSoa = rankCandidates(
+    [makeSnapshotCandidate('soa-snapshot', ['soa'])],
+    { ...commonReq, topSkills: ['microservices'], domain: null },
+  )[0];
+  assert(microVsSoa.fitBreakdown.skillScore > 0, 'Snapshot concepts: microservices JD matches snapshot soa');
+  assert(microVsSoa.fitBreakdown.skillScoreMethod === 'snapshot', 'Snapshot concepts: concept match stays on snapshot path');
+
+  const soaVsMicro = rankCandidates(
+    [makeSnapshotCandidate('micro-snapshot', ['microservices'])],
+    { ...commonReq, topSkills: ['soa'], domain: null },
+  )[0];
+  assert(soaVsMicro.fitBreakdown.skillScore > 0, 'Snapshot concepts: soa JD matches snapshot microservices');
+
+  const domainConcept = rankCandidates(
+    [makeSnapshotCandidate('api-snapshot', ['rest api'])],
+    { ...commonReq, topSkills: ['excel'], domain: 'apis' },
+  )[0];
+  assert(
+    Math.abs(domainConcept.fitBreakdown.skillScore - 0.2) < 1e-9,
+    'Snapshot concepts: domain concept match contributes via snapshot path',
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Test: Greater Area location normalization (P1a)
 // ---------------------------------------------------------------------------
 

@@ -208,6 +208,7 @@ async function processRerankJob(
   const scored = rankCandidates(rankingCandidates, requirements, {
     fitScoreEpsilon: config.fitScoreEpsilon,
     locationBoostWeight: config.locationBoostWeight,
+    track,
   });
 
   // 6. Sort: strict first, then expanded. Within each: epsilon comparator.

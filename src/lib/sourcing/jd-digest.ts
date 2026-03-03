@@ -6,6 +6,7 @@ import { detectRoleFamilyFromTitle } from '@/lib/taxonomy/role-family';
  * canonical form so both JD skills and snapshot skills compare consistently.
  */
 const SKILL_ALIASES: Record<string, string> = {
+  // Tech
   'nodejs': 'node.js',
   'node': 'node.js',
   'reactjs': 'react',
@@ -38,13 +39,58 @@ const SKILL_ALIASES: Record<string, string> = {
   'msg queue': 'message queues',
   'pub/sub': 'message queues',
   'pubsub': 'message queues',
+  // Sales / GTM
+  'sfdc': 'salesforce',
+  'salesforce crm': 'salesforce',
+  'salesforce.com': 'salesforce',
+  'enterprise selling': 'enterprise sales',
+  'b2b sales': 'enterprise sales',
+  'outbound sales': 'outbound',
+  'outbound prospecting': 'outbound',
+  'cold outreach': 'outbound',
+  'pipeline mgmt': 'pipeline management',
+  'deal management': 'pipeline management',
+  'forecast management': 'pipeline management',
+  'forecasting': 'pipeline management',
+  'solution selling': 'consultative selling',
+  'challenger sale': 'consultative selling',
+  'meddic': 'consultative selling',
+  'value selling': 'consultative selling',
+  // Customer success / TAM
+  'csm': 'customer success',
+  'customer success management': 'customer success',
+  'client success': 'customer success',
+  'account management': 'stakeholder management',
+  'relationship management': 'stakeholder management',
+  'client management': 'stakeholder management',
+  'key account management': 'stakeholder management',
+  'api integration': 'integrations',
+  'api integrations': 'integrations',
+  'system integration': 'integrations',
+  'system integrations': 'integrations',
+  'rest api': 'apis',
+  'rest apis': 'apis',
+  'api development': 'apis',
+  'web apis': 'apis',
 };
 
 const SKILL_CONCEPT_SURFACE_FORMS: Record<string, string[]> = {
+  // Tech concepts
   'microservices': ['microservices', 'microservice', 'service oriented', 'soa'],
   'event-driven architecture': ['event-driven architecture', 'event driven architecture', 'event-driven', 'event driven', 'event streaming'],
   'distributed systems': ['distributed systems', 'distributed system', 'distributed architecture', 'scalable systems'],
   'message queues': ['message queues', 'message queue', 'pubsub', 'pub sub'],
+  // Sales / GTM concepts
+  'enterprise sales': ['enterprise sales', 'enterprise selling', 'b2b sales', 'strategic sales', 'complex sales'],
+  'outbound': ['outbound', 'outbound sales', 'outbound prospecting', 'cold outreach', 'cold calling', 'business development'],
+  'pipeline management': ['pipeline management', 'pipeline mgmt', 'deal management', 'forecast', 'forecasting', 'sales pipeline'],
+  'salesforce': ['salesforce', 'sfdc', 'salesforce crm', 'salesforce.com'],
+  'consultative selling': ['consultative selling', 'solution selling', 'challenger', 'meddic', 'value selling'],
+  // Customer success / TAM concepts
+  'customer success': ['customer success', 'csm', 'client success', 'customer retention', 'customer engagement'],
+  'stakeholder management': ['stakeholder management', 'account management', 'relationship management', 'client management', 'key accounts'],
+  'integrations': ['integrations', 'integration', 'api integration', 'system integration', 'platform integration'],
+  'apis': ['apis', 'api', 'rest api', 'api development', 'web api', 'api design'],
 };
 
 export function canonicalizeSkill(skill: string): string {
@@ -68,27 +114,73 @@ export function getSkillSurfaceForms(skill: string): string[] {
   return [...forms];
 }
 
+/**
+ * Build a set of all canonical match keys for a list of skills.
+ * Expands each skill to all surface forms, canonicalizes each form.
+ * Used for concept-aware set intersection in snapshot matching.
+ */
+export function buildSkillMatchSet(skills: string[]): Set<string> {
+  const keys = new Set<string>();
+  for (const skill of skills) {
+    for (const form of getSkillSurfaceForms(skill)) {
+      keys.add(canonicalizeSkill(form));
+    }
+  }
+  return keys;
+}
+
 export function getDiscoverySkillTerms(skills: string[], maxTerms: number = 6): string[] {
-  const terms: string[] = [];
+  const buckets = getDiscoverySkillBuckets(skills, maxTerms, maxTerms);
+  return [...buckets.exactTerms, ...buckets.conceptTerms].slice(0, maxTerms);
+}
+
+export interface DiscoverySkillBuckets {
+  exactTerms: string[];
+  conceptTerms: string[];
+}
+
+export function getDiscoverySkillBuckets(
+  skills: string[],
+  maxExactTerms: number = 4,
+  maxConceptTerms: number = 2,
+): DiscoverySkillBuckets {
+  const exactTerms: string[] = [];
+  const conceptTerms: string[] = [];
   const seen = new Set<string>();
 
   for (const raw of skills) {
-    if (terms.length >= maxTerms) break;
     const canonical = canonicalizeSkill(raw);
-    if (!seen.has(canonical)) {
-      terms.push(canonical);
-      seen.add(canonical);
+    const conceptForms = SKILL_CONCEPT_SURFACE_FORMS[canonical] ?? [];
+    const isConcept = conceptForms.length > 0;
+
+    if (isConcept) {
+      if (!seen.has(canonical) && conceptTerms.length < maxConceptTerms) {
+        conceptTerms.push(canonical);
+        seen.add(canonical);
+      }
+      continue;
     }
 
-    const conceptForms = (SKILL_CONCEPT_SURFACE_FORMS[canonical] ?? [])
-      .filter((form) => !seen.has(form));
-    if (conceptForms.length > 0 && terms.length < maxTerms) {
-      terms.push(conceptForms[0]);
-      seen.add(conceptForms[0]);
+    if (!seen.has(canonical) && exactTerms.length < maxExactTerms) {
+      exactTerms.push(canonical);
+      seen.add(canonical);
     }
   }
 
-  return terms.slice(0, maxTerms);
+  // If we still have concept capacity, add one alternate surface for broadening.
+  for (const raw of skills) {
+    if (conceptTerms.length >= maxConceptTerms) break;
+    const canonical = canonicalizeSkill(raw);
+    const conceptForms = SKILL_CONCEPT_SURFACE_FORMS[canonical] ?? [];
+    for (const form of conceptForms) {
+      if (seen.has(form)) continue;
+      conceptTerms.push(form);
+      seen.add(form);
+      break;
+    }
+  }
+
+  return { exactTerms, conceptTerms };
 }
 
 export interface JdDigestParsed {

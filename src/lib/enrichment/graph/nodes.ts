@@ -27,6 +27,7 @@ import { shouldPersistIdentity, type ScoreBreakdown } from '../scoring';
 import { extractAllHints, extractNameFromSlug, applySerpMetaOverrides } from '../hint-extraction';
 import { getEnrichmentMinConfidenceThreshold } from '../config';
 import { enqueueRerankForCandidate } from '@/lib/sourcing/rerank';
+import { rescoreCompletedSourcingRowsForCandidate } from '@/lib/sourcing/rescore';
 import {
   type EnrichmentState,
   type PartialEnrichmentState,
@@ -1662,8 +1663,19 @@ export async function persistSummaryNode(
         );
       });
 
-    // Enqueue post-enrichment rerank for all sourcing requests containing this candidate.
+    // Post-enrichment scoring: inline patch fills null fitScores immediately,
+    // then queued rerank recomputes the full request ordering.
     if (state.status !== 'failed') {
+      await rescoreCompletedSourcingRowsForCandidate(state.tenantId, state.candidateId).catch((error) => {
+        log.warn(
+          {
+            tenantId: state.tenantId,
+            candidateId: state.candidateId,
+            error: error instanceof Error ? error.message : error,
+          },
+          'Inline rescore failed (queued rerank will still run)',
+        );
+      });
       await enqueueRerankForCandidate(state.tenantId, state.candidateId).catch((error) => {
         log.warn(
           {
