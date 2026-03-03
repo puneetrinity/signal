@@ -661,10 +661,11 @@ export async function runSourcingOrchestrator(
     const rescuedStrict = demotedStrictCandidates
       .filter((sc) => {
         if (sc.fitScore < config.strictRescueMinFitScore) return false;
-        // Non-tech: only rescue candidates with relevant role (roleScore >= 0.6).
+        // Non-tech/blended: only rescue candidates with relevant role (roleScore >= 0.6).
         // Prevents wrong-role engineers from being rescued into the top bucket
-        // purely due to location match.
-        if (trackDecision?.track === 'non_tech' && sc.fitBreakdown.roleScore < 0.6) return false;
+        // purely due to location match. Applies to both non_tech and blended tracks
+        // since blended TAM jobs still need role-aware rescue.
+        if (trackDecision?.track !== 'tech' && sc.fitBreakdown.roleScore < 0.6) return false;
         return true;
       })
       .slice(0, config.strictRescueCount);

@@ -2124,6 +2124,39 @@ console.log('\n--- Track Classifier: Role Family Boost ---');
     qaOnTech.fitBreakdown.roleScore === 1.0,
     'Rescue gate: QA on tech with roleFamily=qa gets roleScore 1.0 (no gate needed)',
   );
+
+  // Blended track should also get harsh unknown-role scoring (0.15, not 0.3)
+  // This covers TAM jobs classified as blended due to heavy tech keywords in JD
+  const unknownOnBlended: CandidateForRanking = {
+    id: 'rescue-unknown-blended',
+    headlineHint: 'Senior Software Engineer at Snowflake',
+    locationHint: 'Bangalore, India',
+    searchTitle: 'Senior Software Engineer at Snowflake',
+    searchSnippet: null,
+    enrichmentStatus: 'pending',
+    lastEnrichedAt: null,
+    snapshot: null,
+  };
+  const unknownBlendedScored = rankCandidates(
+    [unknownOnBlended],
+    tamReq,
+    { track: 'blended' },
+  )[0];
+  assert(
+    unknownBlendedScored.fitBreakdown.roleScore === 0.15,
+    'Rescue gate: Unknown role on blended track gets 0.15 (same as non_tech)',
+  );
+
+  // Verify tech track still gives 0.3 for unknown role
+  const unknownOnTech = rankCandidates(
+    [unknownOnBlended],
+    tamReq,
+    { track: 'tech' },
+  )[0];
+  assert(
+    unknownOnTech.fitBreakdown.roleScore === 0.3,
+    'Rescue gate: Unknown role on tech track still gets 0.3',
+  );
 }
 
 // ---------------------------------------------------------------------------

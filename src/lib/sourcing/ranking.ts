@@ -343,8 +343,8 @@ function computeRoleScore(
   const candidateFamily = detectRoleFamilyFromTitle(headline);
 
   if (!candidateFamily) {
-    // For non-tech, unknown role is harsher — random engineers should sink
-    return track === 'non_tech' ? 0.15 : 0.3;
+    // For non-tech/blended, unknown role is harsher — random engineers should sink
+    return track !== 'tech' ? 0.15 : 0.3;
   }
   if (candidateFamily === targetRoleFamily) return 1.0;
 
@@ -419,11 +419,11 @@ export function rankCandidates(
       const { matchTier, locationMatchType } = classifyLocationMatch(c, requirements.location);
       const locationBoost = computeLocationBoost(locationMatchType, !!requirements.location);
 
-      // Dampen seniority contribution when role is a clear mismatch or unknown on non-tech.
+      // Dampen seniority contribution when role is a clear mismatch or unknown on non-tech/blended.
       // A "Senior Software Engineer" shouldn't outrank a TAM just because of seniority.
       const isRoleMismatch = requirements.roleFamily && (
         roleScore <= 0.1 ||
-        (options?.track === 'non_tech' && roleScore <= 0.15)
+        (options?.track !== 'tech' && roleScore <= 0.15)
       );
       const seniorityDampen = isRoleMismatch ? 0.4 : 1.0;
       const effectiveSeniority = seniorityScore * seniorityDampen;
