@@ -659,7 +659,14 @@ export async function runSourcingOrchestrator(
     config.strictRescueCount > 0
   ) {
     const rescuedStrict = demotedStrictCandidates
-      .filter((sc) => sc.fitScore >= config.strictRescueMinFitScore)
+      .filter((sc) => {
+        if (sc.fitScore < config.strictRescueMinFitScore) return false;
+        // Non-tech: only rescue candidates with relevant role (roleScore >= 0.6).
+        // Prevents wrong-role engineers from being rescued into the top bucket
+        // purely due to location match.
+        if (trackDecision?.track === 'non_tech' && sc.fitBreakdown.roleScore < 0.6) return false;
+        return true;
+      })
       .slice(0, config.strictRescueCount);
 
     if (rescuedStrict.length > 0) {

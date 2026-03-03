@@ -2037,6 +2037,96 @@ console.log('\n--- Track Classifier: Role Family Boost ---');
 }
 
 // ---------------------------------------------------------------------------
+// Strict Rescue Role Gate (non-tech)
+// ---------------------------------------------------------------------------
+{
+  console.log('\n--- Strict Rescue Role Gate ---');
+
+  // Scenario: TAM job, non_tech track. Pool has:
+  // - QA Engineer (wrong role, location match) — should NOT be rescued
+  // - Customer Success Manager (adjacent role, location match) — should be rescued
+  // - TAM (exact role, location match) — should be rescued
+
+  const tamReq: JobRequirements = {
+    title: 'Technical Account Manager',
+    topSkills: ['APIs', 'cloud', 'integrations'],
+    seniorityLevel: 'senior',
+    domain: null,
+    roleFamily: 'technical_account_manager',
+    location: 'Bangalore, India',
+    experienceYears: null,
+    education: null,
+  };
+
+  const qaCandidate: CandidateForRanking = {
+    id: 'rescue-qa',
+    headlineHint: 'Senior QA Engineer',
+    locationHint: 'Bangalore, India',
+    searchTitle: 'Senior QA Engineer',
+    searchSnippet: 'Testing automation expert',
+    enrichmentStatus: 'pending',
+    lastEnrichedAt: null,
+    snapshot: null,
+  };
+  const csCandidate: CandidateForRanking = {
+    id: 'rescue-cs',
+    headlineHint: 'Customer Success Manager',
+    locationHint: 'Bangalore, India',
+    searchTitle: 'Customer Success Manager',
+    searchSnippet: 'Customer retention and growth',
+    enrichmentStatus: 'pending',
+    lastEnrichedAt: null,
+    snapshot: null,
+  };
+  const tamCandidate: CandidateForRanking = {
+    id: 'rescue-tam',
+    headlineHint: 'Technical Account Manager at AWS',
+    locationHint: 'Bangalore, India',
+    searchTitle: 'Technical Account Manager at AWS',
+    searchSnippet: 'Cloud solutions and API integrations',
+    enrichmentStatus: 'pending',
+    lastEnrichedAt: null,
+    snapshot: null,
+  };
+
+  const rescueScored = rankCandidates(
+    [qaCandidate, csCandidate, tamCandidate],
+    tamReq,
+    { track: 'non_tech' },
+  );
+
+  const qaScored = rescueScored.find((s) => s.candidateId === 'rescue-qa')!;
+  const csScored = rescueScored.find((s) => s.candidateId === 'rescue-cs')!;
+  const tamScored = rescueScored.find((s) => s.candidateId === 'rescue-tam')!;
+
+  // QA Engineer should have roleScore < 0.6 → blocked by rescue gate
+  assert(
+    qaScored.fitBreakdown.roleScore < 0.6,
+    'Rescue gate: QA Engineer roleScore < 0.6 (would be blocked)',
+  );
+  // Customer Success should have roleScore >= 0.6 → passes rescue gate
+  assert(
+    csScored.fitBreakdown.roleScore >= 0.6,
+    'Rescue gate: Customer Success roleScore >= 0.6 (would pass)',
+  );
+  // TAM should have roleScore = 1.0 → passes rescue gate
+  assert(
+    tamScored.fitBreakdown.roleScore >= 0.6,
+    'Rescue gate: TAM roleScore >= 0.6 (would pass)',
+  );
+  // On tech track, QA would get 0.3 (still < 0.6), but the gate only applies to non_tech
+  const qaOnTech = rankCandidates(
+    [qaCandidate],
+    { ...tamReq, roleFamily: 'qa' },
+    { track: 'tech' },
+  )[0];
+  assert(
+    qaOnTech.fitBreakdown.roleScore === 1.0,
+    'Rescue gate: QA on tech with roleFamily=qa gets roleScore 1.0 (no gate needed)',
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 
