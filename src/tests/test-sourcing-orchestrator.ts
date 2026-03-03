@@ -12,6 +12,8 @@ import { extractLocationFromSnippet } from '@/lib/enrichment/hint-extraction';
 import { isLikelyLocationHint } from '@/lib/sourcing/hint-sanitizer';
 import { jobTrackToDbFilter } from '@/lib/sourcing/types';
 import { detectRoleFamilyFromTitle } from '@/lib/taxonomy/role-family';
+import { scoreDeterministic } from '@/lib/sourcing/track-resolver';
+import type { SourcingJobContextInput } from '@/lib/sourcing/jd-digest';
 
 let passed = 0;
 let failed = 0;
@@ -1958,6 +1960,80 @@ console.log('\n--- New Config Fields ---');
     }
   }
   assert(!promotedTechTrack.has('strict-tam'), 'P3: Tech track does not provisionally promote strict-phase discovered candidates');
+}
+
+// ---------------------------------------------------------------------------
+// Track Classifier: Role Family Boost Direction
+// ---------------------------------------------------------------------------
+console.log('\n--- Track Classifier: Role Family Boost ---');
+
+{
+  const config = getSourcingConfig();
+
+  // Helper to build minimal job context + requirements for track scoring
+  function scoreTrack(title: string, skills: string[], jdSnippet: string) {
+    const jobContext: SourcingJobContextInput = {
+      jdDigest: jdSnippet,
+      title,
+      skills,
+    };
+    const requirements = buildJobRequirements(jobContext);
+    return scoreDeterministic(jobContext, requirements, config);
+  }
+
+  // AE with sales keywords → non_tech
+  const aeResult = scoreTrack(
+    'Senior Account Executive',
+    ['Salesforce', 'Enterprise Sales', 'Pipeline Management'],
+    'Looking for an account executive to drive enterprise sales and manage pipeline using Salesforce CRM. Quota attainment and negotiation skills required.',
+  );
+  assert(aeResult.track === 'non_tech', 'Track: AE with sales keywords → non_tech');
+  assert(aeResult.roleFamilySignal === 'account_executive', 'Track: AE roleFamilySignal correct');
+
+  // Customer Success Manager → non_tech
+  const csResult = scoreTrack(
+    'Customer Success Manager',
+    ['Customer Success', 'Account Management'],
+    'Customer success manager to own client relationships and drive retention. Experience with SaaS customer success required.',
+  );
+  assert(csResult.track === 'non_tech', 'Track: CSM → non_tech');
+
+  // TAM with cloud/API keywords → non_tech (the bug we fixed)
+  const tamResult = scoreTrack(
+    'Technical Account Manager',
+    ['Cloud Infrastructure', 'APIs', 'Customer Success', 'Salesforce'],
+    'Technical account manager for enterprise accounts. Cloud infrastructure AWS Azure GCP APIs integrations DevOps SaaS platform.',
+  );
+  assert(tamResult.track === 'non_tech', 'Track: TAM with cloud/API keywords → non_tech');
+  assert(tamResult.roleFamilySignal === 'technical_account_manager', 'Track: TAM roleFamilySignal correct');
+  assert(tamResult.nonTechScore > tamResult.techScore, 'Track: TAM nonTechScore > techScore');
+
+  // Staff Platform Engineer → still tech
+  const techResult = scoreTrack(
+    'Staff Platform Engineer',
+    ['Kubernetes', 'AWS', 'Go', 'Terraform'],
+    'Platform engineer to build cloud-native infrastructure with Kubernetes AWS Go Terraform microservices CI/CD distributed systems.',
+  );
+  assert(techResult.track === 'tech', 'Track: Platform Engineer → still tech');
+  assert(techResult.roleFamilySignal === 'devops', 'Track: Platform Engineer roleFamilySignal = devops');
+  assert(techResult.techScore > techResult.nonTechScore, 'Track: Platform Engineer techScore > nonTechScore');
+
+  // Data Scientist → still tech
+  const dsResult = scoreTrack(
+    'Senior Data Scientist',
+    ['Python', 'PyTorch', 'Machine Learning'],
+    'Data scientist to build ML models using Python PyTorch and deep learning. Experience with NLP and computer vision required.',
+  );
+  assert(dsResult.track === 'tech', 'Track: Data Scientist → still tech');
+
+  // Sales Engineer → non_tech (despite tech keyword overlap)
+  const seResult = scoreTrack(
+    'Sales Engineer',
+    ['APIs', 'Cloud', 'Salesforce'],
+    'Sales engineer to support enterprise sales with technical demos and POCs. Experience with cloud platforms and API integrations.',
+  );
+  assert(seResult.track === 'non_tech', 'Track: Sales Engineer → non_tech');
+  assert(seResult.roleFamilySignal === 'sales_engineer', 'Track: Sales Engineer roleFamilySignal correct');
 }
 
 // ---------------------------------------------------------------------------

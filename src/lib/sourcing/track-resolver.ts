@@ -115,6 +115,19 @@ const NON_TECH_PATTERNS = NON_TECH_KEYWORDS.map((kw) => ({
 }));
 
 // ---------------------------------------------------------------------------
+// Role family classification
+// ---------------------------------------------------------------------------
+
+const TECH_ROLE_FAMILIES = new Set([
+  'backend', 'frontend', 'fullstack', 'devops', 'data', 'qa', 'security', 'mobile',
+]);
+
+const NON_TECH_ROLE_FAMILIES = new Set([
+  'account_executive', 'customer_success', 'technical_account_manager',
+  'sales_engineer', 'business_development', 'account_manager',
+]);
+
+// ---------------------------------------------------------------------------
 // Deterministic scoring (synchronous, <1ms)
 // ---------------------------------------------------------------------------
 
@@ -165,12 +178,16 @@ export function scoreDeterministic(
     }
   }
 
-  // Role family boost: all 8 families in role-family.ts are tech
+  // Role family boost: boost the correct side based on family type
   const roleFamilySignal = requirements.roleFamily
     ?? (jobContext.title ? detectRoleFamilyFromTitle(jobContext.title) : null);
 
   if (roleFamilySignal) {
-    techRaw += 2.0;
+    if (TECH_ROLE_FAMILIES.has(roleFamilySignal)) {
+      techRaw += 2.0;
+    } else if (NON_TECH_ROLE_FAMILIES.has(roleFamilySignal)) {
+      nonTechRaw += 2.0;
+    }
   }
 
   // Zero signals → default to tech with low confidence
