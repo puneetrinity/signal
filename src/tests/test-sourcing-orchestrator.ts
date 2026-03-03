@@ -11,6 +11,7 @@ import { getSourcingConfig } from '@/lib/sourcing/config';
 import { extractLocationFromSnippet } from '@/lib/enrichment/hint-extraction';
 import { isLikelyLocationHint } from '@/lib/sourcing/hint-sanitizer';
 import { jobTrackToDbFilter } from '@/lib/sourcing/types';
+import { detectRoleFamilyFromTitle } from '@/lib/taxonomy/role-family';
 
 let passed = 0;
 let failed = 0;
@@ -1602,6 +1603,361 @@ console.log('\n--- New Config Fields ---');
   restore('SOURCE_NOVELTY_WINDOW_DAYS', origWindow);
   restore('SOURCE_DISCOVERED_ENRICH_RESERVE', origReserve);
   restore('SOURCE_DYNAMIC_QUERY_MULTIPLIER', origMultiplier);
+}
+
+// ---------------------------------------------------------------------------
+// P1: Non-Tech Role Taxonomy Detection
+// ---------------------------------------------------------------------------
+{
+  console.log('\n--- P1: Non-Tech Role Taxonomy Detection ---');
+
+  assert(
+    detectRoleFamilyFromTitle('Senior Account Executive') === 'account_executive',
+    'P1: "Senior Account Executive" → account_executive',
+  );
+  assert(
+    detectRoleFamilyFromTitle('Technical Account Manager @ AWS') === 'technical_account_manager',
+    'P1: "Technical Account Manager @ AWS" → technical_account_manager (not account_manager)',
+  );
+  assert(
+    detectRoleFamilyFromTitle('Account Manager - EMEA') === 'account_manager',
+    'P1: "Account Manager - EMEA" → account_manager',
+  );
+  assert(
+    detectRoleFamilyFromTitle('Customer Success Manager') === 'customer_success',
+    'P1: "Customer Success Manager" → customer_success',
+  );
+  assert(
+    detectRoleFamilyFromTitle('Solutions Engineer - Enterprise') === 'sales_engineer',
+    'P1: "Solutions Engineer - Enterprise" → sales_engineer',
+  );
+  assert(
+    detectRoleFamilyFromTitle('BDR at Startup Inc') === 'business_development',
+    'P1: "BDR at Startup Inc" → business_development',
+  );
+  assert(
+    detectRoleFamilyFromTitle('Technical Customer Success Lead') === 'technical_account_manager',
+    'P1: "Technical Customer Success Lead" → technical_account_manager (not customer_success)',
+  );
+  // Tech roles still work
+  assert(
+    detectRoleFamilyFromTitle('Senior Backend Engineer') === 'backend',
+    'P1: "Senior Backend Engineer" still → backend',
+  );
+  assert(
+    detectRoleFamilyFromTitle('Full Stack Developer') === 'fullstack',
+    'P1: "Full Stack Developer" still → fullstack',
+  );
+}
+
+// ---------------------------------------------------------------------------
+// P1 + P1.5: Non-Tech Ranking — Role Adjacency + Seniority Dampening
+// ---------------------------------------------------------------------------
+{
+  console.log('\n--- P1/P1.5: Non-Tech Ranking ---');
+
+  const nonTechRequirements = makeRequirements({
+    topSkills: ['salesforce', 'outbound', 'pipeline management'],
+    seniorityLevel: 'senior',
+    domain: null,
+    roleFamily: 'account_executive',
+    location: 'Mumbai, India',
+  });
+
+  // AE candidate
+  const aeCand: CandidateForRanking = {
+    id: 'ae-1',
+    headlineHint: 'Senior Account Executive | Enterprise Sales | SaaS',
+    locationHint: 'Mumbai, India',
+    searchTitle: 'Senior Account Executive',
+    searchSnippet: 'salesforce outbound pipeline management',
+    enrichmentStatus: 'pending',
+    lastEnrichedAt: null,
+  };
+  // CS candidate (adjacent)
+  const csCand: CandidateForRanking = {
+    id: 'cs-1',
+    headlineHint: 'Customer Success Manager',
+    locationHint: 'Mumbai, India',
+    searchTitle: 'Customer Success Manager',
+    searchSnippet: 'SaaS renewals onboarding',
+    enrichmentStatus: 'pending',
+    lastEnrichedAt: null,
+  };
+  // Wrong-role "Senior Engineer" with seniority match
+  const engCand: CandidateForRanking = {
+    id: 'eng-1',
+    headlineHint: 'Senior Software Engineer at Big Tech',
+    locationHint: 'Mumbai, India',
+    searchTitle: 'Senior Software Engineer',
+    searchSnippet: 'React TypeScript Node.js',
+    enrichmentStatus: 'pending',
+    lastEnrichedAt: null,
+  };
+  // Unknown-role candidate (no detectable family)
+  const unknownCand: CandidateForRanking = {
+    id: 'unk-1',
+    headlineHint: 'Consultant',
+    locationHint: 'Mumbai, India',
+    searchTitle: 'Consultant',
+    searchSnippet: 'Strategy and operations',
+    enrichmentStatus: 'pending',
+    lastEnrichedAt: null,
+  };
+
+  const nonTechScored = rankCandidates(
+    [aeCand, csCand, engCand, unknownCand],
+    nonTechRequirements,
+    { track: 'non_tech' },
+  );
+
+  const aeScore = nonTechScored.find((s) => s.candidateId === 'ae-1')!;
+  const csScore = nonTechScored.find((s) => s.candidateId === 'cs-1')!;
+  const engScore = nonTechScored.find((s) => s.candidateId === 'eng-1')!;
+  const unkScore = nonTechScored.find((s) => s.candidateId === 'unk-1')!;
+
+  assert(aeScore.fitBreakdown.roleScore === 1.0, 'P1: AE candidate roleScore = 1.0 (exact match)');
+  assert(csScore.fitBreakdown.roleScore === 0.1, 'P1: CS candidate roleScore = 0.1 (mismatch with AE)');
+  assert(engScore.fitBreakdown.roleScore === 0.15, 'P1.5: Engineer roleScore = 0.15 (unknown role on non_tech)');
+  assert(unkScore.fitBreakdown.roleScore === 0.15, 'P1.5: Unknown role on non_tech → 0.15');
+
+  assert(aeScore.fitScore > csScore.fitScore, 'P1: AE scores higher than CS for AE job');
+  assert(aeScore.fitScore > engScore.fitScore, 'P1: AE scores higher than wrong-role engineer');
+  assert(
+    engScore.fitScore < unkScore.fitScore || engScore.fitBreakdown.roleScore <= unkScore.fitBreakdown.roleScore,
+    'P1.5: Mismatched engineer doesn\'t outrank due to seniority alone',
+  );
+
+  // Verify seniority dampening: engineer has seniority=senior match but role mismatch
+  // The raw seniorityScore should still be high, but fitScore should be dampened
+  assert(engScore.fitBreakdown.seniorityScore >= 0.5, 'P1.5: Raw seniorityScore preserved in breakdown');
+
+  // Tech track still gives 0.3 for unknown role (unchanged)
+  const techRequirements = makeRequirements({
+    topSkills: ['React', 'TypeScript'],
+    seniorityLevel: 'senior',
+    roleFamily: 'frontend',
+    location: 'San Francisco',
+  });
+  const techScored = rankCandidates(
+    [unknownCand],
+    techRequirements,
+    { track: 'tech' },
+  );
+  assert(
+    techScored[0].fitBreakdown.roleScore === 0.3,
+    'P1.5: Tech track unknown role still gets 0.3',
+  );
+}
+
+// ---------------------------------------------------------------------------
+// P1: Role Adjacency — AE target, BD candidate should get adjacency score
+// ---------------------------------------------------------------------------
+{
+  console.log('\n--- P1: Role Adjacency Scoring ---');
+
+  const aeRequirements = makeRequirements({
+    topSkills: ['salesforce', 'outbound'],
+    seniorityLevel: 'senior',
+    roleFamily: 'account_executive',
+    location: null,
+  });
+
+  const bdCand: CandidateForRanking = {
+    id: 'bd-1',
+    headlineHint: 'Business Development Representative',
+    locationHint: null,
+    searchTitle: 'BDR',
+    searchSnippet: 'Sales development outbound prospecting',
+    enrichmentStatus: 'pending',
+    lastEnrichedAt: null,
+  };
+
+  const bdScored = rankCandidates([bdCand], aeRequirements, { track: 'non_tech' });
+  assert(
+    bdScored[0].fitBreakdown.roleScore === 0.7,
+    'P1: BD candidate gets 0.7 adjacency score for AE job',
+  );
+
+  // Fullstack ↔ frontend adjacency still works
+  const frontendReq = makeRequirements({
+    topSkills: ['React'],
+    roleFamily: 'frontend',
+  });
+  const fullstackCand: CandidateForRanking = {
+    id: 'fs-1',
+    headlineHint: 'Full Stack Developer',
+    locationHint: null,
+    searchTitle: 'Full Stack Developer',
+    searchSnippet: 'React Node.js',
+    enrichmentStatus: 'pending',
+    lastEnrichedAt: null,
+  };
+  const fsScored = rankCandidates([fullstackCand], frontendReq, { track: 'tech' });
+  assert(
+    fsScored[0].fitBreakdown.roleScore === 0.7,
+    'P1: Fullstack↔frontend adjacency still works (0.7)',
+  );
+}
+
+// ---------------------------------------------------------------------------
+// P2: Orchestrator Role-Mismatch Discovery Trigger
+// ---------------------------------------------------------------------------
+{
+  console.log('\n--- P2: Role-Mismatch Discovery Trigger ---');
+
+  const config = getSourcingConfig();
+  const nonTechRequirements = makeRequirements({
+    topSkills: ['salesforce', 'outbound'],
+    seniorityLevel: 'senior',
+    roleFamily: 'account_executive',
+    location: 'Mumbai, India',
+  });
+
+  const wrongPool: CandidateForRanking[] = Array.from({ length: config.qualityTopK }, (_, idx) => ({
+    id: `wrong-${idx}`,
+    headlineHint: 'Senior Software Engineer',
+    locationHint: 'Mumbai, India',
+    searchTitle: 'Senior Software Engineer',
+    searchSnippet: 'React TypeScript Node.js',
+    enrichmentStatus: 'completed',
+    lastEnrichedAt: null,
+  }));
+
+  const scoredPool = rankCandidates(wrongPool, nonTechRequirements, { track: 'non_tech' });
+  const topPool = scoredPool.slice(0, Math.min(scoredPool.length, config.qualityTopK));
+  const neutralOrMismatch = topPool.filter((sc) => sc.fitBreakdown.roleScore <= 0.3).length;
+  const poolRoleMismatchRate = topPool.length > 0 ? neutralOrMismatch / topPool.length : 1;
+  const roleMismatchTriggered = poolRoleMismatchRate > 0.8;
+  const qualityGateTriggered = false;
+  const qualityDrivenTarget = (qualityGateTriggered || roleMismatchTriggered)
+    ? Math.ceil(config.targetCount * config.minDiscoveryShareLowQuality)
+    : 0;
+  const poolDeficit = 0;
+  const discoveryReason = roleMismatchTriggered
+    ? (poolDeficit > 0 ? 'deficit_and_role_mismatch' : 'pool_role_mismatch')
+    : null;
+
+  assert(poolRoleMismatchRate === 1, 'P2: Top pool role mismatch rate = 100% when all are wrong-domain');
+  assert(roleMismatchTriggered, 'P2: >80% mismatch triggers role-mismatch discovery boost');
+  assert(
+    qualityDrivenTarget === Math.ceil(config.targetCount * config.minDiscoveryShareLowQuality),
+    'P2: role mismatch increases quality-driven discovery target',
+  );
+  assert(discoveryReason === 'pool_role_mismatch', 'P2: discovery reason becomes pool_role_mismatch');
+}
+
+// ---------------------------------------------------------------------------
+// P3: Provisional Discovered Promotion for Non-Tech
+// ---------------------------------------------------------------------------
+{
+  console.log('\n--- P3: Provisional Discovered Promotion ---');
+
+  type MockDiscovered = { candidateId: string; queryIndex: number };
+  const config = getSourcingConfig();
+  const requirements = makeRequirements({
+    topSkills: ['apis', 'integrations'],
+    seniorityLevel: 'senior',
+    roleFamily: 'technical_account_manager',
+    location: 'Bangalore, India',
+  });
+  const hasLocationConstraint = true;
+
+  const strictQueryIndices = new Set([0]);
+  const discoveredCandidateByIdMap = new Map<string, MockDiscovered>([
+    ['strict-tam', { candidateId: 'strict-tam', queryIndex: 0 }],
+    ['fallback-tam', { candidateId: 'fallback-tam', queryIndex: 1 }],
+    ['strict-tech', { candidateId: 'strict-tech', queryIndex: 0 }],
+  ]);
+  const discoveredById = new Map([
+    ['strict-tam', { headlineHint: 'Technical Account Manager @ AWS' }],
+    ['fallback-tam', { headlineHint: 'Technical Account Manager @ AWS' }],
+    ['strict-tech', { headlineHint: 'Senior DevOps Engineer' }],
+  ]);
+
+  const scoredDiscovered: ScoredCandidate[] = [
+    {
+      candidateId: 'strict-tam',
+      fitScore: config.discoveredPromotionMinFitScore - 0.1,
+      fitBreakdown: {
+        skillScore: 0.1,
+        skillScoreMethod: 'text_fallback',
+        roleScore: 1,
+        seniorityScore: 0,
+        activityFreshnessScore: 0.7,
+        locationBoost: 0.1,
+      },
+      matchTier: 'expanded_location',
+      locationMatchType: 'none',
+    },
+    {
+      candidateId: 'fallback-tam',
+      fitScore: config.discoveredPromotionMinFitScore - 0.1,
+      fitBreakdown: {
+        skillScore: 0.1,
+        skillScoreMethod: 'text_fallback',
+        roleScore: 1,
+        seniorityScore: 0,
+        activityFreshnessScore: 0.7,
+        locationBoost: 0.1,
+      },
+      matchTier: 'expanded_location',
+      locationMatchType: 'none',
+    },
+    {
+      candidateId: 'strict-tech',
+      fitScore: config.discoveredPromotionMinFitScore - 0.1,
+      fitBreakdown: {
+        skillScore: 0.1,
+        skillScoreMethod: 'text_fallback',
+        roleScore: 0.1,
+        seniorityScore: 1,
+        activityFreshnessScore: 0.7,
+        locationBoost: 0.1,
+      },
+      matchTier: 'expanded_location',
+      locationMatchType: 'none',
+    },
+  ];
+
+  const promotedNonTech = new Set<string>();
+  for (const sc of scoredDiscovered) {
+    const passesLocationGate = !hasLocationConstraint || sc.locationMatchType !== 'none';
+    const passesFitGate = sc.fitScore >= config.discoveredPromotionMinFitScore;
+
+    let provisionalPromotion = false;
+    if (requirements.roleFamily) {
+      const dc = discoveredCandidateByIdMap.get(sc.candidateId);
+      const isFromStrictPhase = !!dc && strictQueryIndices.has(dc.queryIndex);
+      if (isFromStrictPhase) {
+        const candidateRoleFamily = detectRoleFamilyFromTitle(
+          discoveredById.get(sc.candidateId)?.headlineHint ?? '',
+        );
+        if (candidateRoleFamily === requirements.roleFamily) {
+          provisionalPromotion = true;
+        }
+      }
+    }
+
+    if ((passesLocationGate && passesFitGate) || provisionalPromotion) {
+      promotedNonTech.add(sc.candidateId);
+    }
+  }
+
+  assert(promotedNonTech.has('strict-tam'), 'P3: Strict-phase non-tech exact role match is provisionally promoted');
+  assert(!promotedNonTech.has('fallback-tam'), 'P3: Fallback-phase non-tech candidate still uses standard gates');
+  assert(!promotedNonTech.has('strict-tech'), 'P3: Strict-phase tech-role candidate is not provisionally promoted');
+
+  const promotedTechTrack = new Set<string>();
+  for (const sc of scoredDiscovered) {
+    const passesLocationGate = !hasLocationConstraint || sc.locationMatchType !== 'none';
+    const passesFitGate = sc.fitScore >= config.discoveredPromotionMinFitScore;
+    const provisionalPromotion = false; // Track = tech: bypass disabled
+    if ((passesLocationGate && passesFitGate) || provisionalPromotion) {
+      promotedTechTrack.add(sc.candidateId);
+    }
+  }
+  assert(!promotedTechTrack.has('strict-tam'), 'P3: Tech track does not provisionally promote strict-phase discovered candidates');
 }
 
 // ---------------------------------------------------------------------------

@@ -34,6 +34,59 @@ const ROLE_PATTERNS: Array<{ family: string; patterns: RegExp[] }> = [
     family: 'mobile',
     patterns: [/\bandroid\b/i, /\bios\b/i, /\bmobile\b/i, /\breact native\b/i, /\bflutter\b/i],
   },
+  // --- Non-tech role families ---
+  // ORDER MATTERS: specific families before generic ones (first-match wins)
+  {
+    family: 'technical_account_manager',
+    patterns: [
+      /\btechnical account manager\b/i,
+      /\btechnical account lead\b/i,
+      /\btechnical customer success\b/i,
+    ],
+  },
+  {
+    family: 'sales_engineer',
+    patterns: [
+      /\bsales engineer\b/i,
+      /\bpre[- ]?sales engineer\b/i,
+      /\bsolutions engineer\b/i,
+    ],
+  },
+  {
+    family: 'customer_success',
+    patterns: [
+      /\bcustomer success\b/i,
+      /\bclient success\b/i,
+      /\bcsm\b/i,
+    ],
+  },
+  {
+    family: 'account_executive',
+    patterns: [
+      /\baccount executive\b/i,
+      /\benterprise sales\b/i,
+      /\bsales executive\b/i,
+      /\bregional sales\b/i,
+    ],
+  },
+  {
+    family: 'business_development',
+    patterns: [
+      /\bbusiness development\b/i,
+      /\bbdr\b/i,
+      /\bsdr\b/i,
+      /\bsales development\b/i,
+    ],
+  },
+  {
+    family: 'account_manager',
+    patterns: [
+      /\baccount manager\b/i,
+      /\bkey account\b/i,
+      /\bclient manager\b/i,
+      /\brelationship manager\b/i,
+    ],
+  },
 ];
 
 export function detectRoleFamilyFromTitle(title: string): string | null {

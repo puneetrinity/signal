@@ -307,22 +307,49 @@ function classifyLocationMatch(
   return { matchTier: 'expanded_location', locationMatchType: 'none' };
 }
 
-function computeRoleScore(candidate: CandidateForRanking, targetRoleFamily: string | null): number {
+// Role family adjacency pairs → score
+const ROLE_ADJACENCY: Array<[string, string, number]> = [
+  // Tech adjacencies
+  ['fullstack', 'frontend', 0.7],
+  ['fullstack', 'backend', 0.7],
+  ['devops', 'backend', 0.5],
+  ['devops', 'security', 0.5],
+  // Non-tech adjacencies
+  ['account_executive', 'business_development', 0.7],
+  ['account_executive', 'account_manager', 0.6],
+  ['account_executive', 'sales_engineer', 0.5],
+  ['customer_success', 'account_manager', 0.7],
+  ['customer_success', 'technical_account_manager', 0.6],
+  ['technical_account_manager', 'sales_engineer', 0.7],
+  ['technical_account_manager', 'customer_success', 0.6],
+  ['sales_engineer', 'account_executive', 0.5],
+  ['business_development', 'account_manager', 0.5],
+];
+
+const adjacencyMap = new Map<string, number>();
+for (const [a, b, score] of ROLE_ADJACENCY) {
+  adjacencyMap.set(`${a}:${b}`, score);
+  adjacencyMap.set(`${b}:${a}`, score);
+}
+
+function computeRoleScore(
+  candidate: CandidateForRanking,
+  targetRoleFamily: string | null,
+  track?: JobTrack,
+): number {
   if (!targetRoleFamily) return 0.5; // neutral when job has no role family
 
   const headline = candidate.headlineHint ?? candidate.searchTitle ?? '';
   const candidateFamily = detectRoleFamilyFromTitle(headline);
 
-  if (!candidateFamily) return 0.3; // unknown — slight penalty
+  if (!candidateFamily) {
+    // For non-tech, unknown role is harsher — random engineers should sink
+    return track === 'non_tech' ? 0.15 : 0.3;
+  }
   if (candidateFamily === targetRoleFamily) return 1.0;
 
-  // Fullstack is adjacent to both frontend and backend
-  if (
-    (candidateFamily === 'fullstack' && (targetRoleFamily === 'frontend' || targetRoleFamily === 'backend')) ||
-    ((candidateFamily === 'frontend' || candidateFamily === 'backend') && targetRoleFamily === 'fullstack')
-  ) {
-    return 0.7;
-  }
+  const adjacency = adjacencyMap.get(`${candidateFamily}:${targetRoleFamily}`);
+  if (adjacency !== undefined) return adjacency;
 
   return 0.1; // mismatch
 }
@@ -386,16 +413,25 @@ export function rankCandidates(
   return candidates
     .map((c) => {
       const { score: skillScore, method: skillScoreMethod } = computeSkillScore(c, requirements.topSkills, requirements.domain);
-      const roleScore = computeRoleScore(c, requirements.roleFamily);
+      const roleScore = computeRoleScore(c, requirements.roleFamily, options?.track);
       const seniorityScore = computeSeniorityScore(c, requirements.seniorityLevel);
       const activityFreshnessScore = computeFreshnessScore(c);
       const { matchTier, locationMatchType } = classifyLocationMatch(c, requirements.location);
       const locationBoost = computeLocationBoost(locationMatchType, !!requirements.location);
 
+      // Dampen seniority contribution when role is a clear mismatch or unknown on non-tech.
+      // A "Senior Software Engineer" shouldn't outrank a TAM just because of seniority.
+      const isRoleMismatch = requirements.roleFamily && (
+        roleScore <= 0.1 ||
+        (options?.track === 'non_tech' && roleScore <= 0.15)
+      );
+      const seniorityDampen = isRoleMismatch ? 0.4 : 1.0;
+      const effectiveSeniority = seniorityScore * seniorityDampen;
+
       const fitScore =
         weights.skill * skillScore +
         weights.role * roleScore +
-        weights.seniority * seniorityScore +
+        weights.seniority * effectiveSeniority +
         weights.freshness * activityFreshnessScore +
         weights.location * locationBoost;
 

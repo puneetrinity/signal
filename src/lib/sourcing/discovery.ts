@@ -2,6 +2,7 @@ import { generateText } from 'ai';
 import { z } from 'zod';
 import { createGroqModel } from '@/lib/ai/groq';
 import { searchLinkedInProfilesWithMeta, type SearchGeoContext } from '@/lib/search/providers';
+import type { ProfileSummary } from '@/types/linkedin';
 import { upsertDiscoveredCandidates } from './upsert-candidates';
 import type { JobRequirements } from './jd-digest';
 import { getDiscoverySkillBuckets } from './jd-digest';
@@ -388,6 +389,31 @@ function normalizeQueryLine(value: string): string | null {
   return cleaned || null;
 }
 
+/**
+ * Validate that a parsed query looks like a real search query.
+ * Rejects LLM commentary that leaked through the parser.
+ */
+const LINKEDIN_SITE_SCOPE_RE = /\bsite:(?:[a-z]{2}\.)?linkedin\.com\/in\b/i;
+
+const COMMENTARY_PATTERNS = [
+  /\bnote that\b/i,
+  /\bthere were only\b/i,
+  /\bprovided\b/i,
+  /\breformat/i,
+  /\bquery limit\b/i,
+  /\bbelow the\b/i,
+  /\bmaximum\b/i,
+  /\bno .* query to/i,
+];
+
+function isValidSearchQuery(query: string): boolean {
+  if (!LINKEDIN_SITE_SCOPE_RE.test(query)) return false;
+  for (const pattern of COMMENTARY_PATTERNS) {
+    if (pattern.test(query)) return false;
+  }
+  return true;
+}
+
 function parseLabeledQueryPlan(text: string): QueryPlanSchemaOutput | null {
   const stripped = text
     .replace(/```(?:json|text)?/gi, '')
@@ -407,7 +433,7 @@ function parseLabeledQueryPlan(text: string): QueryPlanSchemaOutput | null {
     if (headerMatch) {
       currentBucket = headerMatch[1].toLowerCase() as 'strict' | 'fallback';
       const inlineValue = normalizeQueryLine(headerMatch[2] ?? '');
-      if (inlineValue) {
+      if (inlineValue && isValidSearchQuery(inlineValue)) {
         (currentBucket === 'strict' ? strictQueries : fallbackQueries).push(inlineValue);
       }
       continue;
@@ -417,7 +443,7 @@ function parseLabeledQueryPlan(text: string): QueryPlanSchemaOutput | null {
     if (inlineBucketMatch) {
       const bucket = inlineBucketMatch[1].toLowerCase() as 'strict' | 'fallback';
       const value = normalizeQueryLine(inlineBucketMatch[2]);
-      if (value) {
+      if (value && isValidSearchQuery(value)) {
         (bucket === 'strict' ? strictQueries : fallbackQueries).push(value);
       }
       continue;
@@ -426,6 +452,7 @@ function parseLabeledQueryPlan(text: string): QueryPlanSchemaOutput | null {
     if (!currentBucket) continue;
     const value = normalizeQueryLine(line);
     if (!value) continue;
+    if (!isValidSearchQuery(value)) continue;
     (currentBucket === 'strict' ? strictQueries : fallbackQueries).push(value);
   }
 
@@ -436,24 +463,40 @@ function parseLabeledQueryPlan(text: string): QueryPlanSchemaOutput | null {
 }
 
 export function parseQueryPlanFromText(text: string): { plan: QueryPlanSchemaOutput | null; parseStage: QueryPlanParseStage } {
+  let plan: QueryPlanSchemaOutput | null = null;
+  let parseStage: QueryPlanParseStage = 'none';
+
   const labeled = parseLabeledQueryPlan(text);
   if (labeled) {
     const nonEmptyInlineBucket = /^(strict|fallback)[ \t]*[-:][ \t]+\S.+$/im.test(text);
-    return {
-      plan: labeled,
-      parseStage: nonEmptyInlineBucket ? 'inline_buckets' : 'labeled_sections',
+    plan = labeled;
+    parseStage = nonEmptyInlineBucket ? 'inline_buckets' : 'labeled_sections';
+  } else {
+    const jsonCandidate = extractJsonCandidate(text);
+    if (jsonCandidate) {
+      try {
+        const parsed = JSON.parse(jsonCandidate) as unknown;
+        plan = coerceQueryPlanFromUnknown(parsed);
+        parseStage = 'json';
+      } catch {
+        return { plan: null, parseStage: 'json' };
+      }
+    }
+  }
+
+  // Post-filter: remove any queries that fail validation (LLM commentary, missing site scope)
+  if (plan) {
+    const filteredPlan = {
+      strictQueries: plan.strictQueries.filter(isValidSearchQuery),
+      fallbackQueries: plan.fallbackQueries.filter(isValidSearchQuery),
     };
+    if (filteredPlan.strictQueries.length === 0 && filteredPlan.fallbackQueries.length === 0) {
+      return { plan: null, parseStage: 'none' };
+    }
+    return { plan: filteredPlan, parseStage };
   }
 
-  const jsonCandidate = extractJsonCandidate(text);
-  if (!jsonCandidate) return { plan: null, parseStage: 'none' };
-
-  try {
-    const parsed = JSON.parse(jsonCandidate) as unknown;
-    return { plan: coerceQueryPlanFromUnknown(parsed), parseStage: 'json' };
-  } catch {
-    return { plan: null, parseStage: 'json' };
-  }
+  return { plan: null, parseStage };
 }
 
 function buildGroqRawPreview(text: string): string {
@@ -472,9 +515,19 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
+const NON_TECH_TITLE_VARIANTS: Record<string, string[]> = {
+  'account_executive': ['account executive', 'enterprise sales', 'sales executive', 'regional sales manager'],
+  'customer_success': ['customer success manager', 'client success manager', 'customer success lead'],
+  'technical_account_manager': ['technical account manager', 'technical customer success'],
+  'sales_engineer': ['sales engineer', 'solutions engineer', 'pre-sales engineer'],
+  'business_development': ['business development representative', 'sales development representative'],
+  'account_manager': ['account manager', 'key account manager', 'client manager'],
+};
+
 export function buildDeterministicQueries(
   requirements: JobRequirements,
   maxQueries: number,
+  track?: JobTrack,
 ): QueryPlan {
   const roleFamily = requirements.roleFamily || '';
   const title = requirements.title?.trim() || '';
@@ -516,6 +569,16 @@ export function buildDeterministicQueries(
     strict.push(`site:linkedin.com/in "${roleFamily}" "${location}"`);
   }
 
+  // Non-tech title variant expansion: add strict queries for each title variant
+  if (track === 'non_tech' && roleFamily && location) {
+    const variants = NON_TECH_TITLE_VARIANTS[roleFamily];
+    if (variants) {
+      for (const variant of variants) {
+        strict.push(`site:linkedin.com/in "${variant}" "${location}"`);
+      }
+    }
+  }
+
   // Fallback pass: without location (broader reach)
   if (roleFamily && fallbackSkills.length > 0) {
     fallback.push(`site:linkedin.com/in "${roleFamily}" ${fallbackSkills.join(' ')}`);
@@ -539,6 +602,16 @@ export function buildDeterministicQueries(
     fallback.push(`site:linkedin.com/in "${location}"`);
   }
 
+  // Non-tech fallback variant expansion (without location)
+  if (track === 'non_tech' && roleFamily) {
+    const variants = NON_TECH_TITLE_VARIANTS[roleFamily];
+    if (variants) {
+      for (const variant of variants) {
+        fallback.push(`site:linkedin.com/in "${variant}"`);
+      }
+    }
+  }
+
   const strictDeduped = dedupeQueries(strict, maxQueries);
   const strictSet = new Set(strictDeduped);
   const fallbackDeduped = dedupeQueries(fallback, maxQueries, strictSet);
@@ -555,7 +628,7 @@ async function buildHybridQueries(
   plan: QueryPlan;
   groq: DiscoveryTelemetry['groq'];
 }> {
-  const deterministic = buildDeterministicQueries(requirements, maxQueries);
+  const deterministic = buildDeterministicQueries(requirements, maxQueries, track ?? undefined);
   const groqMeta: DiscoveryTelemetry['groq'] = {
     enabled: config.queryGenMode === 'hybrid',
     used: false,
@@ -667,7 +740,7 @@ export async function discoverCandidates(
   },
 ): Promise<DiscoveryRunResult> {
   const config = options?.config;
-  const deterministicPlan = buildDeterministicQueries(requirements, maxQueries);
+  const deterministicPlan = buildDeterministicQueries(requirements, maxQueries, options?.track ?? undefined);
   const hybridPlan = config
     ? await buildHybridQueries(requirements, maxQueries, config, options?.track)
     : null;
@@ -730,7 +803,9 @@ export async function discoverCandidates(
       providerUsage[searchResult.providerUsed] = (providerUsage[searchResult.providerUsed] || 0) + 1;
       const newProfiles = profiles.filter((p) => {
         const id = extractLinkedInIdFromUrl(p.linkedinUrl);
-        return id && !seenLinkedinIds.has(id);
+        if (!id || seenLinkedinIds.has(id)) return false;
+        if (!isLikelyPersonProfile(p)) return false;
+        return true;
       });
 
       if (newProfiles.length === 0) {
@@ -918,6 +993,32 @@ export async function discoverCandidates(
     queriesBuilt: strict.length + fallback.length,
     telemetry,
   };
+}
+
+/**
+ * Reject SERP results that are clearly not person profiles.
+ * Checks URL pattern, title, and snippet for spam signals.
+ */
+const SPAM_PATTERNS = [
+  /\b(seo|backlink|link.?build|reputation repair)\b/i,
+  /\b(assignment help|homework|course bro)\b/i,
+  /\b(buy followers|get followers)\b/i,
+  /\b(web systems|web agency)\b/i,
+];
+
+export function isLikelyPersonProfile(profile: ProfileSummary): boolean {
+  const url = profile.linkedinUrl.toLowerCase();
+  if (!url.includes('/in/')) return false;
+
+  const title = (profile.title ?? '').toLowerCase();
+  const snippet = (profile.snippet ?? '').toLowerCase();
+  const combined = `${title} ${snippet}`;
+
+  for (const pattern of SPAM_PATTERNS) {
+    if (pattern.test(combined)) return false;
+  }
+
+  return true;
 }
 
 function extractLinkedInIdFromUrl(url: string): string | null {

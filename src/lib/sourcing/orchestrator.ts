@@ -5,7 +5,7 @@ import { toJsonValue } from '@/lib/prisma/json';
 import { createLogger } from '@/lib/logger';
 import { buildJobRequirements, type SourcingJobContextInput } from './jd-digest';
 import { rankCandidates } from './ranking';
-import { discoverCandidates, type DiscoveryTelemetry } from './discovery';
+import { discoverCandidates, type DiscoveredCandidate, type DiscoveryTelemetry } from './discovery';
 import { getSourcingConfig } from './config';
 import { createEnrichmentSession } from '@/lib/enrichment/queue';
 import { isMeaningfulLocation, isNoisyLocationHint, canonicalizeLocation, extractPrimaryCity, compareFitWithConfidence } from './ranking';
@@ -13,6 +13,7 @@ import { getRecentlyExposedCandidateIds } from './novelty';
 import type { CandidateForRanking, FitBreakdown, MatchTier, LocationMatchType, ScoredCandidate } from './ranking';
 import type { TrackDecision } from './types';
 import { jobTrackToDbFilter } from './types';
+import { detectRoleFamilyFromTitle } from '@/lib/taxonomy/role-family';
 import {
   assessLocationCountryConsistency,
   computeSerpEvidence,
@@ -36,7 +37,7 @@ export interface OrchestratorResult {
   countAboveThreshold: number;
   strictTopKCount: number;
   strictCoverageRate: number;
-  discoveryReason: 'pool_deficit' | 'low_quality_pool' | 'deficit_and_low_quality' | 'minimum_discovery_floor' | null;
+  discoveryReason: 'pool_deficit' | 'low_quality_pool' | 'deficit_and_low_quality' | 'minimum_discovery_floor' | 'pool_role_mismatch' | 'deficit_and_role_mismatch' | null;
   discoverySkippedReason: 'daily_serp_cap_reached' | 'cap_guard_unavailable' | null;
   discoveryTelemetry: DiscoveryTelemetry | null;
   snapshotReuseCount: number;
@@ -356,6 +357,14 @@ export async function runSourcingOrchestrator(
   const enrichedCandidates = scoredPool.filter((sc) => poolById.get(sc.candidateId)?.enrichmentStatus === 'completed');
   const enrichedCount = enrichedCandidates.length;
 
+  // Compute pool role-match quality for non-tech track
+  let poolRoleMismatchRate = 0;
+  if (trackDecision?.track === 'non_tech' && requirements.roleFamily) {
+    const topPoolForRole = scoredPool.slice(0, Math.min(scoredPool.length, config.qualityTopK));
+    const neutralOrMismatch = topPoolForRole.filter(sc => sc.fitBreakdown.roleScore <= 0.3).length;
+    poolRoleMismatchRate = topPoolForRole.length > 0 ? neutralOrMismatch / topPoolForRole.length : 1;
+  }
+
   let discoveredCount = 0;
   let discoveredCandidateIds: string[] = [];
   let discoveredReservedInOutput = 0;
@@ -381,8 +390,9 @@ export async function runSourcingOrchestrator(
   const strictCoverageDeficit = hasLocationConstraint
     ? Math.max(0, config.minStrictMatchesBeforeExpand - strictPoolCount)
     : 0;
-  // Elevated discovery share when quality gate triggers (configurable, default 40%)
-  const qualityDrivenTarget = qualityGateTriggered
+  // Elevated discovery share when quality gate or pool role mismatch triggers
+  const roleMismatchTriggered = poolRoleMismatchRate > 0.8;
+  const qualityDrivenTarget = (qualityGateTriggered || roleMismatchTriggered)
     ? Math.ceil(config.targetCount * config.minDiscoveryShareLowQuality)
     : 0;
   const maxDiscoveryTarget = Math.ceil(config.targetCount * config.maxDiscoveryShare);
@@ -393,7 +403,9 @@ export async function runSourcingOrchestrator(
   );
 
   if (poolDeficit > 0 && qualityGateTriggered) discoveryReason = 'deficit_and_low_quality';
+  else if (poolDeficit > 0 && roleMismatchTriggered) discoveryReason = 'deficit_and_role_mismatch';
   else if (poolDeficit > 0) discoveryReason = 'pool_deficit';
+  else if (roleMismatchTriggered) discoveryReason = 'pool_role_mismatch';
   else if (qualityGateTriggered) discoveryReason = 'low_quality_pool';
   else if (minDiscoveryFloor > 0) discoveryReason = 'minimum_discovery_floor';
 
@@ -460,6 +472,16 @@ export async function runSourcingOrchestrator(
         queriesExecuted = discovery.queriesExecuted;
         discoveryTelemetry = discovery.telemetry;
         usedQueries = queriesExecuted;
+
+        // Build strict-phase query index lookup from discovery telemetry
+        const strictQueryIndices = new Set(
+          discovery.telemetry.queryRuns
+            .filter(qr => qr.phase === 'strict')
+            .map(qr => qr.queryIndex)
+        );
+        const discoveredCandidateByIdMap = new Map<string, DiscoveredCandidate>(
+          discovery.candidates.map(dc => [dc.candidateId, dc])
+        );
 
         if (discoveredCandidateIds.length > 0) {
           const discoveredRows = await prisma.candidate.findMany({
@@ -530,9 +552,28 @@ export async function runSourcingOrchestrator(
           const scoredDiscovered = rankCandidates(discoveredForRanking, requirements, { fitScoreEpsilon: config.fitScoreEpsilon, locationBoostWeight: config.locationBoostWeight, track: trackDecision?.track });
           for (const sc of scoredDiscovered) {
             scoredDiscoveredById.set(sc.candidateId, sc);
+
             const passesLocationGate = !hasLocationConstraint || sc.locationMatchType !== 'none';
             const passesFitGate = sc.fitScore >= config.discoveredPromotionMinFitScore;
-            if (passesLocationGate && passesFitGate) {
+
+            // Provisional promotion for strict-phase non-tech discoveries with exact role match.
+            // These candidates come from location-targeted queries and have the right role family,
+            // but fail standard gates because pre-enrichment scores are structurally low.
+            let provisionalPromotion = false;
+            if (trackDecision?.track === 'non_tech' && requirements.roleFamily) {
+              const dc = discoveredCandidateByIdMap.get(sc.candidateId);
+              const isFromStrictPhase = dc && strictQueryIndices.has(dc.queryIndex);
+              if (isFromStrictPhase) {
+                const candidateRoleFamily = detectRoleFamilyFromTitle(
+                  discoveredById.get(sc.candidateId)?.headlineHint ?? ''
+                );
+                if (candidateRoleFamily === requirements.roleFamily) {
+                  provisionalPromotion = true;
+                }
+              }
+            }
+
+            if ((passesLocationGate && passesFitGate) || provisionalPromotion) {
               promotedDiscoveredById.set(sc.candidateId, sc);
             }
           }
