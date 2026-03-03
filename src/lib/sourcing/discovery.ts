@@ -123,7 +123,6 @@ const LINKEDIN_SITE_SUBDOMAIN_BY_COUNTRY: Record<string, string> = {
   GB: 'uk',
   ID: 'id',
   IE: 'ie',
-  IN: 'in',
   IT: 'it',
   JP: 'jp',
   MX: 'mx',
@@ -415,11 +414,19 @@ function isValidSearchQuery(query: string): boolean {
 }
 
 function parseLabeledQueryPlan(text: string): QueryPlanSchemaOutput | null {
-  const stripped = text
+  let stripped = text
     .replace(/```(?:json|text)?/gi, '')
     .replace(/```/g, '')
     .trim();
   if (!stripped) return null;
+
+  // Strip LLM preamble before the first STRICT/FALLBACK section header.
+  // Groq repair often prefixes "Here is the reformatted text:" which breaks
+  // the header regex when it appears on the same line.
+  const firstSectionIdx = stripped.search(/\b(?:STRICT|FALLBACK)\s*:/i);
+  if (firstSectionIdx > 0) {
+    stripped = stripped.slice(firstSectionIdx);
+  }
 
   const strictQueries: string[] = [];
   const fallbackQueries: string[] = [];
@@ -530,6 +537,9 @@ export function buildDeterministicQueries(
   track?: JobTrack,
 ): QueryPlan {
   const roleFamily = requirements.roleFamily || '';
+  // Convert role family key to human-readable label for search queries
+  // e.g. 'account_executive' → 'account executive'
+  const roleFamilyLabel = roleFamily.replace(/_/g, ' ');
   const title = requirements.title?.trim() || '';
   const location = requirements.location || '';
   const skillBuckets = getDiscoverySkillBuckets(requirements.topSkills.slice(0, 8), 4, 2);
@@ -550,13 +560,13 @@ export function buildDeterministicQueries(
   // Strict pass: location-targeted queries
   if (location && strictSkills.length > 0) {
     if (roleFamily) {
-      strict.push(`site:linkedin.com/in "${roleFamily}" "${location}" ${strictSkills.join(' ')}`);
+      strict.push(`site:linkedin.com/in "${roleFamilyLabel}" "${location}" ${strictSkills.join(' ')}`);
     } else {
       strict.push(`site:linkedin.com/in "${location}" ${strictSkills.join(' ')}`);
     }
     if (strictSkills.length > 2) {
       if (roleFamily) {
-        strict.push(`site:linkedin.com/in "${roleFamily}" "${location}" ${narrowSkills.join(' ')}`);
+        strict.push(`site:linkedin.com/in "${roleFamilyLabel}" "${location}" ${narrowSkills.join(' ')}`);
       } else {
         strict.push(`site:linkedin.com/in "${location}" ${narrowSkills.join(' ')}`);
       }
@@ -566,7 +576,7 @@ export function buildDeterministicQueries(
     strict.push(`site:linkedin.com/in "${title}" "${location}"`);
   }
   if (location && roleFamily && exactSkills.length === 0 && conceptSkills.length === 0) {
-    strict.push(`site:linkedin.com/in "${roleFamily}" "${location}"`);
+    strict.push(`site:linkedin.com/in "${roleFamilyLabel}" "${location}"`);
   }
 
   // Non-tech title variant expansion: add strict queries for each title variant
@@ -581,7 +591,7 @@ export function buildDeterministicQueries(
 
   // Fallback pass: without location (broader reach)
   if (roleFamily && fallbackSkills.length > 0) {
-    fallback.push(`site:linkedin.com/in "${roleFamily}" ${fallbackSkills.join(' ')}`);
+    fallback.push(`site:linkedin.com/in "${roleFamilyLabel}" ${fallbackSkills.join(' ')}`);
   }
   if (title) {
     fallback.push(`site:linkedin.com/in "${title}"`);
@@ -593,10 +603,10 @@ export function buildDeterministicQueries(
     fallback.push(`site:linkedin.com/in ${fallbackSkills.join(' ')}`);
   }
   if (fallbackSkills.length > 2 && roleFamily) {
-    fallback.push(`site:linkedin.com/in "${roleFamily}" ${narrowSkills.join(' ')}`);
+    fallback.push(`site:linkedin.com/in "${roleFamilyLabel}" ${narrowSkills.join(' ')}`);
   }
   if (roleFamily && fallbackSkills.length === 0) {
-    fallback.push(`site:linkedin.com/in "${roleFamily}"`);
+    fallback.push(`site:linkedin.com/in "${roleFamilyLabel}"`);
   }
   if (!roleFamily && !title && location && fallbackSkills.length === 0) {
     fallback.push(`site:linkedin.com/in "${location}"`);

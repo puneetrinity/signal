@@ -287,6 +287,56 @@ assert(
   'P2: Tech track does NOT get title variant expansion',
 );
 
+// ---------------------------------------------------------------------------
+// Post-deploy Bug Fixes
+// ---------------------------------------------------------------------------
+console.log('\n--- Post-Deploy Bug Fixes ---');
+
+// Fix 1: roleFamily underscores should be converted to spaces in queries
+const aeDetPlan = buildDeterministicQueries(
+  {
+    title: 'Senior Account Executive',
+    topSkills: ['salesforce', 'outbound'],
+    seniorityLevel: 'senior',
+    domain: null,
+    roleFamily: 'account_executive',
+    location: 'Mumbai, India',
+    experienceYears: null,
+    education: null,
+  },
+  4,
+  'non_tech',
+);
+assert(
+  aeDetPlan.strict.every((q) => !q.includes('account_executive')),
+  'Fix1: No underscore roleFamily in strict queries',
+);
+assert(
+  aeDetPlan.strict.some((q) => q.includes('"account executive"')),
+  'Fix1: Space-separated roleFamily label in strict queries',
+);
+assert(
+  aeDetPlan.fallback.every((q) => !q.includes('account_executive')),
+  'Fix1: No underscore roleFamily in fallback queries',
+);
+
+// Fix 3: Groq preamble stripped before parsing
+const preamblePlan = parseQueryPlanFromText(`Here is the reformatted text:
+STRICT:
+- site:linkedin.com/in "senior account executive" "Mumbai, India" b2b saas sales
+FALLBACK:
+- site:linkedin.com/in "account executive" salesforce
+`);
+assert(preamblePlan.plan?.strictQueries.length === 1, 'Fix3: Preamble stripped, strict parsed');
+assert(preamblePlan.plan?.fallbackQueries.length === 1, 'Fix3: Preamble stripped, fallback parsed');
+assert(preamblePlan.parseStage === 'labeled_sections', 'Fix3: Preamble stripped, stage correct');
+
+// Same-line preamble
+const sameLinePreamble = parseQueryPlanFromText(
+  `Here is the reformatted text: STRICT: - site:linkedin.com/in "tam" "Bangalore" apis\nFALLBACK:\n- site:linkedin.com/in "tam" apis`,
+);
+assert(sameLinePreamble.plan?.strictQueries.length === 1, 'Fix3: Same-line preamble stripped');
+
 console.log('\n========================================');
 console.log(`Results: ${passed} passed, ${failed} failed`);
 
