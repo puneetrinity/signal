@@ -594,7 +594,9 @@ async function buildHybridQueries(
         }),
         config.queryGroqTimeoutMs,
       );
-      let { plan: object, parseStage } = parseQueryPlanFromText(textGenerated.text);
+      const parsed = parseQueryPlanFromText(textGenerated.text);
+      const { parseStage } = parsed;
+      let object = parsed.plan;
       groqMeta.parseStage = parseStage;
       groqMeta.rawPreview = buildGroqRawPreview(textGenerated.text);
 
