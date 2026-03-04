@@ -431,7 +431,9 @@ export async function runSourcingOrchestrator(
   if (desiredDiscoveryTarget > 0) {
     const aggressive = enrichedCount < config.minGoodEnough;
     discoveryTarget = aggressive ? Math.min(desiredDiscoveryTarget, config.jobMaxEnrich) : desiredDiscoveryTarget;
-    dynamicQueryBudgetUsed = qualityGateTriggered && config.dynamicQueryMultiplier > 1;
+    dynamicQueryBudgetUsed =
+      (qualityGateTriggered || effectiveStrategy === 'discovery_first') &&
+      config.dynamicQueryMultiplier > 1;
     const budget = await getDiscoveryQueryBudget(
       tenantId,
       effectiveMaxQueries,
