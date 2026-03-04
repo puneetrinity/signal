@@ -55,6 +55,8 @@ export interface SourcingConfig {
   rerankDelayMs: number;
   // Location soft boost
   locationBoostWeight: number;
+  // Sourcing strategy
+  sourcingStrategy: 'pool_first' | 'discovery_first' | 'adaptive';
 }
 
 function parseIntSafe(value: string | undefined, fallback: number): number {
@@ -145,5 +147,12 @@ export function getSourcingConfig(): SourcingConfig {
     rerankDelayMs: clamp(parseIntSafe(process.env.SOURCE_RERANK_DELAY_MS, 90_000), 10_000, 300_000),
     // Location soft boost
     locationBoostWeight: clamp(parseFloatSafe(process.env.SOURCE_LOCATION_BOOST_WEIGHT, 0), 0, 0.15),
+    // Sourcing strategy: pool_first | discovery_first | adaptive (default)
+    sourcingStrategy: (() => {
+      const raw = (process.env.SOURCE_STRATEGY || 'adaptive').toLowerCase();
+      if (raw === 'pool_first') return 'pool_first' as const;
+      if (raw === 'discovery_first') return 'discovery_first' as const;
+      return 'adaptive' as const;
+    })(),
   };
 }

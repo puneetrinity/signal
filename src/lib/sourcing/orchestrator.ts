@@ -37,7 +37,8 @@ export interface OrchestratorResult {
   countAboveThreshold: number;
   strictTopKCount: number;
   strictCoverageRate: number;
-  discoveryReason: 'pool_deficit' | 'low_quality_pool' | 'deficit_and_low_quality' | 'minimum_discovery_floor' | 'pool_role_mismatch' | 'deficit_and_role_mismatch' | null;
+  effectiveStrategy: 'pool_first' | 'discovery_first';
+  discoveryReason: 'pool_deficit' | 'low_quality_pool' | 'deficit_and_low_quality' | 'minimum_discovery_floor' | 'pool_role_mismatch' | 'deficit_and_role_mismatch' | 'strategy_discovery_first' | null;
   discoverySkippedReason: 'daily_serp_cap_reached' | 'cap_guard_unavailable' | null;
   discoveryTelemetry: DiscoveryTelemetry | null;
   snapshotReuseCount: number;
@@ -357,13 +358,18 @@ export async function runSourcingOrchestrator(
   const enrichedCandidates = scoredPool.filter((sc) => poolById.get(sc.candidateId)?.enrichmentStatus === 'completed');
   const enrichedCount = enrichedCandidates.length;
 
-  // Compute pool role-match quality for non-tech track
+  // Compute pool role-match quality for non-tech/blended track
   let poolRoleMismatchRate = 0;
-  if (trackDecision?.track === 'non_tech' && requirements.roleFamily) {
+  if (trackDecision?.track !== 'tech' && requirements.roleFamily) {
     const topPoolForRole = scoredPool.slice(0, Math.min(scoredPool.length, config.qualityTopK));
     const neutralOrMismatch = topPoolForRole.filter(sc => sc.fitBreakdown.roleScore <= 0.3).length;
     poolRoleMismatchRate = topPoolForRole.length > 0 ? neutralOrMismatch / topPoolForRole.length : 1;
   }
+
+  // Resolve effective sourcing strategy
+  const effectiveStrategy = config.sourcingStrategy === 'adaptive'
+    ? (trackDecision?.track !== 'tech' ? 'discovery_first' : 'pool_first')
+    : config.sourcingStrategy;
 
   let discoveredCount = 0;
   let discoveredCandidateIds: string[] = [];
@@ -397,19 +403,27 @@ export async function runSourcingOrchestrator(
     : 0;
   const maxDiscoveryTarget = Math.ceil(config.targetCount * config.maxDiscoveryShare);
   const minDiscoveryFloor = Math.min(config.minDiscoveryPerRun, maxDiscoveryTarget);
-  const desiredDiscoveryTarget = Math.min(
-    Math.max(poolDeficit, qualityDrivenTarget, strictCoverageDeficit, minDiscoveryFloor),
-    maxDiscoveryTarget,
-  );
 
-  if (poolDeficit > 0 && qualityGateTriggered) discoveryReason = 'deficit_and_low_quality';
-  else if (poolDeficit > 0 && roleMismatchTriggered) discoveryReason = 'deficit_and_role_mismatch';
-  else if (poolDeficit > 0) discoveryReason = 'pool_deficit';
-  else if (roleMismatchTriggered) discoveryReason = 'pool_role_mismatch';
-  else if (qualityGateTriggered) discoveryReason = 'low_quality_pool';
-  else if (minDiscoveryFloor > 0) discoveryReason = 'minimum_discovery_floor';
+  let desiredDiscoveryTarget: number;
+  if (effectiveStrategy === 'discovery_first') {
+    // Discovery-first: always run discovery with full budget
+    desiredDiscoveryTarget = maxDiscoveryTarget;
+    discoveryReason = 'strategy_discovery_first';
+  } else {
+    // Pool-first: discovery driven by quality gates and deficits
+    desiredDiscoveryTarget = Math.min(
+      Math.max(poolDeficit, qualityDrivenTarget, strictCoverageDeficit, minDiscoveryFloor),
+      maxDiscoveryTarget,
+    );
+    if (poolDeficit > 0 && qualityGateTriggered) discoveryReason = 'deficit_and_low_quality';
+    else if (poolDeficit > 0 && roleMismatchTriggered) discoveryReason = 'deficit_and_role_mismatch';
+    else if (poolDeficit > 0) discoveryReason = 'pool_deficit';
+    else if (roleMismatchTriggered) discoveryReason = 'pool_role_mismatch';
+    else if (qualityGateTriggered) discoveryReason = 'low_quality_pool';
+    else if (minDiscoveryFloor > 0) discoveryReason = 'minimum_discovery_floor';
+  }
 
-  const effectiveMaxQueries = qualityGateTriggered
+  const effectiveMaxQueries = (qualityGateTriggered || effectiveStrategy === 'discovery_first')
     ? config.maxSerpQueries * config.dynamicQueryMultiplier
     : config.maxSerpQueries;
   let dynamicQueryBudgetUsed = false;
@@ -556,11 +570,11 @@ export async function runSourcingOrchestrator(
             const passesLocationGate = !hasLocationConstraint || sc.locationMatchType !== 'none';
             const passesFitGate = sc.fitScore >= config.discoveredPromotionMinFitScore;
 
-            // Provisional promotion for strict-phase non-tech discoveries with exact role match.
+            // Provisional promotion for strict-phase non-tech/blended discoveries with exact role match.
             // These candidates come from location-targeted queries and have the right role family,
             // but fail standard gates because pre-enrichment scores are structurally low.
             let provisionalPromotion = false;
-            if (trackDecision?.track === 'non_tech' && requirements.roleFamily) {
+            if (trackDecision?.track !== 'tech' && requirements.roleFamily) {
               const dc = discoveredCandidateByIdMap.get(sc.candidateId);
               const isFromStrictPhase = dc && strictQueryIndices.has(dc.queryIndex);
               if (isFromStrictPhase) {
@@ -701,8 +715,9 @@ export async function runSourcingOrchestrator(
   };
 
   const promotedDiscoveredIdsOrdered = Array.from(promotedDiscoveredById.values()).map((sc) => sc.candidateId);
+  const discoveryFirstReserve = Math.ceil(config.targetCount * 0.5);
   discoveredReservedInOutput = Math.min(
-    config.minDiscoveredInOutput,
+    effectiveStrategy === 'discovery_first' ? discoveryFirstReserve : config.minDiscoveredInOutput,
     discoveredCandidateIds.length,
     config.targetCount,
   );
@@ -1119,6 +1134,7 @@ export async function runSourcingOrchestrator(
     countAboveThreshold,
     strictTopKCount,
     strictCoverageRate: Number(strictCoverageRate.toFixed(4)),
+    effectiveStrategy,
     discoveryReason,
     discoverySkippedReason,
     discoveryTelemetry,
