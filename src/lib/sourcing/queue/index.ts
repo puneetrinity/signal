@@ -146,6 +146,7 @@ async function processSourcingJob(
           discoveredEnrichedCount: orchestratorResult.discoveredEnrichedCount,
           discoveredOrphanCount: orchestratorResult.discoveredOrphanCount,
           discoveredOrphanQueued: orchestratorResult.discoveredOrphanQueued,
+          effectiveStrategy: orchestratorResult.effectiveStrategy,
           dynamicQueryBudgetUsed: orchestratorResult.dynamicQueryBudgetUsed,
           minDiscoveryPerRunApplied: orchestratorResult.minDiscoveryPerRunApplied,
           minDiscoveredInOutputApplied: orchestratorResult.minDiscoveredInOutputApplied,
