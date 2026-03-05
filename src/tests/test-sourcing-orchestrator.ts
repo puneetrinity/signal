@@ -2160,6 +2160,103 @@ console.log('\n--- Track Classifier: Role Family Boost ---');
 }
 
 // ---------------------------------------------------------------------------
+// Tech Strict Rescue Role Gate
+// ---------------------------------------------------------------------------
+{
+  console.log('\n--- Tech Strict Rescue Role Gate ---');
+
+  const backendReq: JobRequirements = {
+    title: 'Senior Backend Engineer',
+    topSkills: ['TypeScript', 'Node.js', 'PostgreSQL', 'Kubernetes'],
+    seniorityLevel: 'senior',
+    domain: null,
+    roleFamily: 'backend',
+    location: 'Bangalore, India',
+    experienceYears: null,
+    education: null,
+  };
+
+  // DevOps candidate — roleScore should be 0.5 (adjacency) → blocked by tech rescue gate (< 0.7)
+  const devopsCandidate: CandidateForRanking = {
+    id: 'rescue-devops-tech',
+    headlineHint: 'DevOps Engineer | Docker, Kubernetes',
+    locationHint: 'Bangalore, India',
+    searchTitle: 'DevOps Engineer',
+    searchSnippet: 'CI/CD pipelines and infrastructure',
+    enrichmentStatus: 'pending',
+    lastEnrichedAt: null,
+    snapshot: null,
+  };
+
+  // Fullstack candidate — roleScore should be 0.7 (strong adjacency) → passes tech rescue gate
+  const fullstackCandidate: CandidateForRanking = {
+    id: 'rescue-fullstack-tech',
+    headlineHint: 'Senior Full Stack Engineer',
+    locationHint: 'Bangalore, India',
+    searchTitle: 'Senior Full Stack Engineer',
+    searchSnippet: 'Node.js, React, PostgreSQL',
+    enrichmentStatus: 'pending',
+    lastEnrichedAt: null,
+    snapshot: null,
+  };
+
+  // Backend candidate — roleScore should be 1.0 (exact) → passes
+  const backendCandidate: CandidateForRanking = {
+    id: 'rescue-backend-tech',
+    headlineHint: 'Senior Backend Engineer | Node.js',
+    locationHint: 'Bangalore, India',
+    searchTitle: 'Senior Backend Engineer',
+    searchSnippet: 'TypeScript, PostgreSQL, Redis',
+    enrichmentStatus: 'pending',
+    lastEnrichedAt: null,
+    snapshot: null,
+  };
+
+  const techRescueScored = rankCandidates(
+    [devopsCandidate, fullstackCandidate, backendCandidate],
+    backendReq,
+    { track: 'tech' },
+  );
+
+  const devopsScored = techRescueScored.find((s) => s.candidateId === 'rescue-devops-tech')!;
+  const fullstackScored = techRescueScored.find((s) => s.candidateId === 'rescue-fullstack-tech')!;
+  const backendScored = techRescueScored.find((s) => s.candidateId === 'rescue-backend-tech')!;
+
+  // DevOps → backend adjacency is 0.5 → blocked by tech gate (< 0.7)
+  assert(
+    devopsScored.fitBreakdown.roleScore < 0.7,
+    `Tech rescue gate: DevOps roleScore ${devopsScored.fitBreakdown.roleScore} < 0.7 (blocked)`,
+  );
+  // Fullstack → backend adjacency is 0.7 → passes tech gate
+  assert(
+    fullstackScored.fitBreakdown.roleScore >= 0.7,
+    `Tech rescue gate: Fullstack roleScore ${fullstackScored.fitBreakdown.roleScore} >= 0.7 (passes)`,
+  );
+  // Backend exact match → 1.0 → passes
+  assert(
+    backendScored.fitBreakdown.roleScore >= 0.7,
+    `Tech rescue gate: Backend roleScore ${backendScored.fitBreakdown.roleScore} >= 0.7 (passes)`,
+  );
+
+  // QA → backend should be very low → blocked
+  const qaForBackend: CandidateForRanking = {
+    id: 'rescue-qa-tech',
+    headlineHint: 'Senior QA Engineer',
+    locationHint: 'Bangalore, India',
+    searchTitle: 'Senior QA Engineer',
+    searchSnippet: 'Test automation',
+    enrichmentStatus: 'pending',
+    lastEnrichedAt: null,
+    snapshot: null,
+  };
+  const qaBackendScored = rankCandidates([qaForBackend], backendReq, { track: 'tech' })[0];
+  assert(
+    qaBackendScored.fitBreakdown.roleScore < 0.7,
+    `Tech rescue gate: QA roleScore ${qaBackendScored.fitBreakdown.roleScore} < 0.7 (blocked)`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 

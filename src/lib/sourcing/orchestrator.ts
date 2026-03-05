@@ -677,10 +677,11 @@ export async function runSourcingOrchestrator(
     const rescuedStrict = demotedStrictCandidates
       .filter((sc) => {
         if (sc.fitScore < config.strictRescueMinFitScore) return false;
-        // Non-tech/blended: only rescue candidates with relevant role (roleScore >= 0.6).
-        // Prevents wrong-role engineers from being rescued into the top bucket
-        // purely due to location match. Applies to both non_tech and blended tracks
-        // since blended TAM jobs still need role-aware rescue.
+        // Role-aware rescue gate: prevents wrong-role candidates from being rescued
+        // into the top bucket purely due to location match.
+        // Tech: 0.7 keeps exact + strong adjacency (fullstack↔backend), blocks devops/qa.
+        // Non-tech/blended: 0.6 keeps exact + adjacency (CS↔TAM), blocks engineers.
+        if (trackDecision?.track === 'tech' && sc.fitBreakdown.roleScore < 0.7) return false;
         if (trackDecision?.track !== 'tech' && sc.fitBreakdown.roleScore < 0.6) return false;
         return true;
       })
@@ -723,9 +724,15 @@ export async function runSourcingOrchestrator(
     discoveredCandidateIds.length,
     config.targetCount,
   );
-  const promotedDiscoveredTopIds = promotedDiscoveredIdsOrdered
-    .filter((id) => promotedDiscoveredById.get(id)?.matchTier === 'strict_location')
-    .slice(0, discoveredReservedInOutput);
+  const discoveredRoleThreshold = trackDecision?.track === 'tech' ? 0.7 : 0.6;
+  const promotedDiscoveredTopIds = (effectiveStrategy === 'discovery_first'
+    ? // discovery_first: front-load all promoted discovered sorted by fit (not just strict_location)
+      promotedDiscoveredIdsOrdered
+        .filter((id) => (promotedDiscoveredById.get(id)?.fitBreakdown.roleScore ?? 0) >= discoveredRoleThreshold)
+    : // pool_first: only strict_location promoted
+      promotedDiscoveredIdsOrdered
+        .filter((id) => promotedDiscoveredById.get(id)?.matchTier === 'strict_location')
+  ).slice(0, discoveredReservedInOutput);
   discoveredPromotedInTopCount = promotedDiscoveredTopIds.length;
   const discoveredReserveRemaining = Math.max(0, discoveredReservedInOutput - discoveredPromotedInTopCount);
   const poolFillLimit = Math.max(0, config.targetCount - discoveredReserveRemaining);
