@@ -3,7 +3,12 @@ import { canonicalizeSkill, getSkillSurfaceForms, buildSkillMatchSet } from './j
 import type { JobTrack } from './types';
 import { isNoisyHint, PLACEHOLDER_HINTS } from './hint-sanitizer';
 import { SENIORITY_LADDER, normalizeSeniorityFromText, seniorityDistance, type SeniorityBand } from '@/lib/taxonomy/seniority';
-import { detectRoleFamilyFromTitle } from '@/lib/taxonomy/role-family';
+import {
+  resolveRoleDeterministic,
+  adjacencyMap,
+  type RoleResolution,
+  type RoleFamily,
+} from '@/lib/taxonomy/role-service';
 
 export interface CandidateForRanking {
   id: string;
@@ -307,49 +312,41 @@ function classifyLocationMatch(
   return { matchTier: 'expanded_location', locationMatchType: 'none' };
 }
 
-// Role family adjacency pairs → score
-const ROLE_ADJACENCY: Array<[string, string, number]> = [
-  // Tech adjacencies
-  ['fullstack', 'frontend', 0.7],
-  ['fullstack', 'backend', 0.7],
-  ['devops', 'backend', 0.5],
-  ['devops', 'security', 0.5],
-  // Non-tech adjacencies
-  ['account_executive', 'business_development', 0.7],
-  ['account_executive', 'account_manager', 0.6],
-  ['account_executive', 'sales_engineer', 0.5],
-  ['customer_success', 'account_manager', 0.7],
-  ['customer_success', 'technical_account_manager', 0.6],
-  ['technical_account_manager', 'sales_engineer', 0.7],
-  ['technical_account_manager', 'customer_success', 0.6],
-  ['sales_engineer', 'account_executive', 0.5],
-  ['business_development', 'account_manager', 0.5],
-];
-
-const adjacencyMap = new Map<string, number>();
-for (const [a, b, score] of ROLE_ADJACENCY) {
-  adjacencyMap.set(`${a}:${b}`, score);
-  adjacencyMap.set(`${b}:${a}`, score);
-}
-
 function computeRoleScore(
   candidate: CandidateForRanking,
   targetRoleFamily: string | null,
   track?: JobTrack,
+  preResolved?: RoleResolution | null,
 ): number {
   if (!targetRoleFamily) return 0.5; // neutral when job has no role family
 
-  const headline = candidate.headlineHint ?? candidate.searchTitle ?? '';
-  const candidateFamily = detectRoleFamilyFromTitle(headline);
+  // Use pre-resolved role if provided, otherwise resolve deterministically
+  const resolution = preResolved ?? resolveRoleDeterministic(
+    candidate.headlineHint ?? candidate.searchTitle ?? '',
+  );
+
+  const candidateFamily = resolution.family;
+  const confidence = resolution.confidence;
 
   if (!candidateFamily) {
     // For non-tech/blended, unknown role is harsher — random engineers should sink
     return track !== 'tech' ? 0.15 : 0.3;
   }
-  if (candidateFamily === targetRoleFamily) return 1.0;
+
+  // Confidence gates: only full scoring at >= 0.7
+  if (confidence < 0.5) {
+    return track !== 'tech' ? 0.15 : 0.3;
+  }
+
+  if (candidateFamily === targetRoleFamily) {
+    // Full exact match scoring at confidence >= 0.5 (adjacency/mismatch assist)
+    return confidence >= 0.7 ? 1.0 : 0.8;
+  }
 
   const adjacency = adjacencyMap.get(`${candidateFamily}:${targetRoleFamily}`);
-  if (adjacency !== undefined) return adjacency;
+  if (adjacency !== undefined) {
+    return confidence >= 0.7 ? adjacency : adjacency * 0.7;
+  }
 
   return 0.1; // mismatch
 }
@@ -396,7 +393,7 @@ const TRACK_WEIGHTS: Record<JobTrack, { skill: number; role: number; seniority: 
 export function rankCandidates(
   candidates: CandidateForRanking[],
   requirements: JobRequirements,
-  options?: { fitScoreEpsilon?: number; locationBoostWeight?: number; track?: JobTrack },
+  options?: { fitScoreEpsilon?: number; locationBoostWeight?: number; track?: JobTrack; preResolvedRoles?: Map<string, RoleResolution> },
 ): ScoredCandidate[] {
   // Location boost weight: 0 (default/disabled) preserves existing weights exactly.
   const locationWeight = options?.locationBoostWeight ?? 0;
@@ -413,7 +410,11 @@ export function rankCandidates(
   return candidates
     .map((c) => {
       const { score: skillScore, method: skillScoreMethod } = computeSkillScore(c, requirements.topSkills, requirements.domain);
-      const roleScore = computeRoleScore(c, requirements.roleFamily, options?.track);
+      // Look up pre-resolved role by normalized title key (same key used in resolveRolesBatch)
+      const preResolved = options?.preResolvedRoles?.get(
+        (c.headlineHint ?? c.searchTitle ?? '').trim().toLowerCase(),
+      ) ?? null;
+      const roleScore = computeRoleScore(c, requirements.roleFamily, options?.track, preResolved);
       const seniorityScore = computeSeniorityScore(c, requirements.seniorityLevel);
       const activityFreshnessScore = computeFreshnessScore(c);
       const { matchTier, locationMatchType } = classifyLocationMatch(c, requirements.location);

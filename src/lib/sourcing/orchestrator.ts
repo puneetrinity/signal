@@ -13,7 +13,13 @@ import { getRecentlyExposedCandidateIds } from './novelty';
 import type { CandidateForRanking, FitBreakdown, MatchTier, LocationMatchType, ScoredCandidate } from './ranking';
 import type { TrackDecision } from './types';
 import { jobTrackToDbFilter } from './types';
-import { detectRoleFamilyFromTitle } from '@/lib/taxonomy/role-family';
+import {
+  resolveRoleDeterministic,
+  resolveRolesBatch,
+  type RoleResolution,
+  type RoleResolutionMetrics,
+  type RoleBatchEntry,
+} from '@/lib/taxonomy/role-service';
 import {
   assessLocationCountryConsistency,
   computeSerpEvidence,
@@ -78,6 +84,7 @@ export interface OrchestratorResult {
   minDiscoveredInOutputApplied: number;
   discoveredPromotedCount: number;
   discoveredPromotedInTopCount: number;
+  roleResolutionMetrics: RoleResolutionMetrics | null;
 }
 
 interface AssembledCandidate {
@@ -266,7 +273,70 @@ export async function runSourcingOrchestrator(
     ? deriveCountryCodeFromLocationText(requirements.location)
     : null;
 
-  const scoredPoolRaw = rankCandidates(poolForRanking, requirements, { fitScoreEpsilon: config.fitScoreEpsilon, locationBoostWeight: config.locationBoostWeight, track: trackDecision?.track });
+  // Role resolution: batch-resolve pool candidates (shadow or active)
+  let roleResolutionMetrics: RoleResolutionMetrics | null = null;
+  const roleResolutionAggregate = {
+    total: 0,
+    deterministicResolved: 0,
+    cacheResolved: 0,
+  };
+  const mergeRoleResolutionMetrics = (batch: RoleResolutionMetrics): void => {
+    const batchTotal = batch.confidenceDistribution.high +
+      batch.confidenceDistribution.medium +
+      batch.confidenceDistribution.low;
+    roleResolutionAggregate.total += batchTotal;
+    roleResolutionAggregate.deterministicResolved += batch.deterministicHitRate * batchTotal;
+    roleResolutionAggregate.cacheResolved += batch.cacheHitRate * batchTotal;
+
+    if (roleResolutionMetrics) {
+      roleResolutionMetrics.llmCallCount += batch.llmCallCount;
+      roleResolutionMetrics.unknownCount += batch.unknownCount;
+      roleResolutionMetrics.confidenceDistribution.high += batch.confidenceDistribution.high;
+      roleResolutionMetrics.confidenceDistribution.medium += batch.confidenceDistribution.medium;
+      roleResolutionMetrics.confidenceDistribution.low += batch.confidenceDistribution.low;
+      roleResolutionMetrics.promotionDelta.wouldPromote += batch.promotionDelta.wouldPromote;
+      roleResolutionMetrics.promotionDelta.wouldBlock += batch.promotionDelta.wouldBlock;
+    } else {
+      roleResolutionMetrics = {
+        deterministicHitRate: 0,
+        cacheHitRate: 0,
+        llmCallCount: batch.llmCallCount,
+        unknownCount: batch.unknownCount,
+        confidenceDistribution: { ...batch.confidenceDistribution },
+        promotionDelta: { ...batch.promotionDelta },
+      };
+    }
+
+    if (roleResolutionMetrics && roleResolutionAggregate.total > 0) {
+      roleResolutionMetrics.deterministicHitRate = Number(
+        (roleResolutionAggregate.deterministicResolved / roleResolutionAggregate.total).toFixed(4),
+      );
+      roleResolutionMetrics.cacheHitRate = Number(
+        (roleResolutionAggregate.cacheResolved / roleResolutionAggregate.total).toFixed(4),
+      );
+    }
+  };
+  let poolPreResolvedRoles: Map<string, RoleResolution> | undefined;
+  if (config.roleGroqEnabled) {
+    const poolEntries: RoleBatchEntry[] = poolForRanking.map((c) => ({
+      title: c.headlineHint ?? c.searchTitle ?? '',
+      context: [c.headlineHint, c.searchTitle, c.searchSnippet].filter(Boolean).join(' '),
+    }));
+    const batchResult = await resolveRolesBatch(poolEntries);
+    mergeRoleResolutionMetrics(batchResult.metrics);
+
+    // Active mode: pass pre-resolved roles to ranking
+    // Shadow mode: log only, do NOT influence ranking
+    if (!config.roleGroqShadowMode) {
+      poolPreResolvedRoles = batchResult.resolutions;
+    }
+    log.info(
+      { requestId, mode: config.roleGroqShadowMode ? 'shadow' : 'active', ...batchResult.metrics },
+      'Role batch resolution complete (pool)',
+    );
+  }
+
+  const scoredPoolRaw = rankCandidates(poolForRanking, requirements, { fitScoreEpsilon: config.fitScoreEpsilon, locationBoostWeight: config.locationBoostWeight, track: trackDecision?.track, preResolvedRoles: poolPreResolvedRoles });
   const countryGuardFilteredCandidateIds = new Set<string>();
   let countryGuardSerpLocaleSkippedCount = 0;
   const countryGuardEscapeCounts = { no_location: 0, country_match: 0, city_only_unknown_country: 0 };
@@ -576,7 +646,26 @@ export async function runSourcingOrchestrator(
             .map((candidateId) => discoveredById.get(candidateId))
             .filter((row): row is NonNullable<typeof row> => Boolean(row))
             .map((row) => toRankingCandidate(row));
-          const scoredDiscovered = rankCandidates(discoveredForRanking, requirements, { fitScoreEpsilon: config.fitScoreEpsilon, locationBoostWeight: config.locationBoostWeight, track: trackDecision?.track });
+
+          // Role resolution for discovered candidates (shadow or active)
+          let discoveredPreResolvedRoles: Map<string, RoleResolution> | undefined;
+          if (config.roleGroqEnabled) {
+            const discoveredEntries: RoleBatchEntry[] = discoveredForRanking.map((c) => ({
+              title: c.headlineHint ?? c.searchTitle ?? '',
+              context: [c.headlineHint, c.searchTitle, c.searchSnippet].filter(Boolean).join(' '),
+            }));
+            const discoveredBatch = await resolveRolesBatch(discoveredEntries);
+            mergeRoleResolutionMetrics(discoveredBatch.metrics);
+            if (!config.roleGroqShadowMode) {
+              discoveredPreResolvedRoles = discoveredBatch.resolutions;
+            }
+            log.info(
+              { requestId, mode: config.roleGroqShadowMode ? 'shadow' : 'active', ...discoveredBatch.metrics },
+              'Role batch resolution complete (discovered)',
+            );
+          }
+
+          const scoredDiscovered = rankCandidates(discoveredForRanking, requirements, { fitScoreEpsilon: config.fitScoreEpsilon, locationBoostWeight: config.locationBoostWeight, track: trackDecision?.track, preResolvedRoles: discoveredPreResolvedRoles });
           for (const sc of scoredDiscovered) {
             scoredDiscoveredById.set(sc.candidateId, sc);
 
@@ -592,10 +681,16 @@ export async function runSourcingOrchestrator(
               const dc = discoveredCandidateByIdMap.get(sc.candidateId);
               const isFromStrictPhase = !!dc && strictQueryIndices.has(dc.queryIndex);
               const isFromFallbackPhase = !!dc && fallbackQueryIndices.has(dc.queryIndex);
-              const candidateRoleFamily = detectRoleFamilyFromTitle(
-                discoveredById.get(sc.candidateId)?.headlineHint ?? ''
-              );
-              if (candidateRoleFamily === requirements.roleFamily) {
+              const candidateRow = discoveredById.get(sc.candidateId);
+              const candidateTitleForResolution = candidateRow?.headlineHint ?? candidateRow?.searchTitle ?? '';
+              const candidateRoleKey = candidateTitleForResolution.trim().toLowerCase();
+              // Use pre-resolved role in active mode, deterministic otherwise
+              const candidateResolution = discoveredPreResolvedRoles?.get(candidateRoleKey)
+                ?? resolveRoleDeterministic(candidateTitleForResolution);
+              const candidateRoleFamily = candidateResolution.family;
+              // Confidence gate: only allow promotion at >= 0.7 (per plan requirement)
+              const passesConfidenceGate = candidateResolution.confidence >= 0.7;
+              if (candidateRoleFamily === requirements.roleFamily && passesConfidenceGate) {
                 if (isFromStrictPhase) {
                   provisionalPromotion = true;
                 } else if (
@@ -1201,6 +1296,7 @@ export async function runSourcingOrchestrator(
     minDiscoveredInOutputApplied: discoveredReservedInOutput,
     discoveredPromotedCount,
     discoveredPromotedInTopCount,
+    roleResolutionMetrics,
   };
 
   log.info({ requestId, resolvedTrack: trackDecision?.track ?? null, ...result }, 'Orchestrator complete');

@@ -12,6 +12,16 @@ import { extractLocationFromSnippet } from '@/lib/enrichment/hint-extraction';
 import { isLikelyLocationHint } from '@/lib/sourcing/hint-sanitizer';
 import { jobTrackToDbFilter } from '@/lib/sourcing/types';
 import { detectRoleFamilyFromTitle } from '@/lib/taxonomy/role-family';
+import {
+  resolveRoleDeterministic,
+  TECH_ROLE_FAMILIES,
+  NON_TECH_ROLE_FAMILIES,
+  adjacencyMap,
+  NON_TECH_TITLE_VARIANTS,
+  familyToTrack,
+  type RoleFamily,
+  type RoleResolution,
+} from '@/lib/taxonomy/role-service';
 import { scoreDeterministic } from '@/lib/sourcing/track-resolver';
 import type { SourcingJobContextInput } from '@/lib/sourcing/jd-digest';
 
@@ -2298,6 +2308,277 @@ console.log('\n--- Track Classifier: Role Family Boost ---');
   assert(
     qaBackendScored.fitBreakdown.roleScore < 0.7,
     `Tech rescue gate: QA roleScore ${qaBackendScored.fitBreakdown.roleScore} < 0.7 (blocked)`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Role Service: Deterministic Resolution
+// ---------------------------------------------------------------------------
+{
+  console.log('\n--- Role Service: resolveRoleDeterministic ---');
+
+  // Tech families
+  const backendRes = resolveRoleDeterministic('Senior Backend Engineer');
+  assert(backendRes.family === 'backend', `Backend resolves: ${backendRes.family}`);
+  assert(backendRes.confidence === 0.95, `Backend confidence: ${backendRes.confidence}`);
+  assert(backendRes.track === 'tech', `Backend track: ${backendRes.track}`);
+
+  const frontendRes = resolveRoleDeterministic('React Frontend Developer');
+  assert(frontendRes.family === 'frontend', `Frontend resolves: ${frontendRes.family}`);
+
+  const devopsRes = resolveRoleDeterministic('Senior SRE Lead');
+  assert(devopsRes.family === 'devops', `DevOps/SRE resolves: ${devopsRes.family}`);
+
+  const fullstackRes = resolveRoleDeterministic('Full-Stack Engineer');
+  assert(fullstackRes.family === 'fullstack', `Fullstack resolves: ${fullstackRes.family}`);
+
+  const dataRes = resolveRoleDeterministic('ML Engineer');
+  assert(dataRes.family === 'data', `Data/ML resolves: ${dataRes.family}`);
+
+  const mobileRes = resolveRoleDeterministic('iOS Developer');
+  assert(mobileRes.family === 'mobile', `Mobile resolves: ${mobileRes.family}`);
+
+  // Non-tech families
+  const tamFullRes = resolveRoleDeterministic('Technical Account Manager at AWS');
+  assert(tamFullRes.family === 'technical_account_manager', `TAM full title resolves: ${tamFullRes.family}`);
+
+  const tamAbbrevRes = resolveRoleDeterministic('TAM at AWS');
+  assert(tamAbbrevRes.family === 'technical_account_manager', `TAM abbreviation resolves: ${tamAbbrevRes.family}`);
+
+  const csmRes = resolveRoleDeterministic('Customer Success Manager');
+  assert(csmRes.family === 'customer_success', `CSM resolves: ${csmRes.family}`);
+
+  const csmAbbrevRes = resolveRoleDeterministic('CSM at Salesforce');
+  assert(csmAbbrevRes.family === 'customer_success', `CSM abbreviation resolves: ${csmAbbrevRes.family}`);
+
+  const aeRes = resolveRoleDeterministic('Enterprise Sales at Snowflake');
+  assert(aeRes.family === 'account_executive', `AE resolves: ${aeRes.family}`);
+
+  const seRes = resolveRoleDeterministic('Solutions Engineer');
+  assert(seRes.family === 'sales_engineer', `SE resolves: ${seRes.family}`);
+
+  const bdrRes = resolveRoleDeterministic('BDR at HubSpot');
+  assert(bdrRes.family === 'business_development', `BDR resolves: ${bdrRes.family}`);
+
+  const amRes = resolveRoleDeterministic('Key Account Manager');
+  assert(amRes.family === 'account_manager', `AM resolves: ${amRes.family}`);
+
+  // Unknown titles
+  const unknownRes = resolveRoleDeterministic('CEO at Startup');
+  assert(unknownRes.family === null, `Unknown title: family is null`);
+  assert(unknownRes.fallbackKind === 'unknown', `Unknown title: fallbackKind is "unknown"`);
+  assert(unknownRes.confidence === 0.0, `Unknown title: confidence is 0.0`);
+  assert(unknownRes.track === null, `Unknown title: track is null`);
+
+  const emptyRes = resolveRoleDeterministic('');
+  assert(emptyRes.family === null, `Empty string: family is null`);
+  assert(emptyRes.confidence === 0.0, `Empty string: confidence is 0.0`);
+
+  // Track mapping
+  assert(TECH_ROLE_FAMILIES.has('backend'), `TECH_ROLE_FAMILIES includes backend`);
+  assert(TECH_ROLE_FAMILIES.has('mobile'), `TECH_ROLE_FAMILIES includes mobile`);
+  assert(!TECH_ROLE_FAMILIES.has('account_executive' as RoleFamily), `TECH_ROLE_FAMILIES excludes AE`);
+  assert(NON_TECH_ROLE_FAMILIES.has('technical_account_manager'), `NON_TECH_ROLE_FAMILIES includes TAM`);
+  assert(NON_TECH_ROLE_FAMILIES.has('customer_success'), `NON_TECH_ROLE_FAMILIES includes CS`);
+  assert(!NON_TECH_ROLE_FAMILIES.has('backend' as RoleFamily), `NON_TECH_ROLE_FAMILIES excludes backend`);
+
+  // familyToTrack
+  assert(familyToTrack.get('backend') === 'tech', `familyToTrack: backend → tech`);
+  assert(familyToTrack.get('customer_success') === 'non_tech', `familyToTrack: customer_success → non_tech`);
+  assert(familyToTrack.get('technical_account_manager') === 'non_tech', `familyToTrack: TAM → non_tech`);
+}
+
+// ---------------------------------------------------------------------------
+// Role Service: Adjacency Map
+// ---------------------------------------------------------------------------
+{
+  console.log('\n--- Role Service: adjacencyMap ---');
+
+  assert(adjacencyMap.get('fullstack:frontend') === 0.7, 'fullstack→frontend adjacency = 0.7');
+  assert(adjacencyMap.get('frontend:fullstack') === 0.7, 'frontend→fullstack adjacency = 0.7 (symmetric)');
+  assert(adjacencyMap.get('devops:backend') === 0.5, 'devops→backend adjacency = 0.5');
+  assert(adjacencyMap.get('technical_account_manager:sales_engineer') === 0.7, 'TAM→SE adjacency = 0.7');
+  assert(adjacencyMap.get('customer_success:account_manager') === 0.7, 'CS→AM adjacency = 0.7');
+  assert(adjacencyMap.get('backend:frontend') === undefined, 'backend→frontend no adjacency');
+}
+
+// ---------------------------------------------------------------------------
+// Role Service: Adjacent families in resolution
+// ---------------------------------------------------------------------------
+{
+  console.log('\n--- Role Service: Adjacent families in resolution ---');
+
+  const tamRes = resolveRoleDeterministic('TAM at AWS');
+  assert(tamRes.adjacentFamilies.length > 0, `TAM has adjacent families: ${tamRes.adjacentFamilies.join(', ')}`);
+  assert(tamRes.adjacentFamilies.includes('sales_engineer'), `TAM adjacent includes sales_engineer`);
+  assert(tamRes.adjacentFamilies.includes('customer_success'), `TAM adjacent includes customer_success`);
+
+  const fullstackRes = resolveRoleDeterministic('Full Stack Engineer');
+  assert(fullstackRes.adjacentFamilies.includes('frontend'), `Fullstack adjacent includes frontend`);
+  assert(fullstackRes.adjacentFamilies.includes('backend'), `Fullstack adjacent includes backend`);
+}
+
+// ---------------------------------------------------------------------------
+// Role Service: NON_TECH_TITLE_VARIANTS
+// ---------------------------------------------------------------------------
+{
+  console.log('\n--- Role Service: NON_TECH_TITLE_VARIANTS ---');
+
+  assert(NON_TECH_TITLE_VARIANTS['account_executive']!.includes('account executive'), 'AE variants include "account executive"');
+  assert(NON_TECH_TITLE_VARIANTS['technical_account_manager']!.includes('technical account manager'), 'TAM variants include "technical account manager"');
+  assert(NON_TECH_TITLE_VARIANTS['customer_success']!.includes('customer success manager'), 'CS variants include "customer success manager"');
+  assert(Object.keys(NON_TECH_TITLE_VARIANTS).length === 6, `NON_TECH_TITLE_VARIANTS has 6 families`);
+}
+
+// ---------------------------------------------------------------------------
+// Role Service: Backward-compat detectRoleFamilyFromTitle re-export
+// ---------------------------------------------------------------------------
+{
+  console.log('\n--- Role Service: detectRoleFamilyFromTitle backward compat ---');
+
+  // Verify the deprecated re-export still works and returns string | null
+  const tamFamily = detectRoleFamilyFromTitle('TAM at AWS');
+  assert(tamFamily === 'technical_account_manager', `detectRoleFamilyFromTitle TAM: ${tamFamily}`);
+  assert(typeof tamFamily === 'string', `Return type is string`);
+
+  const unknownFamily = detectRoleFamilyFromTitle('CEO');
+  assert(unknownFamily === null, `detectRoleFamilyFromTitle unknown returns null`);
+
+  const backendFamily = detectRoleFamilyFromTitle('Senior Backend Engineer');
+  assert(backendFamily === 'backend', `detectRoleFamilyFromTitle backend: ${backendFamily}`);
+}
+
+// ---------------------------------------------------------------------------
+// Role Service: Ranking with preResolvedRoles
+// ---------------------------------------------------------------------------
+{
+  console.log('\n--- Role Service: Ranking with preResolvedRoles ---');
+
+  const tamReq = makeRequirements({
+    roleFamily: 'technical_account_manager',
+    topSkills: ['customer success', 'integrations'],
+  });
+
+  // Candidate with TAM headline
+  const tamCandidate: CandidateForRanking = {
+    id: 'tam-1',
+    headlineHint: 'TAM at AWS',
+    locationHint: 'Seattle',
+    searchTitle: 'Technical Account Manager',
+    searchSnippet: 'Manages enterprise accounts',
+    enrichmentStatus: 'pending',
+    lastEnrichedAt: null,
+    snapshot: null,
+  };
+
+  // With pre-resolved role (high confidence)
+  const preResolved = new Map<string, RoleResolution>();
+  preResolved.set('tam at aws', {
+    family: 'technical_account_manager',
+    fallbackKind: null,
+    confidence: 0.95,
+    track: 'non_tech',
+    adjacentFamilies: ['sales_engineer', 'customer_success'],
+    normalizedTitle: 'TAM at AWS',
+  });
+
+  const withPreResolved = rankCandidates([tamCandidate], tamReq, {
+    track: 'non_tech',
+    preResolvedRoles: preResolved,
+  });
+  assert(
+    withPreResolved[0].fitBreakdown.roleScore === 1.0,
+    `TAM with preResolved role gets roleScore 1.0: ${withPreResolved[0].fitBreakdown.roleScore}`,
+  );
+
+  // Without pre-resolved (deterministic still resolves TAM abbreviation now)
+  const withoutPreResolved = rankCandidates([tamCandidate], tamReq, { track: 'non_tech' });
+  assert(
+    withoutPreResolved[0].fitBreakdown.roleScore === 1.0,
+    `TAM without preResolved also gets 1.0 (regex now catches TAM): ${withoutPreResolved[0].fitBreakdown.roleScore}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Role Service: Confidence gates in ranking
+// ---------------------------------------------------------------------------
+{
+  console.log('\n--- Role Service: Confidence gates in ranking ---');
+
+  const tamReq = makeRequirements({
+    roleFamily: 'technical_account_manager',
+    topSkills: ['customer success'],
+  });
+
+  const candidate: CandidateForRanking = {
+    id: 'low-conf-1',
+    headlineHint: 'Unknown Title',
+    locationHint: null,
+    searchTitle: null,
+    searchSnippet: null,
+    enrichmentStatus: 'pending',
+    lastEnrichedAt: null,
+    snapshot: null,
+  };
+
+  // Low confidence pre-resolved role (< 0.5) → conservative scoring
+  const lowConf = new Map<string, RoleResolution>();
+  lowConf.set('unknown title', {
+    family: 'technical_account_manager',
+    fallbackKind: null,
+    confidence: 0.3,
+    track: 'non_tech',
+    adjacentFamilies: [],
+    normalizedTitle: 'Unknown Title',
+  });
+
+  const lowConfScored = rankCandidates([candidate], tamReq, {
+    track: 'non_tech',
+    preResolvedRoles: lowConf,
+  });
+  assert(
+    lowConfScored[0].fitBreakdown.roleScore <= 0.15,
+    `Low confidence (0.3) gets conservative roleScore: ${lowConfScored[0].fitBreakdown.roleScore}`,
+  );
+
+  // Medium confidence (0.6) → assist scoring but no full promotion
+  const medConf = new Map<string, RoleResolution>();
+  medConf.set('unknown title', {
+    family: 'technical_account_manager',
+    fallbackKind: null,
+    confidence: 0.6,
+    track: 'non_tech',
+    adjacentFamilies: [],
+    normalizedTitle: 'Unknown Title',
+  });
+
+  const medConfScored = rankCandidates([candidate], tamReq, {
+    track: 'non_tech',
+    preResolvedRoles: medConf,
+  });
+  assert(
+    medConfScored[0].fitBreakdown.roleScore === 0.8,
+    `Medium confidence (0.6) exact match gets 0.8: ${medConfScored[0].fitBreakdown.roleScore}`,
+  );
+
+  // High confidence (0.9) → full scoring
+  const highConf = new Map<string, RoleResolution>();
+  highConf.set('unknown title', {
+    family: 'technical_account_manager',
+    fallbackKind: null,
+    confidence: 0.9,
+    track: 'non_tech',
+    adjacentFamilies: [],
+    normalizedTitle: 'Unknown Title',
+  });
+
+  const highConfScored = rankCandidates([candidate], tamReq, {
+    track: 'non_tech',
+    preResolvedRoles: highConf,
+  });
+  assert(
+    highConfScored[0].fitBreakdown.roleScore === 1.0,
+    `High confidence (0.9) exact match gets 1.0: ${highConfScored[0].fitBreakdown.roleScore}`,
   );
 }
 

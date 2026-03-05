@@ -50,6 +50,15 @@ export interface SourcingConfig {
   trackCbThreshold: number;
   trackCbWindowSec: number;
   trackCbCooldownSec: number;
+  // Role classifier (Groq LLM fallback for role family detection)
+  roleGroqEnabled: boolean;
+  roleGroqShadowMode: boolean;
+  roleGroqTimeoutMs: number;
+  roleGroqMaxRetries: number;
+  roleGroqCacheTtlDays: number;
+  roleCbThreshold: number;
+  roleCbWindowSec: number;
+  roleCbCooldownSec: number;
   // Post-enrichment rerank
   rerankAfterEnrichment: boolean;
   rerankDelayMs: number;
@@ -142,6 +151,15 @@ export function getSourcingConfig(): SourcingConfig {
     trackCbThreshold: parseIntSafe(process.env.TRACK_CB_THRESHOLD, 5),
     trackCbWindowSec: parseIntSafe(process.env.TRACK_CB_WINDOW_SEC, 300),
     trackCbCooldownSec: parseIntSafe(process.env.TRACK_CB_COOLDOWN_SEC, 60),
+    // Role classifier (Groq LLM fallback for role family detection)
+    roleGroqEnabled: process.env.ROLE_GROQ_ENABLED === 'true',
+    roleGroqShadowMode: process.env.ROLE_GROQ_SHADOW_MODE !== 'false',
+    roleGroqTimeoutMs: parseIntSafe(process.env.ROLE_GROQ_TIMEOUT_MS, 1500),
+    roleGroqMaxRetries: parseIntSafe(process.env.ROLE_GROQ_MAX_RETRIES, 1),
+    roleGroqCacheTtlDays: parseIntSafe(process.env.ROLE_GROQ_CACHE_TTL_DAYS, 30),
+    roleCbThreshold: parseIntSafe(process.env.ROLE_CB_THRESHOLD, 5),
+    roleCbWindowSec: parseIntSafe(process.env.ROLE_CB_WINDOW_SEC, 300),
+    roleCbCooldownSec: parseIntSafe(process.env.ROLE_CB_COOLDOWN_SEC, 60),
     // Post-enrichment rerank
     rerankAfterEnrichment: process.env.SOURCE_RERANK_AFTER_ENRICHMENT !== 'false',
     rerankDelayMs: clamp(parseIntSafe(process.env.SOURCE_RERANK_DELAY_MS, 90_000), 10_000, 300_000),

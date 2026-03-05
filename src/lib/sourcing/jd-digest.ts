@@ -1,5 +1,5 @@
 import { normalizeSeniorityFromText } from '@/lib/taxonomy/seniority';
-import { detectRoleFamilyFromTitle } from '@/lib/taxonomy/role-family';
+import { resolveRoleDeterministic } from '@/lib/taxonomy/role-service';
 
 /**
  * Canonical skill aliases — maps common abbreviations/variants to a single
@@ -269,7 +269,7 @@ export function buildJobRequirements(jobContext: SourcingJobContextInput): JobRe
   ]);
   const title = jobContext.title?.trim() ?? null;
   const parsedTitleSeniority = title ? normalizeSeniorityFromText(title) : null;
-  const parsedTitleRoleFamily = title ? detectRoleFamilyFromTitle(title) : null;
+  const parsedTitleRoleFamily = title ? resolveRoleDeterministic(title).family : null;
 
   return {
     title,

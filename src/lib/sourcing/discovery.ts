@@ -9,6 +9,7 @@ import { getDiscoverySkillBuckets } from './jd-digest';
 import type { SourcingConfig } from './config';
 import type { JobTrack } from './types';
 import { createLogger } from '@/lib/logger';
+import { NON_TECH_TITLE_VARIANTS } from '@/lib/taxonomy/role-service';
 
 const log = createLogger('SourcingDiscovery');
 
@@ -522,14 +523,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
-const NON_TECH_TITLE_VARIANTS: Record<string, string[]> = {
-  'account_executive': ['account executive', 'enterprise sales', 'sales executive', 'regional sales manager'],
-  'customer_success': ['customer success manager', 'client success manager', 'customer success lead'],
-  'technical_account_manager': ['technical account manager', 'technical customer success'],
-  'sales_engineer': ['sales engineer', 'solutions engineer', 'pre-sales engineer'],
-  'business_development': ['business development representative', 'sales development representative'],
-  'account_manager': ['account manager', 'key account manager', 'client manager'],
-};
+// NON_TECH_TITLE_VARIANTS imported from role-service (single source of truth)
 
 export function buildDeterministicQueries(
   requirements: JobRequirements,

@@ -7,7 +7,12 @@
  * Invariant: resolveTrack() never throws — any error returns a safe deterministic fallback.
  */
 
-import { detectRoleFamilyFromTitle } from '@/lib/taxonomy/role-family';
+import {
+  resolveRoleDeterministic,
+  TECH_ROLE_FAMILIES,
+  NON_TECH_ROLE_FAMILIES,
+  type RoleFamily,
+} from '@/lib/taxonomy/role-service';
 import { createLogger } from '@/lib/logger';
 import { getSourcingConfig, type SourcingConfig } from './config';
 import type { SourcingJobContextInput } from './jd-digest';
@@ -118,14 +123,7 @@ const NON_TECH_PATTERNS = NON_TECH_KEYWORDS.map((kw) => ({
 // Role family classification
 // ---------------------------------------------------------------------------
 
-const TECH_ROLE_FAMILIES = new Set([
-  'backend', 'frontend', 'fullstack', 'devops', 'data', 'qa', 'security', 'mobile',
-]);
-
-const NON_TECH_ROLE_FAMILIES = new Set([
-  'account_executive', 'customer_success', 'technical_account_manager',
-  'sales_engineer', 'business_development', 'account_manager',
-]);
+// TECH_ROLE_FAMILIES and NON_TECH_ROLE_FAMILIES imported from role-service
 
 // ---------------------------------------------------------------------------
 // Deterministic scoring (synchronous, <1ms)
@@ -180,12 +178,12 @@ export function scoreDeterministic(
 
   // Role family boost: boost the correct side based on family type
   const roleFamilySignal = requirements.roleFamily
-    ?? (jobContext.title ? detectRoleFamilyFromTitle(jobContext.title) : null);
+    ?? (jobContext.title ? resolveRoleDeterministic(jobContext.title).family : null);
 
   if (roleFamilySignal) {
-    if (TECH_ROLE_FAMILIES.has(roleFamilySignal)) {
+    if (TECH_ROLE_FAMILIES.has(roleFamilySignal as RoleFamily)) {
       techRaw += 2.0;
-    } else if (NON_TECH_ROLE_FAMILIES.has(roleFamilySignal)) {
+    } else if (NON_TECH_ROLE_FAMILIES.has(roleFamilySignal as RoleFamily)) {
       nonTechRaw += 2.0;
     }
   }
