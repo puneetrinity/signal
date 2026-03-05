@@ -489,15 +489,26 @@ export async function runSourcingOrchestrator(
         discoveryTelemetry = discovery.telemetry;
         usedQueries = queriesExecuted;
 
-        // Build strict-phase query index lookup from discovery telemetry
+        // Build strict/fallback phase query index lookup from discovery telemetry
         const strictQueryIndices = new Set(
           discovery.telemetry.queryRuns
             .filter(qr => qr.phase === 'strict')
             .map(qr => qr.queryIndex)
         );
+        const fallbackQueryIndices = new Set(
+          discovery.telemetry.queryRuns
+            .filter(qr => qr.phase === 'fallback')
+            .map(qr => qr.queryIndex)
+        );
         const discoveredCandidateByIdMap = new Map<string, DiscoveredCandidate>(
           discovery.candidates.map(dc => [dc.candidateId, dc])
         );
+        const fallbackProvisionalMinFitScore = Math.min(config.discoveredPromotionMinFitScore, 0.35);
+        const fallbackProvisionalCap = Math.max(
+          config.minDiscoveredInOutput,
+          Math.ceil(config.targetCount * 0.2),
+        );
+        let fallbackProvisionalPromotedCount = 0;
 
         if (discoveredCandidateIds.length > 0) {
           const discoveredRows = await prisma.candidate.findMany({
@@ -572,19 +583,29 @@ export async function runSourcingOrchestrator(
             const passesLocationGate = !hasLocationConstraint || sc.locationMatchType !== 'none';
             const passesFitGate = sc.fitScore >= config.discoveredPromotionMinFitScore;
 
-            // Provisional promotion for strict-phase non-tech/blended discoveries with exact role match.
-            // These candidates come from location-targeted queries and have the right role family,
-            // but fail standard gates because pre-enrichment scores are structurally low.
+            // Provisional promotion for non-tech/blended discoveries with exact role match.
+            // - strict phase: preserve prior behavior (location intent embedded in query)
+            // - fallback phase: allow in discovery_first mode when fit clears a safety floor,
+            //   so strong role matches are not blocked only due to missing location hints.
             let provisionalPromotion = false;
             if (trackDecision?.track !== 'tech' && requirements.roleFamily) {
               const dc = discoveredCandidateByIdMap.get(sc.candidateId);
-              const isFromStrictPhase = dc && strictQueryIndices.has(dc.queryIndex);
-              if (isFromStrictPhase) {
-                const candidateRoleFamily = detectRoleFamilyFromTitle(
-                  discoveredById.get(sc.candidateId)?.headlineHint ?? ''
-                );
-                if (candidateRoleFamily === requirements.roleFamily) {
+              const isFromStrictPhase = !!dc && strictQueryIndices.has(dc.queryIndex);
+              const isFromFallbackPhase = !!dc && fallbackQueryIndices.has(dc.queryIndex);
+              const candidateRoleFamily = detectRoleFamilyFromTitle(
+                discoveredById.get(sc.candidateId)?.headlineHint ?? ''
+              );
+              if (candidateRoleFamily === requirements.roleFamily) {
+                if (isFromStrictPhase) {
                   provisionalPromotion = true;
+                } else if (
+                  effectiveStrategy === 'discovery_first' &&
+                  isFromFallbackPhase &&
+                  sc.fitScore >= fallbackProvisionalMinFitScore &&
+                  fallbackProvisionalPromotedCount < fallbackProvisionalCap
+                ) {
+                  provisionalPromotion = true;
+                  fallbackProvisionalPromotedCount++;
                 }
               }
             }

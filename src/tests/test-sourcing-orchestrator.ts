@@ -1864,8 +1864,15 @@ console.log('\n--- New Config Fields ---');
     location: 'Bangalore, India',
   });
   const hasLocationConstraint = true;
+  const effectiveStrategy: 'pool_first' | 'discovery_first' = 'discovery_first';
+  const fallbackProvisionalMinFitScore = Math.min(config.discoveredPromotionMinFitScore, 0.35);
+  const fallbackProvisionalCap = Math.max(
+    config.minDiscoveredInOutput,
+    Math.ceil(config.targetCount * 0.2),
+  );
 
   const strictQueryIndices = new Set([0]);
+  const fallbackQueryIndices = new Set([1]);
   const discoveredCandidateByIdMap = new Map<string, MockDiscovered>([
     ['strict-tam', { candidateId: 'strict-tam', queryIndex: 0 }],
     ['fallback-tam', { candidateId: 'fallback-tam', queryIndex: 1 }],
@@ -1923,6 +1930,7 @@ console.log('\n--- New Config Fields ---');
   ];
 
   const promotedNonTech = new Set<string>();
+  let fallbackProvisionalPromotedCount = 0;
   for (const sc of scoredDiscovered) {
     const passesLocationGate = !hasLocationConstraint || sc.locationMatchType !== 'none';
     const passesFitGate = sc.fitScore >= config.discoveredPromotionMinFitScore;
@@ -1931,12 +1939,21 @@ console.log('\n--- New Config Fields ---');
     if (requirements.roleFamily) {
       const dc = discoveredCandidateByIdMap.get(sc.candidateId);
       const isFromStrictPhase = !!dc && strictQueryIndices.has(dc.queryIndex);
-      if (isFromStrictPhase) {
-        const candidateRoleFamily = detectRoleFamilyFromTitle(
-          discoveredById.get(sc.candidateId)?.headlineHint ?? '',
-        );
-        if (candidateRoleFamily === requirements.roleFamily) {
+      const isFromFallbackPhase = !!dc && fallbackQueryIndices.has(dc.queryIndex);
+      const candidateRoleFamily = detectRoleFamilyFromTitle(
+        discoveredById.get(sc.candidateId)?.headlineHint ?? '',
+      );
+      if (candidateRoleFamily === requirements.roleFamily) {
+        if (isFromStrictPhase) {
           provisionalPromotion = true;
+        } else if (
+          effectiveStrategy === 'discovery_first' &&
+          isFromFallbackPhase &&
+          sc.fitScore >= fallbackProvisionalMinFitScore &&
+          fallbackProvisionalPromotedCount < fallbackProvisionalCap
+        ) {
+          provisionalPromotion = true;
+          fallbackProvisionalPromotedCount++;
         }
       }
     }
@@ -1947,8 +1964,36 @@ console.log('\n--- New Config Fields ---');
   }
 
   assert(promotedNonTech.has('strict-tam'), 'P3: Strict-phase non-tech exact role match is provisionally promoted');
-  assert(!promotedNonTech.has('fallback-tam'), 'P3: Fallback-phase non-tech candidate still uses standard gates');
+  assert(
+    promotedNonTech.has('fallback-tam'),
+    'P3: Fallback-phase non-tech exact-role candidate is provisionally promoted in discovery_first mode',
+  );
   assert(!promotedNonTech.has('strict-tech'), 'P3: Strict-phase tech-role candidate is not provisionally promoted');
+
+  // Same fallback candidate should not be provisionally promoted in pool_first mode.
+  const promotedPoolFirst = new Set<string>();
+  for (const sc of scoredDiscovered) {
+    const passesLocationGate = !hasLocationConstraint || sc.locationMatchType !== 'none';
+    const passesFitGate = sc.fitScore >= config.discoveredPromotionMinFitScore;
+    let provisionalPromotion = false;
+    if (requirements.roleFamily) {
+      const dc = discoveredCandidateByIdMap.get(sc.candidateId);
+      const isFromStrictPhase = !!dc && strictQueryIndices.has(dc.queryIndex);
+      const candidateRoleFamily = detectRoleFamilyFromTitle(
+        discoveredById.get(sc.candidateId)?.headlineHint ?? '',
+      );
+      if (isFromStrictPhase && candidateRoleFamily === requirements.roleFamily) {
+        provisionalPromotion = true;
+      }
+    }
+    if ((passesLocationGate && passesFitGate) || provisionalPromotion) {
+      promotedPoolFirst.add(sc.candidateId);
+    }
+  }
+  assert(
+    !promotedPoolFirst.has('fallback-tam'),
+    'P3: Fallback-phase non-tech candidate is not provisionally promoted in pool_first mode',
+  );
 
   const promotedTechTrack = new Set<string>();
   for (const sc of scoredDiscovered) {
