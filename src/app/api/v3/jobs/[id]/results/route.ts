@@ -158,6 +158,9 @@ export async function GET(
   let totalAgeDays = 0;
 
   const nonTechShadow = isNonTechShadow();
+  const diagnosticsObj = sourcingRequest.diagnostics as Record<string, unknown> | null;
+  const diag = diagnosticsObj ?? {};
+  const discoveredPromotedInTopCount = (diag.discoveredPromotedInTopCount as number) ?? 0;
 
   const candidateResults = sourcingRequest.candidates.map((sc) => {
     const techSnap = sc.candidate.intelligenceSnapshots.find((s) => s.track === 'tech') ?? null;
@@ -233,6 +236,7 @@ export async function GET(
       rawLocationMatchType === 'city_exact' ||
       rawLocationMatchType === 'city_alias' ||
       rawLocationMatchType === 'country_only' ||
+      rawLocationMatchType === 'unknown_location' ||
       rawLocationMatchType === 'none'
         ? rawLocationMatchType
         : null;
@@ -246,6 +250,7 @@ export async function GET(
           seniorityScore: fbRaw.seniorityScore ?? null,
           activityFreshnessScore: fbRaw.activityFreshnessScore ?? null,
           locationBoost: fbRaw.locationBoost ?? null,
+          unknownLocationPromotion: Boolean(fbRaw.unknownLocationPromotion),
         }
       : null;
 
@@ -255,12 +260,30 @@ export async function GET(
         ? rawDataConfidence
         : 'low';
 
+    const unknownLocationPromotion =
+      Boolean(fbRaw?.unknownLocationPromotion) ||
+      (
+        sc.sourceType === 'discovered' &&
+        locationMatchType === 'unknown_location' &&
+        sc.rank <= discoveredPromotedInTopCount
+      );
+
+    const locationLabel =
+      locationMatchType === 'city_exact' || locationMatchType === 'city_alias' || locationMatchType === 'country_only'
+        ? 'location_verified'
+        : locationMatchType === 'unknown_location'
+          ? (unknownLocationPromotion ? 'location_unverified_promoted' : 'location_unverified')
+          : locationMatchType === 'none'
+            ? 'location_mismatch'
+            : 'location_unknown';
+
     return {
       candidateId: sc.candidateId,
       fitScore: sc.fitScore,
       fitBreakdown,
       matchTier,
       locationMatchType,
+      locationLabel,
       dataConfidence,
       sourceType: sc.sourceType,
       enrichmentStatus: sc.enrichmentStatus,
@@ -301,13 +324,11 @@ export async function GET(
   };
 
   // Extract trackDecision from diagnostics (null-safe for pre-classifier requests)
-  const diagnosticsObj = sourcingRequest.diagnostics as Record<string, unknown> | null;
   const trackDecision = diagnosticsObj?.trackDecision ?? null;
 
   // Compute group counts from candidate tier data
   const strictCount = candidateResults.filter((c) => c.matchTier === 'best_matches').length;
   const expandedCount = candidateResults.filter((c) => c.matchTier === 'broader_pool').length;
-  const diag = diagnosticsObj ?? {};
   const groupCounts = {
     bestMatches: strictCount,
     broaderPool: expandedCount,
@@ -324,6 +345,7 @@ export async function GET(
     minDiscoveredInOutputApplied: (diag.minDiscoveredInOutputApplied as number) ?? 0,
     discoveredPromotedCount: (diag.discoveredPromotedCount as number) ?? 0,
     discoveredPromotedInTopCount: (diag.discoveredPromotedInTopCount as number) ?? 0,
+    unknownLocationPromotedCount: (diag.unknownLocationPromotedCount as number) ?? 0,
     discoveredOrphanCount: (diag.discoveredOrphanCount as number) ?? 0,
     discoveredOrphanQueued: (diag.discoveredOrphanQueued as number) ?? 0,
     locationMatchCounts: (diag.locationMatchCounts as Record<string, number>) ?? null,

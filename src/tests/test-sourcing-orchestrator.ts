@@ -5,10 +5,10 @@
  * Run with: npx tsx src/tests/test-sourcing-orchestrator.ts
  */
 
-import { rankCandidates, isNoisyLocationHint, type CandidateForRanking, type ScoredCandidate } from '@/lib/sourcing/ranking';
+import { rankCandidates, isNoisyLocationHint, STRONG_LOCATION_TYPES, type CandidateForRanking, type ScoredCandidate } from '@/lib/sourcing/ranking';
 import { parseJdDigest, buildJobRequirements, type JobRequirements } from '@/lib/sourcing/jd-digest';
 import { getSourcingConfig } from '@/lib/sourcing/config';
-import { extractLocationFromSnippet } from '@/lib/enrichment/hint-extraction';
+import { extractLocationFromSnippet, extractLocationFromSerpResult } from '@/lib/enrichment/hint-extraction';
 import { isLikelyLocationHint } from '@/lib/sourcing/hint-sanitizer';
 import { jobTrackToDbFilter } from '@/lib/sourcing/types';
 import { detectRoleFamilyFromTitle } from '@/lib/taxonomy/role-family';
@@ -1100,10 +1100,11 @@ console.log('\n--- locationMatchCounts Consistency ---');
     city_exact: scored.filter(sc => sc.locationMatchType === 'city_exact').length,
     city_alias: scored.filter(sc => sc.locationMatchType === 'city_alias').length,
     country_only: scored.filter(sc => sc.locationMatchType === 'country_only').length,
+    unknown_location: scored.filter(sc => sc.locationMatchType === 'unknown_location').length,
     none: scored.filter(sc => sc.locationMatchType === 'none').length,
   };
 
-  assert(counts.city_exact + counts.city_alias + counts.country_only + counts.none === scored.length,
+  assert(counts.city_exact + counts.city_alias + counts.country_only + counts.unknown_location + counts.none === scored.length,
     'locationMatchCounts sum equals total candidates');
   assert(counts.city_exact >= 1, 'locationMatchCounts: at least 1 city_exact');
   assert(counts.country_only >= 1, 'locationMatchCounts: at least 1 country_only');
@@ -1127,6 +1128,46 @@ console.log('\n--- Polluted Extraction Rejection ---');
 
   const r4 = extractLocationFromSnippet('Engineer based in Bangalore, India.');
   assert(r4 !== null && r4.includes('Bangalore'), 'Clean "based in Bangalore, India" → includes Bangalore');
+}
+
+// ---------------------------------------------------------------------------
+// Test: extractLocationFromSerpResult (title + snippet)
+// ---------------------------------------------------------------------------
+
+console.log('\n--- extractLocationFromSerpResult ---');
+
+{
+  // Snippet takes priority
+  const r1 = extractLocationFromSerpResult(
+    'John Doe - TAM at Google | LinkedIn',
+    'Location: Bengaluru, Karnataka, India · 500+ connections',
+  );
+  assert(r1 !== null && r1.includes('Bengaluru'), 'SERP result: snippet location takes priority');
+
+  // Title fallback when snippet has no location
+  const r2 = extractLocationFromSerpResult(
+    'Jane Smith - Technical Account Manager - Bangalore, India | LinkedIn',
+    'Technical Account Manager at Google with 5 years experience.',
+  );
+  assert(r2 !== null && r2.includes('Bangalore'), 'SERP result: title fallback extracts Bangalore');
+
+  // No location in either
+  const r3 = extractLocationFromSerpResult(
+    'Bob Jones - Senior Engineer | LinkedIn',
+    'Experienced software engineer with a passion for building scalable systems.',
+  );
+  assert(r3 === null, 'SERP result: no location in title or snippet → null');
+
+  // Empty inputs
+  const r4 = extractLocationFromSerpResult('', '');
+  assert(r4 === null, 'SERP result: empty inputs → null');
+
+  // Title-only (headline segment, not location)
+  const r5 = extractLocationFromSerpResult(
+    'Alice Brown - Product Manager at Meta | LinkedIn',
+    '',
+  );
+  assert(r5 === null, 'SERP result: headline in title is not location → null');
 }
 
 // ---------------------------------------------------------------------------
@@ -1905,10 +1946,10 @@ console.log('\n--- New Config Fields ---');
         roleScore: 1,
         seniorityScore: 0,
         activityFreshnessScore: 0.7,
-        locationBoost: 0.1,
+        locationBoost: 0.3,
       },
       matchTier: 'expanded_location',
-      locationMatchType: 'none',
+      locationMatchType: 'unknown_location',
     },
     {
       candidateId: 'fallback-tam',
@@ -1919,10 +1960,10 @@ console.log('\n--- New Config Fields ---');
         roleScore: 1,
         seniorityScore: 0,
         activityFreshnessScore: 0.7,
-        locationBoost: 0.1,
+        locationBoost: 0.3,
       },
       matchTier: 'expanded_location',
-      locationMatchType: 'none',
+      locationMatchType: 'unknown_location',
     },
     {
       candidateId: 'strict-tech',
@@ -1933,17 +1974,17 @@ console.log('\n--- New Config Fields ---');
         roleScore: 0.1,
         seniorityScore: 1,
         activityFreshnessScore: 0.7,
-        locationBoost: 0.1,
+        locationBoost: 0.3,
       },
       matchTier: 'expanded_location',
-      locationMatchType: 'none',
+      locationMatchType: 'unknown_location',
     },
   ];
 
   const promotedNonTech = new Set<string>();
   let fallbackProvisionalPromotedCount = 0;
   for (const sc of scoredDiscovered) {
-    const passesLocationGate = !hasLocationConstraint || sc.locationMatchType !== 'none';
+    const passesLocationGate = !hasLocationConstraint || STRONG_LOCATION_TYPES.has(sc.locationMatchType);
     const passesFitGate = sc.fitScore >= config.discoveredPromotionMinFitScore;
 
     let provisionalPromotion = false;
@@ -1984,7 +2025,7 @@ console.log('\n--- New Config Fields ---');
   // Same fallback candidate should not be provisionally promoted in pool_first mode.
   const promotedPoolFirst = new Set<string>();
   for (const sc of scoredDiscovered) {
-    const passesLocationGate = !hasLocationConstraint || sc.locationMatchType !== 'none';
+    const passesLocationGate = !hasLocationConstraint || STRONG_LOCATION_TYPES.has(sc.locationMatchType);
     const passesFitGate = sc.fitScore >= config.discoveredPromotionMinFitScore;
     let provisionalPromotion = false;
     if (requirements.roleFamily) {
@@ -2008,7 +2049,7 @@ console.log('\n--- New Config Fields ---');
 
   const promotedTechTrack = new Set<string>();
   for (const sc of scoredDiscovered) {
-    const passesLocationGate = !hasLocationConstraint || sc.locationMatchType !== 'none';
+    const passesLocationGate = !hasLocationConstraint || STRONG_LOCATION_TYPES.has(sc.locationMatchType);
     const passesFitGate = sc.fitScore >= config.discoveredPromotionMinFitScore;
     const provisionalPromotion = false; // Track = tech: bypass disabled
     if ((passesLocationGate && passesFitGate) || provisionalPromotion) {

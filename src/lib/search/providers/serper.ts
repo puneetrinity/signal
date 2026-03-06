@@ -15,7 +15,7 @@ import type {
   SearchProviderType,
 } from './types';
 import { getProviderLimiter } from './limit';
-import { extractLocationFromSnippet } from '@/lib/enrichment/hint-extraction';
+import { extractLocationFromSerpResult } from '@/lib/enrichment/hint-extraction';
 
 interface SerperOrganicResult {
   title?: string;
@@ -243,7 +243,7 @@ function extractProfileSummary(result: SerperOrganicResult, providerMeta?: Recor
     .replace(' | LinkedIn', '')
     .trim();
   const headline = headlineCandidate || undefined;
-  const location = extractLocationFromSnippet(snippet) ?? undefined;
+  const location = extractLocationFromSerpResult(title, snippet) ?? undefined;
   const perResultSerperMeta: Record<string, unknown> = {
     ...(result.date ? { resultDate: result.date } : {}),
     ...(linkedinHost ? { linkedinHost } : {}),

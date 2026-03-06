@@ -36,7 +36,10 @@ export interface CandidateForRanking {
   } | null;
 }
 
-export type LocationMatchType = 'city_exact' | 'city_alias' | 'country_only' | 'none';
+export type LocationMatchType = 'city_exact' | 'city_alias' | 'country_only' | 'unknown_location' | 'none';
+
+/** Location match types that represent a confirmed geographic signal. */
+export const STRONG_LOCATION_TYPES = new Set<LocationMatchType>(['city_exact', 'city_alias', 'country_only']);
 export type MatchTier = 'strict_location' | 'expanded_location';
 
 export interface FitBreakdown {
@@ -46,6 +49,7 @@ export interface FitBreakdown {
   seniorityScore: number;
   activityFreshnessScore: number;
   locationBoost: number;
+  unknownLocationPromotion?: boolean;
 }
 
 export interface ScoredCandidate {
@@ -260,7 +264,7 @@ function classifyLocationMatch(
   const loc = candidate.snapshot?.location ?? candidate.locationHint;
 
   if (!isMeaningfulLocation(loc) || isNoisyLocationHint(loc ?? '')) {
-    return { matchTier: 'expanded_location', locationMatchType: 'none' };
+    return { matchTier: 'expanded_location', locationMatchType: 'unknown_location' };
   }
 
   const candidateLocation = loc!;
@@ -371,6 +375,7 @@ function computeLocationBoost(
     case 'city_exact': return 1.0;
     case 'city_alias': return 0.85;
     case 'country_only': return 0.5;
+    case 'unknown_location': return 0.3;
     case 'none': return 0.1;
   }
 }

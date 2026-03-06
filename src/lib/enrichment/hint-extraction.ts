@@ -274,6 +274,26 @@ export function extractLocationFromSnippet(snippet: string): string | null {
 }
 
 /**
+ * Extract location from SERP title + snippet combined.
+ *
+ * Tries snippet first (richer data), then falls back to parsing
+ * LinkedIn title segments (e.g. "Name - TAM - Bangalore, India | LinkedIn").
+ */
+export function extractLocationFromSerpResult(title: string, snippet: string): string | null {
+  const fromSnippet = extractLocationFromSnippet(snippet);
+  if (fromSnippet) return fromSnippet;
+
+  if (!title) return null;
+  const cleaned = title.replace(/\s*[|·-]\s*LinkedIn\s*$/i, '').trim();
+  const segments = cleaned.split(/\s+-\s+/);
+  for (let i = segments.length - 1; i >= 1; i--) {
+    const seg = segments[i].trim();
+    if (seg.length <= 50 && isLikelyLocation(seg)) return seg;
+  }
+  return null;
+}
+
+/**
  * Extract all hints from LinkedIn SERP data
  */
 export function extractAllHints(

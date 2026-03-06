@@ -8,7 +8,7 @@ import { rankCandidates } from './ranking';
 import { discoverCandidates, type DiscoveredCandidate, type DiscoveryTelemetry } from './discovery';
 import { getSourcingConfig } from './config';
 import { createEnrichmentSession } from '@/lib/enrichment/queue';
-import { isMeaningfulLocation, isNoisyLocationHint, canonicalizeLocation, extractPrimaryCity, compareFitWithConfidence } from './ranking';
+import { isMeaningfulLocation, isNoisyLocationHint, canonicalizeLocation, extractPrimaryCity, compareFitWithConfidence, STRONG_LOCATION_TYPES } from './ranking';
 import { getRecentlyExposedCandidateIds } from './novelty';
 import type { CandidateForRanking, FitBreakdown, MatchTier, LocationMatchType, ScoredCandidate } from './ranking';
 import type { TrackDecision } from './types';
@@ -70,7 +70,7 @@ export interface OrchestratorResult {
   strictRescuedCount: number;
   strictRescueApplied: boolean;
   strictRescueMinFitScoreUsed: number | null;
-  locationMatchCounts: { city_exact: number; city_alias: number; country_only: number; none: number };
+  locationMatchCounts: { city_exact: number; city_alias: number; country_only: number; unknown_location: number; none: number };
   demotedStrictWithCityMatch: number;
   strictBeforeDemotion: number;
   countryGuardFilteredCount: number;
@@ -90,6 +90,7 @@ export interface OrchestratorResult {
   minDiscoveredInOutputApplied: number;
   discoveredPromotedCount: number;
   discoveredPromotedInTopCount: number;
+  unknownLocationPromotedCount: number;
   roleResolutionMetrics: RoleResolutionMetrics | null;
   locationResolutionMetrics: LocationResolutionMetrics | null;
 }
@@ -532,6 +533,8 @@ export async function runSourcingOrchestrator(
   let discoveredReservedInOutput = 0;
   let discoveredPromotedCount = 0;
   let discoveredPromotedInTopCount = 0;
+  let unknownLocationPromotedCount = 0;
+  const unknownLocationPromotedIds = new Set<string>();
   const promotedDiscoveredById = new Map<string, ScoredCandidate>();
   const scoredDiscoveredById = new Map<string, ScoredCandidate>();
   const discoveredRowsById = new Map<string, {
@@ -780,7 +783,6 @@ export async function runSourcingOrchestrator(
           for (const sc of scoredDiscovered) {
             scoredDiscoveredById.set(sc.candidateId, sc);
 
-            const passesLocationGate = !hasLocationConstraint || sc.locationMatchType !== 'none';
             const passesFitGate = sc.fitScore >= config.discoveredPromotionMinFitScore;
 
             // Provisional promotion for non-tech/blended discoveries with exact role match.
@@ -817,7 +819,32 @@ export async function runSourcingOrchestrator(
               }
             }
 
-            if ((passesLocationGate && passesFitGate) || provisionalPromotion) {
+            const roleGate = trackDecision?.track === 'tech'
+              ? sc.fitBreakdown.roleScore >= 0.7
+              : sc.fitBreakdown.roleScore >= 0.6;
+            const isUnknownLocation = sc.locationMatchType === 'unknown_location';
+            const maxUnknownPromoted = Math.ceil(config.targetCount * 0.2);
+            const allowUnknownLocationPromotion =
+              hasLocationConstraint &&
+              effectiveStrategy === 'discovery_first' &&
+              isUnknownLocation &&
+              roleGate &&
+              sc.fitScore >= fallbackProvisionalMinFitScore &&
+              unknownLocationPromotedCount < maxUnknownPromoted;
+
+            const passesLocationGate = !hasLocationConstraint || STRONG_LOCATION_TYPES.has(sc.locationMatchType);
+
+            const promotedByStandardGates = passesLocationGate && passesFitGate;
+            const promotedByUnknownLane =
+              allowUnknownLocationPromotion &&
+              !provisionalPromotion &&
+              !promotedByStandardGates;
+
+            if (promotedByStandardGates || provisionalPromotion || allowUnknownLocationPromotion) {
+              if (promotedByUnknownLane) {
+                unknownLocationPromotedCount++;
+                unknownLocationPromotedIds.add(sc.candidateId);
+              }
               promotedDiscoveredById.set(sc.candidateId, sc);
             }
           }
@@ -972,7 +999,9 @@ export async function runSourcingOrchestrator(
       pushCandidate({
         candidateId,
         fitScore: promoted.fitScore,
-        fitBreakdown: promoted.fitBreakdown,
+        fitBreakdown: unknownLocationPromotedIds.has(candidateId)
+          ? { ...promoted.fitBreakdown, unknownLocationPromotion: true }
+          : promoted.fitBreakdown,
         matchTier: promoted.matchTier,
         locationMatchType: promoted.locationMatchType,
         sourceType: 'discovered',
@@ -986,7 +1015,7 @@ export async function runSourcingOrchestrator(
       fitScore: scored?.fitScore ?? null,
       fitBreakdown: scored?.fitBreakdown ?? null,
       matchTier: scored?.matchTier ?? 'expanded_location',
-      locationMatchType: scored?.locationMatchType ?? 'none',
+      locationMatchType: scored?.locationMatchType ?? 'unknown_location',
       sourceType: 'discovered',
       enrichmentStatus,
     });
@@ -1354,6 +1383,7 @@ export async function runSourcingOrchestrator(
     city_exact: scoredPool.filter(sc => sc.locationMatchType === 'city_exact').length,
     city_alias: scoredPool.filter(sc => sc.locationMatchType === 'city_alias').length,
     country_only: scoredPool.filter(sc => sc.locationMatchType === 'country_only').length,
+    unknown_location: scoredPool.filter(sc => sc.locationMatchType === 'unknown_location').length,
     none: scoredPool.filter(sc => sc.locationMatchType === 'none').length,
   };
 
@@ -1408,6 +1438,7 @@ export async function runSourcingOrchestrator(
     minDiscoveredInOutputApplied: discoveredReservedInOutput,
     discoveredPromotedCount,
     discoveredPromotedInTopCount,
+    unknownLocationPromotedCount,
     roleResolutionMetrics,
     locationResolutionMetrics,
   };
