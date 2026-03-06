@@ -38,7 +38,7 @@ const FALLBACK_KINDS = ['other_tech', 'other_non_tech', 'unknown'] as const;
 const RoleClassificationSchema = z.object({
   family: z.enum([...ROLE_FAMILIES_LIST, ...FALLBACK_KINDS]),
   confidence: z.number().min(0).max(1),
-  reasons: z.array(z.string()).transform(arr => arr.slice(0, 3)),
+  reasons: z.array(z.string()).catch([]).transform(arr => arr.slice(0, 3)),
 });
 
 export interface GroqRoleResult {
