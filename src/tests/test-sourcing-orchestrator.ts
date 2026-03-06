@@ -22,6 +22,7 @@ import {
   type RoleFamily,
   type RoleResolution,
 } from '@/lib/taxonomy/role-service';
+import { resolveLocationDeterministic, type LocationResolution } from '@/lib/taxonomy/location-service';
 import { scoreDeterministic } from '@/lib/sourcing/track-resolver';
 import type { SourcingJobContextInput } from '@/lib/sourcing/jd-digest';
 
@@ -2579,6 +2580,60 @@ console.log('\n--- Track Classifier: Role Family Boost ---');
   assert(
     highConfScored[0].fitBreakdown.roleScore === 1.0,
     `High confidence (0.9) exact match gets 1.0: ${highConfScored[0].fitBreakdown.roleScore}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Location Service: deterministic + preResolvedLocations
+// ---------------------------------------------------------------------------
+{
+  console.log('\n--- Location Service: deterministic + preResolvedLocations ---');
+
+  const resolved = resolveLocationDeterministic('Bengaluru, India');
+  assert(resolved.city === 'bangalore', 'Location deterministic: Bengaluru canonicalizes to bangalore');
+  assert(resolved.countryCode === 'IN', 'Location deterministic: Bengaluru, India → IN');
+
+  const req = makeRequirements({
+    roleFamily: 'backend',
+    location: 'Bangalore, India',
+  });
+  const candidate: CandidateForRanking = {
+    id: 'loc-1',
+    headlineHint: 'Senior Backend Engineer',
+    locationHint: 'BLR',
+    searchTitle: 'Senior Backend Engineer',
+    searchSnippet: '',
+    enrichmentStatus: 'pending',
+    lastEnrichedAt: null,
+    snapshot: null,
+  };
+
+  const withoutPreResolved = rankCandidates([candidate], req, { track: 'tech' });
+  assert(
+    withoutPreResolved[0].locationMatchType === 'none',
+    'Location preResolved: BLR without pre-resolve remains none',
+  );
+
+  const preResolved = new Map<string, LocationResolution>();
+  preResolved.set('loc-1', {
+    normalizedInput: 'BLR',
+    normalized: 'bangalore, india',
+    rawNormalized: 'blr',
+    city: 'bangalore',
+    rawCity: 'blr',
+    countryCode: 'IN',
+    confidence: 0.9,
+    source: 'groq',
+    fallbackKind: null,
+  });
+
+  const withPreResolved = rankCandidates([candidate], req, {
+    track: 'tech',
+    preResolvedLocations: preResolved,
+  });
+  assert(
+    withPreResolved[0].locationMatchType === 'city_alias',
+    'Location preResolved: BLR with high-confidence resolution becomes city_alias',
   );
 }
 

@@ -59,6 +59,15 @@ export interface SourcingConfig {
   roleCbThreshold: number;
   roleCbWindowSec: number;
   roleCbCooldownSec: number;
+  // Location canonicalization (Groq LLM fallback)
+  locationGroqEnabled: boolean;
+  locationGroqShadowMode: boolean;
+  locationGroqTimeoutMs: number;
+  locationGroqMaxRetries: number;
+  locationGroqCacheTtlDays: number;
+  locationCbThreshold: number;
+  locationCbWindowSec: number;
+  locationCbCooldownSec: number;
   // Post-enrichment rerank
   rerankAfterEnrichment: boolean;
   rerankDelayMs: number;
@@ -160,6 +169,15 @@ export function getSourcingConfig(): SourcingConfig {
     roleCbThreshold: parseIntSafe(process.env.ROLE_CB_THRESHOLD, 5),
     roleCbWindowSec: parseIntSafe(process.env.ROLE_CB_WINDOW_SEC, 300),
     roleCbCooldownSec: parseIntSafe(process.env.ROLE_CB_COOLDOWN_SEC, 60),
+    // Location canonicalization (Groq LLM fallback)
+    locationGroqEnabled: process.env.LOCATION_GROQ_ENABLED === 'true',
+    locationGroqShadowMode: process.env.LOCATION_GROQ_SHADOW_MODE !== 'false',
+    locationGroqTimeoutMs: parseIntSafe(process.env.LOCATION_GROQ_TIMEOUT_MS, 1500),
+    locationGroqMaxRetries: parseIntSafe(process.env.LOCATION_GROQ_MAX_RETRIES, 1),
+    locationGroqCacheTtlDays: parseIntSafe(process.env.LOCATION_GROQ_CACHE_TTL_DAYS, 30),
+    locationCbThreshold: parseIntSafe(process.env.LOCATION_CB_THRESHOLD, 5),
+    locationCbWindowSec: parseIntSafe(process.env.LOCATION_CB_WINDOW_SEC, 300),
+    locationCbCooldownSec: parseIntSafe(process.env.LOCATION_CB_COOLDOWN_SEC, 60),
     // Post-enrichment rerank
     rerankAfterEnrichment: process.env.SOURCE_RERANK_AFTER_ENRICHMENT !== 'false',
     rerankDelayMs: clamp(parseIntSafe(process.env.SOURCE_RERANK_DELAY_MS, 90_000), 10_000, 300_000),

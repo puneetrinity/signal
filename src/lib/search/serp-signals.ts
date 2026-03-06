@@ -1,3 +1,5 @@
+import { deriveCountryCodeFromLocationText as deriveCountryCodeFromLocationService } from '@/lib/taxonomy/location-service';
+
 interface SerperMeta {
   resultDate?: unknown;
   linkedinHost?: unknown;
@@ -34,48 +36,12 @@ const LINKEDIN_LOCALE_TO_COUNTRY_CODE: Record<string, string> = {
   us: 'US',
 };
 
-const COUNTRY_CODE_ALIASES: Record<string, string[]> = {
-  AE: ['uae', 'united arab emirates', 'dubai', 'abu dhabi'],
-  AU: ['australia', 'sydney', 'melbourne', 'brisbane', 'perth', 'adelaide'],
-  BR: ['brazil', 'sao paulo', 'rio de janeiro'],
-  CA: ['canada', 'toronto', 'vancouver', 'montreal', 'ottawa', 'calgary', 'edmonton'],
-  DE: ['germany', 'deutschland', 'berlin', 'munich', 'frankfurt', 'hamburg'],
-  ES: ['spain', 'madrid', 'barcelona'],
-  FR: ['france', 'paris', 'lyon', 'marseille'],
-  GB: ['uk', 'u k', 'united kingdom', 'england', 'scotland', 'wales', 'great britain', 'london', 'manchester', 'birmingham', 'edinburgh', 'glasgow', 'leeds', 'bristol'],
-  ID: ['indonesia', 'jakarta'],
-  IE: ['ireland', 'dublin'],
-  IN: ['india', 'bangalore', 'bengaluru', 'mumbai', 'bombay', 'delhi', 'new delhi', 'hyderabad', 'chennai', 'pune', 'kolkata', 'noida', 'gurgaon', 'gurugram', 'ahmedabad', 'jaipur', 'lucknow', 'chandigarh', 'kochi', 'indore', 'coimbatore', 'thiruvananthapuram', 'nagpur', 'visakhapatnam'],
-  IT: ['italy', 'rome', 'milan'],
-  JP: ['japan', 'tokyo', 'osaka'],
-  MX: ['mexico', 'mexico city', 'guadalajara', 'monterrey'],
-  NL: ['netherlands', 'holland', 'amsterdam', 'rotterdam', 'the hague'],
-  SG: ['singapore'],
-  US: ['us', 'u s', 'usa', 'u s a', 'united states', 'united states of america', 'america',
-    'san francisco', 'new york', 'los angeles', 'seattle', 'austin', 'boston', 'chicago',
-    'denver', 'atlanta', 'miami', 'portland', 'houston', 'dallas', 'phoenix', 'philadelphia',
-    'san diego', 'san jose', 'washington dc', 'raleigh', 'minneapolis', 'detroit',
-    'salt lake city', 'charlotte', 'nashville', 'pittsburgh', 'columbus', 'indianapolis',
-    'san francisco bay area', 'bay area', 'silicon valley',
-    'new york city', 'new york city metropolitan area', 'nyc metropolitan area'],
-};
-
 function safeRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' ? value as Record<string, unknown> : null;
 }
 
 function safeString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
-}
-
-function normalizeToken(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[()]/g, ' ')
-    .replace(/[.]/g, ' ')
-    .replace(/[^a-z\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
 }
 
 function parseDate(value: string): Date | null {
@@ -114,24 +80,7 @@ export function localeToCountryCode(locale: string | null | undefined): string |
 export function deriveCountryCodeFromLocationText(
   location: string | null | undefined,
 ): string | null {
-  if (!location) return null;
-  const normalized = normalizeToken(location);
-  if (!normalized) return null;
-
-  const segments = normalized.split(',').map((segment) => segment.trim()).filter(Boolean);
-  const candidates = [
-    segments[segments.length - 1],
-    segments.length > 1 ? segments.slice(-2).join(' ') : null,
-    normalized,
-  ].filter((value): value is string => Boolean(value));
-
-  for (const candidate of candidates) {
-    for (const [countryCode, aliases] of Object.entries(COUNTRY_CODE_ALIASES)) {
-      if (aliases.includes(candidate)) return countryCode;
-    }
-  }
-
-  return null;
+  return deriveCountryCodeFromLocationService(location);
 }
 
 export function assessLocationCountryConsistency(
@@ -208,4 +157,3 @@ export function extractSerpSignals(
     localeCountryCode,
   };
 }
-

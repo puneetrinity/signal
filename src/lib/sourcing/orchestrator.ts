@@ -21,9 +21,15 @@ import {
   type RoleBatchEntry,
 } from '@/lib/taxonomy/role-service';
 import {
+  resolveLocationsBatch,
+  deriveCountryCodeFromLocationText,
+  type LocationResolution,
+  type LocationResolutionMetrics,
+  type LocationBatchEntry,
+} from '@/lib/taxonomy/location-service';
+import {
   assessLocationCountryConsistency,
   computeSerpEvidence,
-  deriveCountryCodeFromLocationText,
   extractSerpSignals,
 } from '@/lib/search/serp-signals';
 
@@ -85,6 +91,7 @@ export interface OrchestratorResult {
   discoveredPromotedCount: number;
   discoveredPromotedInTopCount: number;
   roleResolutionMetrics: RoleResolutionMetrics | null;
+  locationResolutionMetrics: LocationResolutionMetrics | null;
 }
 
 interface AssembledCandidate {
@@ -317,6 +324,46 @@ export async function runSourcingOrchestrator(
     }
   };
   let poolPreResolvedRoles: Map<string, RoleResolution> | undefined;
+  let locationResolutionMetrics: LocationResolutionMetrics | null = null;
+  const locationResolutionAggregate = {
+    total: 0,
+    deterministicResolved: 0,
+    cacheResolved: 0,
+  };
+  const mergeLocationResolutionMetrics = (batch: LocationResolutionMetrics): void => {
+    const batchTotal = batch.confidenceDistribution.high +
+      batch.confidenceDistribution.medium +
+      batch.confidenceDistribution.low;
+    locationResolutionAggregate.total += batchTotal;
+    locationResolutionAggregate.deterministicResolved += batch.deterministicHitRate * batchTotal;
+    locationResolutionAggregate.cacheResolved += batch.cacheHitRate * batchTotal;
+
+    if (locationResolutionMetrics) {
+      locationResolutionMetrics.llmCallCount += batch.llmCallCount;
+      locationResolutionMetrics.unknownCount += batch.unknownCount;
+      locationResolutionMetrics.confidenceDistribution.high += batch.confidenceDistribution.high;
+      locationResolutionMetrics.confidenceDistribution.medium += batch.confidenceDistribution.medium;
+      locationResolutionMetrics.confidenceDistribution.low += batch.confidenceDistribution.low;
+    } else {
+      locationResolutionMetrics = {
+        deterministicHitRate: 0,
+        cacheHitRate: 0,
+        llmCallCount: batch.llmCallCount,
+        unknownCount: batch.unknownCount,
+        confidenceDistribution: { ...batch.confidenceDistribution },
+      };
+    }
+
+    if (locationResolutionMetrics && locationResolutionAggregate.total > 0) {
+      locationResolutionMetrics.deterministicHitRate = Number(
+        (locationResolutionAggregate.deterministicResolved / locationResolutionAggregate.total).toFixed(4),
+      );
+      locationResolutionMetrics.cacheHitRate = Number(
+        (locationResolutionAggregate.cacheResolved / locationResolutionAggregate.total).toFixed(4),
+      );
+    }
+  };
+  let poolPreResolvedLocations: Map<string, LocationResolution> | undefined;
   if (config.roleGroqEnabled) {
     const poolEntries: RoleBatchEntry[] = poolForRanking.map((c) => ({
       title: c.headlineHint ?? c.searchTitle ?? '',
@@ -336,7 +383,31 @@ export async function runSourcingOrchestrator(
     );
   }
 
-  const scoredPoolRaw = rankCandidates(poolForRanking, requirements, { fitScoreEpsilon: config.fitScoreEpsilon, locationBoostWeight: config.locationBoostWeight, track: trackDecision?.track, preResolvedRoles: poolPreResolvedRoles });
+  if (config.locationGroqEnabled) {
+    const poolLocationEntries: LocationBatchEntry[] = poolForRanking.map((c) => ({
+      key: c.id,
+      location: c.snapshot?.location ?? c.locationHint,
+      context: [c.headlineHint, c.searchTitle, c.searchSnippet, requirements.location].filter(Boolean).join(' '),
+    }));
+    const batchResult = await resolveLocationsBatch(poolLocationEntries);
+    mergeLocationResolutionMetrics(batchResult.metrics);
+
+    if (!config.locationGroqShadowMode) {
+      poolPreResolvedLocations = batchResult.resolutions;
+    }
+    log.info(
+      { requestId, mode: config.locationGroqShadowMode ? 'shadow' : 'active', ...batchResult.metrics },
+      'Location batch resolution complete (pool)',
+    );
+  }
+
+  const scoredPoolRaw = rankCandidates(poolForRanking, requirements, {
+    fitScoreEpsilon: config.fitScoreEpsilon,
+    locationBoostWeight: config.locationBoostWeight,
+    track: trackDecision?.track,
+    preResolvedRoles: poolPreResolvedRoles,
+    preResolvedLocations: poolPreResolvedLocations,
+  });
   const countryGuardFilteredCandidateIds = new Set<string>();
   let countryGuardSerpLocaleSkippedCount = 0;
   const countryGuardEscapeCounts = { no_location: 0, country_match: 0, city_only_unknown_country: 0 };
@@ -649,6 +720,7 @@ export async function runSourcingOrchestrator(
 
           // Role resolution for discovered candidates (shadow or active)
           let discoveredPreResolvedRoles: Map<string, RoleResolution> | undefined;
+          let discoveredPreResolvedLocations: Map<string, LocationResolution> | undefined;
           if (config.roleGroqEnabled) {
             const discoveredEntries: RoleBatchEntry[] = discoveredForRanking.map((c) => ({
               title: c.headlineHint ?? c.searchTitle ?? '',
@@ -665,7 +737,30 @@ export async function runSourcingOrchestrator(
             );
           }
 
-          const scoredDiscovered = rankCandidates(discoveredForRanking, requirements, { fitScoreEpsilon: config.fitScoreEpsilon, locationBoostWeight: config.locationBoostWeight, track: trackDecision?.track, preResolvedRoles: discoveredPreResolvedRoles });
+          if (config.locationGroqEnabled) {
+            const discoveredLocationEntries: LocationBatchEntry[] = discoveredForRanking.map((c) => ({
+              key: c.id,
+              location: c.snapshot?.location ?? c.locationHint,
+              context: [c.headlineHint, c.searchTitle, c.searchSnippet, requirements.location].filter(Boolean).join(' '),
+            }));
+            const discoveredLocationBatch = await resolveLocationsBatch(discoveredLocationEntries);
+            mergeLocationResolutionMetrics(discoveredLocationBatch.metrics);
+            if (!config.locationGroqShadowMode) {
+              discoveredPreResolvedLocations = discoveredLocationBatch.resolutions;
+            }
+            log.info(
+              { requestId, mode: config.locationGroqShadowMode ? 'shadow' : 'active', ...discoveredLocationBatch.metrics },
+              'Location batch resolution complete (discovered)',
+            );
+          }
+
+          const scoredDiscovered = rankCandidates(discoveredForRanking, requirements, {
+            fitScoreEpsilon: config.fitScoreEpsilon,
+            locationBoostWeight: config.locationBoostWeight,
+            track: trackDecision?.track,
+            preResolvedRoles: discoveredPreResolvedRoles,
+            preResolvedLocations: discoveredPreResolvedLocations,
+          });
           for (const sc of scoredDiscovered) {
             scoredDiscoveredById.set(sc.candidateId, sc);
 
@@ -1297,6 +1392,7 @@ export async function runSourcingOrchestrator(
     discoveredPromotedCount,
     discoveredPromotedInTopCount,
     roleResolutionMetrics,
+    locationResolutionMetrics,
   };
 
   log.info({ requestId, resolvedTrack: trackDecision?.track ?? null, ...result }, 'Orchestrator complete');

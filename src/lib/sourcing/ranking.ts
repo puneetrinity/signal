@@ -7,8 +7,15 @@ import {
   resolveRoleDeterministic,
   adjacencyMap,
   type RoleResolution,
-  type RoleFamily,
 } from '@/lib/taxonomy/role-service';
+import {
+  canonicalizeLocation as canonicalizeLocationDeterministic,
+  isMeaningfulLocation as isMeaningfulLocationDeterministic,
+  extractPrimaryCity as extractPrimaryCityDeterministic,
+  hasCountryTokenOverlap as hasCountryTokenOverlapDeterministic,
+  resolveLocationDeterministic,
+  type LocationResolution,
+} from '@/lib/taxonomy/location-service';
 
 export interface CandidateForRanking {
   id: string;
@@ -64,13 +71,6 @@ export function compareFitWithConfidence(a: ScoredCandidate, b: ScoredCandidate,
   return 0;
 }
 
-const LOCATION_ALIAS_REWRITES: Array<[RegExp, string]> = [
-  [/\bbengaluru\b/gi, 'bangalore'],
-  [/\bbombay\b/gi, 'mumbai'],
-  [/\bnyc\b/gi, 'new york'],
-  [/\bsf\b/gi, 'san francisco'],
-];
-
 // Location-specific noise patterns (shared isNoisyHint already covers
 // linkedin, view…profile, URLs, www — only location-stricter checks here)
 const LOCATION_NOISE_PATTERNS: RegExp[] = [
@@ -105,11 +105,7 @@ const COUNTRY_TOKENS = new Set([
 ]);
 
 export function canonicalizeLocation(text: string): string {
-  let normalized = text.toLowerCase().trim();
-  for (const [pattern, replacement] of LOCATION_ALIAS_REWRITES) {
-    normalized = normalized.replace(pattern, replacement);
-  }
-  return normalized.replace(/[^a-z0-9\s,]/g, ' ').replace(/\s+/g, ' ').trim();
+  return canonicalizeLocationDeterministic(text);
 }
 
 function isMeaningfulNormalizedLocation(normalized: string): boolean {
@@ -123,8 +119,7 @@ function isMeaningfulNormalizedLocation(normalized: string): boolean {
 }
 
 export function isMeaningfulLocation(text: string | null | undefined): boolean {
-  if (!text) return false;
-  return isMeaningfulNormalizedLocation(canonicalizeLocation(text));
+  return isMeaningfulLocationDeterministic(text);
 }
 
 export function isNoisyLocationHint(text: string): boolean {
@@ -151,26 +146,11 @@ function locationTokens(text: string): string[] {
 }
 
 export function extractPrimaryCity(normalizedLocation: string): string | null {
-  const [firstSegmentRaw] = normalizedLocation.split(',');
-  let firstSegment = firstSegmentRaw?.trim() ?? '';
-  if (!firstSegment) return null;
-  // Normalize "Greater X Area" / "X Metropolitan Region" patterns
-  firstSegment = firstSegment
-    .replace(/^greater\s+/i, '')
-    .replace(/\s+(area|metropolitan\s+region|region)$/i, '')
-    .trim();
-  if (!firstSegment) return null;
-  const firstSegmentTokens = firstSegment.split(/\s+/).filter(Boolean);
-  if (firstSegmentTokens.length === 0) return null;
-  if (firstSegmentTokens.every((token) => COUNTRY_TOKENS.has(token))) return null;
-  return firstSegment;
+  return extractPrimaryCityDeterministic(normalizedLocation);
 }
 
 function hasCountryTokenOverlap(targetLocation: string, candidateLocation: string): boolean {
-  const targetTokens = locationTokens(targetLocation).filter((token) => COUNTRY_TOKENS.has(token));
-  if (targetTokens.length === 0) return false;
-  const candidateTokens = new Set(locationTokens(candidateLocation));
-  return targetTokens.some((token) => candidateTokens.has(token));
+  return hasCountryTokenOverlapDeterministic(targetLocation, candidateLocation);
 }
 
 const SHORT_ALIAS_ALLOWLIST = new Set(['ts', 'js', 'go', 'pg', 'k8s']);
@@ -269,6 +249,7 @@ interface LocationClassification {
 function classifyLocationMatch(
   candidate: CandidateForRanking,
   targetLocation: string | null,
+  preResolvedLocation?: LocationResolution | null,
 ): LocationClassification {
   if (!isMeaningfulLocation(targetLocation)) {
     // No location constraint → everyone is strict (location irrelevant)
@@ -283,16 +264,22 @@ function classifyLocationMatch(
   }
 
   const candidateLocation = loc!;
-  const targetNorm = canonicalizeLocation(target);
-  const candidateNorm = canonicalizeLocation(candidateLocation);
-  const targetCity = extractPrimaryCity(targetNorm);
+  const targetResolution = resolveLocationDeterministic(target);
+  const targetNorm = targetResolution.normalized;
+  const targetCity = targetResolution.city;
+
+  const safePreResolved = preResolvedLocation && (
+    preResolvedLocation.source === 'deterministic' || preResolvedLocation.confidence >= 0.7
+  )
+    ? preResolvedLocation
+    : null;
+  const candidateResolution = safePreResolved ?? resolveLocationDeterministic(candidateLocation);
+  const candidateNorm = candidateResolution.normalized;
 
   if (targetCity && candidateNorm && candidateNorm.includes(targetCity)) {
     // City match after alias normalization. Check if it matched pre-alias.
-    const rawTarget = target.toLowerCase().replace(/[^a-z0-9\s,]/g, ' ').replace(/\s+/g, ' ').trim();
-    const rawCandidate = candidateLocation.toLowerCase().replace(/[^a-z0-9\s,]/g, ' ').replace(/\s+/g, ' ').trim();
-    const rawTargetCity = extractPrimaryCity(rawTarget);
-    const isExact = Boolean(rawTargetCity && rawCandidate.includes(rawTargetCity));
+    const rawTargetCity = targetResolution.rawCity;
+    const isExact = Boolean(rawTargetCity && candidateResolution.rawNormalized.includes(rawTargetCity));
 
     return {
       matchTier: 'strict_location',
@@ -300,7 +287,11 @@ function classifyLocationMatch(
     };
   }
 
-  if (hasCountryTokenOverlap(target, candidateLocation)) {
+  const countryMatch = targetResolution.countryCode
+    ? targetResolution.countryCode === candidateResolution.countryCode
+    : hasCountryTokenOverlap(target, candidateLocation);
+
+  if (countryMatch) {
     if (!targetCity) {
       // Target is country-only → country match is strict
       return { matchTier: 'strict_location', locationMatchType: 'country_only' };
@@ -393,7 +384,13 @@ const TRACK_WEIGHTS: Record<JobTrack, { skill: number; role: number; seniority: 
 export function rankCandidates(
   candidates: CandidateForRanking[],
   requirements: JobRequirements,
-  options?: { fitScoreEpsilon?: number; locationBoostWeight?: number; track?: JobTrack; preResolvedRoles?: Map<string, RoleResolution> },
+  options?: {
+    fitScoreEpsilon?: number;
+    locationBoostWeight?: number;
+    track?: JobTrack;
+    preResolvedRoles?: Map<string, RoleResolution>;
+    preResolvedLocations?: Map<string, LocationResolution>;
+  },
 ): ScoredCandidate[] {
   // Location boost weight: 0 (default/disabled) preserves existing weights exactly.
   const locationWeight = options?.locationBoostWeight ?? 0;
@@ -417,7 +414,8 @@ export function rankCandidates(
       const roleScore = computeRoleScore(c, requirements.roleFamily, options?.track, preResolved);
       const seniorityScore = computeSeniorityScore(c, requirements.seniorityLevel);
       const activityFreshnessScore = computeFreshnessScore(c);
-      const { matchTier, locationMatchType } = classifyLocationMatch(c, requirements.location);
+      const preResolvedLocation = options?.preResolvedLocations?.get(c.id) ?? null;
+      const { matchTier, locationMatchType } = classifyLocationMatch(c, requirements.location, preResolvedLocation);
       const locationBoost = computeLocationBoost(locationMatchType, !!requirements.location);
 
       // Dampen seniority contribution when role is a clear mismatch or unknown on non-tech/blended.
