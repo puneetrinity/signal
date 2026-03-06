@@ -407,10 +407,10 @@ export function rankCandidates(
   return candidates
     .map((c) => {
       const { score: skillScore, method: skillScoreMethod } = computeSkillScore(c, requirements.topSkills, requirements.domain);
-      // Look up pre-resolved role by normalized title key (same key used in resolveRolesBatch)
-      const preResolved = options?.preResolvedRoles?.get(
-        (c.headlineHint ?? c.searchTitle ?? '').trim().toLowerCase(),
-      ) ?? null;
+      // Prefer candidate-id keyed pre-resolved roles; keep title-key fallback for compatibility.
+      const preResolved = options?.preResolvedRoles?.get(c.id)
+        ?? options?.preResolvedRoles?.get((c.headlineHint ?? c.searchTitle ?? '').trim().toLowerCase())
+        ?? null;
       const roleScore = computeRoleScore(c, requirements.roleFamily, options?.track, preResolved);
       const seniorityScore = computeSeniorityScore(c, requirements.seniorityLevel);
       const activityFreshnessScore = computeFreshnessScore(c);

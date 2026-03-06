@@ -36,6 +36,8 @@ export interface LocationResolutionMetrics {
   deterministicHitRate: number;
   cacheHitRate: number;
   llmCallCount: number;
+  llmEligibleCount: number;
+  skippedLlmCount: number;
   unknownCount: number;
   confidenceDistribution: {
     high: number;   // >= 0.8
@@ -104,6 +106,30 @@ const COUNTRY_CODE_ALIASES: Record<string, string[]> = {
     'san francisco bay area', 'bay area', 'silicon valley',
     'new york city', 'new york city metropolitan area', 'nyc metropolitan area'],
 };
+
+const LOCATION_LLM_BATCH_CONCURRENCY = 16;
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const workers = Math.max(1, concurrency);
+  const results = new Array<R>(items.length);
+  let index = 0;
+
+  await Promise.all(
+    Array.from({ length: Math.min(workers, items.length) }, async () => {
+      while (index < items.length) {
+        const current = index++;
+        results[current] = await mapper(items[current]);
+      }
+    }),
+  );
+
+  return results;
+}
 
 function normalizeRawLocation(text: string): string {
   return text.toLowerCase().trim().replace(/[^a-z0-9\s,]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -280,6 +306,7 @@ export async function resolveLocation(
 ): Promise<LocationResolution> {
   const det = resolveLocationDeterministic(location);
   if (det.city || det.countryCode) return det;
+  if (!det.normalized || det.confidence === 0) return det;
 
   const config = getSourcingConfig();
   if (!config.locationGroqEnabled) return det;
@@ -302,6 +329,8 @@ export async function resolveLocationsBatch(
   let deterministicResolved = 0;
   let cacheResolved = 0;
   let llmCalls = 0;
+  let llmEligibleCount = 0;
+  let skippedLlmCount = 0;
   let unknownCount = 0;
 
   const config = getSourcingConfig();
@@ -310,38 +339,70 @@ export async function resolveLocationsBatch(
   for (const entry of entries) {
     const loc = (entry.location ?? '').trim();
     const ctx = entry.context?.trim() ?? '';
-    const sig = `${loc.toLowerCase()}|${ctx.toLowerCase()}`;
+    const sig = loc.toLowerCase();
     if (!uniqueBySignature.has(sig)) {
       uniqueBySignature.set(sig, { location: loc, context: ctx || undefined });
+    } else if (ctx) {
+      const existing = uniqueBySignature.get(sig);
+      if (existing && (!existing.context || ctx.length > existing.context.length)) {
+        existing.context = ctx;
+      }
     }
   }
 
+  const llmCandidates: Array<{ signature: string; location: string; context?: string }> = [];
   for (const [, item] of uniqueBySignature) {
     const det = resolveLocationDeterministic(item.location);
     item.resolution = det;
-    if (det.city || det.countryCode) deterministicResolved++;
+    if (det.city || det.countryCode) {
+      deterministicResolved++;
+      continue;
+    }
+    if (!det.normalized || det.confidence === 0) {
+      skippedLlmCount++;
+      continue;
+    }
+    llmCandidates.push({
+      signature: item.location.toLowerCase(),
+      location: item.location,
+      context: item.context,
+    });
   }
 
-  if (config.locationGroqEnabled) {
-    for (const [, item] of uniqueBySignature) {
-      const det = item.resolution!;
-      if (det.city || det.countryCode) continue;
-      try {
-        const groq = await groqClassifyLocation(item.location, item.context ?? null, config);
-        if (!groq) continue;
-        if (groq.cached) cacheResolved++;
-        else llmCalls++;
-        item.resolution = toResolutionFromGroq(item.location, groq);
-      } catch (err) {
-        log.warn({ error: err, location: item.location }, 'Batch location Groq failed');
-      }
+  llmEligibleCount = llmCandidates.length;
+  if (config.locationGroqEnabled && llmCandidates.length > 0) {
+    const llmResults = await mapWithConcurrency(
+      llmCandidates,
+      LOCATION_LLM_BATCH_CONCURRENCY,
+      async (entry) => {
+        try {
+          const groq = await groqClassifyLocation(entry.location, entry.context ?? null, config);
+          if (!groq) return { signature: entry.signature, resolution: null, cached: false, llmCalled: false };
+          return {
+            signature: entry.signature,
+            resolution: toResolutionFromGroq(entry.location, groq),
+            cached: groq.cached,
+            llmCalled: !groq.cached,
+          };
+        } catch (err) {
+          log.warn({ error: err, location: entry.location }, 'Batch location Groq failed');
+          return { signature: entry.signature, resolution: null, cached: false, llmCalled: false };
+        }
+      },
+    );
+
+    for (const result of llmResults) {
+      if (!result.resolution) continue;
+      if (result.cached) cacheResolved++;
+      if (result.llmCalled) llmCalls++;
+      const item = uniqueBySignature.get(result.signature);
+      if (item) item.resolution = result.resolution;
     }
   }
 
   for (const entry of entries) {
     const loc = (entry.location ?? '').trim();
-    const ctx = entry.context?.trim() ?? '';
-    const sig = `${loc.toLowerCase()}|${ctx.toLowerCase()}`;
+    const sig = loc.toLowerCase();
     const resolution = uniqueBySignature.get(sig)?.resolution ?? resolveLocationDeterministic(loc);
     resolutions.set(entry.key, resolution);
   }
@@ -360,6 +421,8 @@ export async function resolveLocationsBatch(
       deterministicHitRate: Number((deterministicResolved / total).toFixed(4)),
       cacheHitRate: Number((cacheResolved / total).toFixed(4)),
       llmCallCount: llmCalls,
+      llmEligibleCount,
+      skippedLlmCount,
       unknownCount,
       confidenceDistribution: confDist,
     },

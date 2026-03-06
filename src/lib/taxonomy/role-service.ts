@@ -278,6 +278,7 @@ export async function resolveRole(
 // ---------------------------------------------------------------------------
 
 export interface RoleBatchEntry {
+  key: string;
   title: string;
   context?: string;
 }
@@ -291,7 +292,9 @@ export interface RoleResolutionMetrics {
   deterministicHitRate: number;
   cacheHitRate: number;
   llmCallCount: number;
+  llmEligibleCount: number;
   unknownCount: number;
+  fallbackCount: number;
   confidenceDistribution: {
     high: number;   // >= 0.8
     medium: number; // 0.5–0.8
@@ -300,7 +303,33 @@ export interface RoleResolutionMetrics {
   promotionDelta: {
     wouldPromote: number;
     wouldBlock: number;
+    wouldPromoteRate: number;
+    wouldBlockRate: number;
   };
+}
+
+const ROLE_LLM_BATCH_CONCURRENCY = 12;
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const workers = Math.max(1, concurrency);
+  const results = new Array<R>(items.length);
+  let index = 0;
+
+  await Promise.all(
+    Array.from({ length: Math.min(workers, items.length) }, async () => {
+      while (index < items.length) {
+        const current = index++;
+        results[current] = await mapper(items[current]);
+      }
+    }),
+  );
+
+  return results;
 }
 
 export async function resolveRolesBatch(
@@ -311,77 +340,113 @@ export async function resolveRolesBatch(
   let cacheHits = 0;
   let llmCalls = 0;
   let unknowns = 0;
+  let fallbackCount = 0;
   const confDist = { high: 0, medium: 0, low: 0 };
-  const promotionDelta = { wouldPromote: 0, wouldBlock: 0 };
+  const promotionDelta = { wouldPromote: 0, wouldBlock: 0, wouldPromoteRate: 0, wouldBlockRate: 0 };
 
-  // Dedupe by normalized title
-  const uniqueEntries = new Map<string, RoleBatchEntry>();
-  for (const entry of entries) {
-    const key = entry.title.trim().toLowerCase();
-    if (!key) continue;
-    if (!uniqueEntries.has(key)) uniqueEntries.set(key, entry);
-  }
-
-  // Phase 1: deterministic pass
-  const needsLlm: RoleBatchEntry[] = [];
-  for (const [key, entry] of uniqueEntries) {
-    const det = resolveRoleDeterministic(entry.title);
-    if (det.family) {
-      deterministicHits++;
-      resolutions.set(key, det);
-    } else {
-      needsLlm.push(entry);
+  const validEntries = entries.filter((entry) => entry.key.trim().length > 0);
+  const uniqueEntriesBySignature = new Map<string, { title: string; context?: string }>();
+  for (const entry of validEntries) {
+    const title = entry.title.trim();
+    const context = entry.context?.trim() ?? '';
+    if (!title) continue;
+    const signature = `${title.toLowerCase()}|${context.toLowerCase()}`;
+    if (!uniqueEntriesBySignature.has(signature)) {
+      uniqueEntriesBySignature.set(signature, {
+        title,
+        context: context || undefined,
+      });
     }
   }
 
-  // Phase 2: LLM resolution for unknowns (if enabled)
-  const config = getSourcingConfig();
-  if (config.roleGroqEnabled && needsLlm.length > 0) {
-    for (const entry of needsLlm) {
-      const key = entry.title.trim().toLowerCase();
-      try {
-        const groqResult = await groqClassifyRole(
-          entry.title,
-          entry.context ?? null,
-          config,
-        );
+  const resolutionBySignature = new Map<string, RoleResolution>();
+  const sourceBySignature = new Map<string, 'deterministic' | 'groq_cached' | 'groq_live'>();
+  const llmCandidates: Array<{ signature: string; title: string; context?: string }> = [];
 
-        if (groqResult) {
-          if (groqResult.cached) cacheHits++;
-          else llmCalls++;
+  for (const [signature, entry] of uniqueEntriesBySignature) {
+    const det = resolveRoleDeterministic(entry.title);
+    if (det.family) {
+      resolutionBySignature.set(signature, det);
+      sourceBySignature.set(signature, 'deterministic');
+    } else {
+      llmCandidates.push({ signature, title: entry.title, context: entry.context });
+    }
+  }
+
+  const config = getSourcingConfig();
+  if (config.roleGroqEnabled && llmCandidates.length > 0) {
+    const llmResults = await mapWithConcurrency(
+      llmCandidates,
+      ROLE_LLM_BATCH_CONCURRENCY,
+      async (entry) => {
+        try {
+          const groqResult = await groqClassifyRole(entry.title, entry.context ?? null, config);
+          if (!groqResult) {
+            return {
+              signature: entry.signature,
+              resolution: resolveRoleDeterministic(entry.title),
+              source: 'deterministic' as const,
+              llmCalled: false,
+            };
+          }
 
           const family = isRoleFamily(groqResult.family) ? groqResult.family : null;
           const fallbackKind = family ? null : (groqResult.fallbackKind as RoleFallbackKind | null) ?? 'unknown';
-
-          resolutions.set(key, {
-            family,
-            fallbackKind,
-            confidence: groqResult.confidence,
-            track: family ? (familyToTrack.get(family) ?? null) : null,
-            adjacentFamilies: family ? getAdjacentFamilies(family) : [],
-            normalizedTitle: entry.title.trim(),
-          });
-          continue;
+          return {
+            signature: entry.signature,
+            resolution: {
+              family,
+              fallbackKind,
+              confidence: groqResult.confidence,
+              track: family ? (familyToTrack.get(family) ?? null) : null,
+              adjacentFamilies: family ? getAdjacentFamilies(family) : [],
+              normalizedTitle: entry.title,
+            } satisfies RoleResolution,
+            source: (groqResult.cached ? 'groq_cached' : 'groq_live') as 'groq_cached' | 'groq_live',
+            llmCalled: !groqResult.cached,
+          };
+        } catch (err) {
+          log.warn({ error: err, title: entry.title }, 'Batch role Groq failed for title');
+          return {
+            signature: entry.signature,
+            resolution: resolveRoleDeterministic(entry.title),
+            source: 'deterministic' as const,
+            llmCalled: false,
+          };
         }
-      } catch (err) {
-        log.warn({ error: err, title: entry.title }, 'Batch role Groq failed for title');
-      }
+      },
+    );
 
-      // Fallback: unknown
-      resolutions.set(key, resolveRoleDeterministic(entry.title));
+    for (const result of llmResults) {
+      resolutionBySignature.set(result.signature, result.resolution);
+      sourceBySignature.set(result.signature, result.source);
+      if (result.source === 'groq_cached') cacheHits++;
+      if (result.llmCalled) llmCalls++;
     }
   } else {
-    // LLM disabled: resolve deterministically (already done, just set unknowns)
-    for (const entry of needsLlm) {
-      const key = entry.title.trim().toLowerCase();
-      resolutions.set(key, resolveRoleDeterministic(entry.title));
+    for (const entry of llmCandidates) {
+      resolutionBySignature.set(entry.signature, resolveRoleDeterministic(entry.title));
+      sourceBySignature.set(entry.signature, 'deterministic');
     }
+  }
+
+  // Map resolved signatures back to candidate keys
+  for (const entry of validEntries) {
+    const title = entry.title.trim();
+    const context = entry.context?.trim() ?? '';
+    const signature = `${title.toLowerCase()}|${context.toLowerCase()}`;
+    const resolved = resolutionBySignature.get(signature) ?? resolveRoleDeterministic(title);
+    resolutions.set(entry.key, resolved);
+    const source = sourceBySignature.get(signature) ?? 'deterministic';
+    if (source === 'deterministic') deterministicHits++;
   }
 
   // Compute metrics
   for (const [, resolution] of resolutions) {
-    if (!resolution.family && !resolution.fallbackKind) unknowns++;
-    else if (!resolution.family) unknowns++;
+    if (!resolution.family && resolution.fallbackKind === 'unknown') unknowns++;
+    if (!resolution.family && resolution.fallbackKind && resolution.fallbackKind !== 'unknown') {
+      fallbackCount++;
+    }
 
     if (resolution.confidence >= 0.8) confDist.high++;
     else if (resolution.confidence >= 0.5) confDist.medium++;
@@ -398,7 +463,9 @@ export async function resolveRolesBatch(
     }
   }
 
-  const total = uniqueEntries.size || 1;
+  const total = resolutions.size || 1;
+  promotionDelta.wouldPromoteRate = Number((promotionDelta.wouldPromote / total).toFixed(4));
+  promotionDelta.wouldBlockRate = Number((promotionDelta.wouldBlock / total).toFixed(4));
 
   return {
     resolutions,
@@ -406,7 +473,9 @@ export async function resolveRolesBatch(
       deterministicHitRate: Number((deterministicHits / total).toFixed(4)),
       cacheHitRate: Number((cacheHits / total).toFixed(4)),
       llmCallCount: llmCalls,
+      llmEligibleCount: llmCandidates.length,
       unknownCount: unknowns,
+      fallbackCount,
       confidenceDistribution: confDist,
       promotionDelta,
     },

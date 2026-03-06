@@ -297,7 +297,9 @@ export async function runSourcingOrchestrator(
 
     if (roleResolutionMetrics) {
       roleResolutionMetrics.llmCallCount += batch.llmCallCount;
+      roleResolutionMetrics.llmEligibleCount += batch.llmEligibleCount;
       roleResolutionMetrics.unknownCount += batch.unknownCount;
+      roleResolutionMetrics.fallbackCount += batch.fallbackCount;
       roleResolutionMetrics.confidenceDistribution.high += batch.confidenceDistribution.high;
       roleResolutionMetrics.confidenceDistribution.medium += batch.confidenceDistribution.medium;
       roleResolutionMetrics.confidenceDistribution.low += batch.confidenceDistribution.low;
@@ -308,7 +310,9 @@ export async function runSourcingOrchestrator(
         deterministicHitRate: 0,
         cacheHitRate: 0,
         llmCallCount: batch.llmCallCount,
+        llmEligibleCount: batch.llmEligibleCount,
         unknownCount: batch.unknownCount,
+        fallbackCount: batch.fallbackCount,
         confidenceDistribution: { ...batch.confidenceDistribution },
         promotionDelta: { ...batch.promotionDelta },
       };
@@ -320,6 +324,12 @@ export async function runSourcingOrchestrator(
       );
       roleResolutionMetrics.cacheHitRate = Number(
         (roleResolutionAggregate.cacheResolved / roleResolutionAggregate.total).toFixed(4),
+      );
+      roleResolutionMetrics.promotionDelta.wouldPromoteRate = Number(
+        (roleResolutionMetrics.promotionDelta.wouldPromote / roleResolutionAggregate.total).toFixed(4),
+      );
+      roleResolutionMetrics.promotionDelta.wouldBlockRate = Number(
+        (roleResolutionMetrics.promotionDelta.wouldBlock / roleResolutionAggregate.total).toFixed(4),
       );
     }
   };
@@ -340,6 +350,8 @@ export async function runSourcingOrchestrator(
 
     if (locationResolutionMetrics) {
       locationResolutionMetrics.llmCallCount += batch.llmCallCount;
+      locationResolutionMetrics.llmEligibleCount += batch.llmEligibleCount;
+      locationResolutionMetrics.skippedLlmCount += batch.skippedLlmCount;
       locationResolutionMetrics.unknownCount += batch.unknownCount;
       locationResolutionMetrics.confidenceDistribution.high += batch.confidenceDistribution.high;
       locationResolutionMetrics.confidenceDistribution.medium += batch.confidenceDistribution.medium;
@@ -349,6 +361,8 @@ export async function runSourcingOrchestrator(
         deterministicHitRate: 0,
         cacheHitRate: 0,
         llmCallCount: batch.llmCallCount,
+        llmEligibleCount: batch.llmEligibleCount,
+        skippedLlmCount: batch.skippedLlmCount,
         unknownCount: batch.unknownCount,
         confidenceDistribution: { ...batch.confidenceDistribution },
       };
@@ -366,6 +380,7 @@ export async function runSourcingOrchestrator(
   let poolPreResolvedLocations: Map<string, LocationResolution> | undefined;
   if (config.roleGroqEnabled) {
     const poolEntries: RoleBatchEntry[] = poolForRanking.map((c) => ({
+      key: c.id,
       title: c.headlineHint ?? c.searchTitle ?? '',
       context: [c.headlineHint, c.searchTitle, c.searchSnippet].filter(Boolean).join(' '),
     }));
@@ -723,6 +738,7 @@ export async function runSourcingOrchestrator(
           let discoveredPreResolvedLocations: Map<string, LocationResolution> | undefined;
           if (config.roleGroqEnabled) {
             const discoveredEntries: RoleBatchEntry[] = discoveredForRanking.map((c) => ({
+              key: c.id,
               title: c.headlineHint ?? c.searchTitle ?? '',
               context: [c.headlineHint, c.searchTitle, c.searchSnippet].filter(Boolean).join(' '),
             }));
@@ -780,7 +796,8 @@ export async function runSourcingOrchestrator(
               const candidateTitleForResolution = candidateRow?.headlineHint ?? candidateRow?.searchTitle ?? '';
               const candidateRoleKey = candidateTitleForResolution.trim().toLowerCase();
               // Use pre-resolved role in active mode, deterministic otherwise
-              const candidateResolution = discoveredPreResolvedRoles?.get(candidateRoleKey)
+              const candidateResolution = discoveredPreResolvedRoles?.get(sc.candidateId)
+                ?? discoveredPreResolvedRoles?.get(candidateRoleKey)
                 ?? resolveRoleDeterministic(candidateTitleForResolution);
               const candidateRoleFamily = candidateResolution.family;
               // Confidence gate: only allow promotion at >= 0.7 (per plan requirement)

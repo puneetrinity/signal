@@ -140,6 +140,38 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
+function classifyGroqError(err: unknown): {
+  retryable: boolean;
+  countTowardsBreaker: boolean;
+  timeout: boolean;
+} {
+  const message = err instanceof Error ? err.message.toLowerCase() : '';
+  const name = err instanceof Error ? err.name.toLowerCase() : '';
+  const timeout = message.includes('timeout');
+  const validation =
+    name.includes('ai_noobjectgeneratederror') ||
+    name.includes('ai_typevalidationerror') ||
+    message.includes('typevalidationerror') ||
+    message.includes('invalid_enum_value') ||
+    message.includes('zod');
+
+  const transientNetwork =
+    message.includes('econn') ||
+    message.includes('socket') ||
+    message.includes('network') ||
+    message.includes('rate limit') ||
+    message.includes('429') ||
+    message.includes('503');
+
+  if (validation) {
+    return { retryable: false, countTowardsBreaker: false, timeout: false };
+  }
+  if (timeout || transientNetwork) {
+    return { retryable: true, countTowardsBreaker: true, timeout };
+  }
+  return { retryable: false, countTowardsBreaker: false, timeout: false };
+}
+
 // ---------------------------------------------------------------------------
 // Core Groq call (single attempt)
 // ---------------------------------------------------------------------------
@@ -227,6 +259,7 @@ export async function groqClassifyRole(
   // Attempt with retry
   const maxAttempts = 1 + config.roleGroqMaxRetries;
   let lastError: unknown;
+  let breakerFailure = false;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -238,13 +271,16 @@ export async function groqClassifyRole(
       return result;
     } catch (err) {
       lastError = err;
-      const isTimeout = err instanceof Error && err.message.includes('timeout');
+      const classification = classifyGroqError(err);
+      breakerFailure = breakerFailure || classification.countTowardsBreaker;
       log.warn({ error: err, attempt, maxAttempts }, 'Role Groq attempt failed');
-      if (isTimeout || attempt >= maxAttempts) break;
+      if (!classification.retryable || attempt >= maxAttempts) break;
     }
   }
 
-  await recordFailure(config);
+  if (breakerFailure) {
+    await recordFailure(config);
+  }
   log.warn({ error: lastError, title }, 'Role Groq classification failed after retries');
   return null;
 }
