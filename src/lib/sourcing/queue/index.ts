@@ -152,6 +152,7 @@ async function processSourcingJob(
           minDiscoveredInOutputApplied: orchestratorResult.minDiscoveredInOutputApplied,
           discoveredPromotedCount: orchestratorResult.discoveredPromotedCount,
           discoveredPromotedInTopCount: orchestratorResult.discoveredPromotedInTopCount,
+          roleResolutionMetrics: orchestratorResult.roleResolutionMetrics,
         }),
       },
     });
