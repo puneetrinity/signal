@@ -26,9 +26,11 @@ const COUNTRY_CODE_LIST = [
 const FALLBACK_KINDS = ['unknown', 'ambiguous'] as const;
 
 const LocationClassificationSchema = z.object({
-  city: z.string().max(120).nullable(),
-  countryCode: z.enum(COUNTRY_CODE_LIST).nullable(),
-  fallbackKind: z.enum(FALLBACK_KINDS).nullable(),
+  city: z.string().max(120).nullable().catch(null),
+  countryCode: z.string().max(5).nullable()
+    .transform(v => v && COUNTRY_CODE_LIST.includes(v as typeof COUNTRY_CODE_LIST[number]) ? v : null)
+    .catch(null),
+  fallbackKind: z.enum(FALLBACK_KINDS).nullable().catch(null),
   confidence: z.number().min(0).max(1),
 });
 

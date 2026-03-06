@@ -170,12 +170,20 @@ export function deriveCountryCodeFromLocationText(
 
   const segments = normalized.split(',').map((segment) => segment.trim()).filter(Boolean);
   const candidates = [
+    // Last segment (e.g. "india" from "bangalore, india")
     segments[segments.length - 1],
+    // Last two segments joined (e.g. "united states" from "new york, united states")
     segments.length > 1 ? segments.slice(-2).join(' ') : null,
+    // Full normalized string
     normalized,
+    // Each individual segment (e.g. "seattle" from "seattle, wa")
+    ...segments,
   ].filter((value): value is string => Boolean(value));
 
+  const seen = new Set<string>();
   for (const candidate of candidates) {
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
     for (const [countryCode, aliases] of Object.entries(COUNTRY_CODE_ALIASES)) {
       if (aliases.includes(candidate)) return countryCode;
     }
