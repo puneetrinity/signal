@@ -1168,6 +1168,27 @@ console.log('\n--- extractLocationFromSerpResult ---');
     '',
   );
   assert(r5 === null, 'SERP result: headline in title is not location → null');
+
+  // Pattern 1 fix: "Location: X." stops at period, not just middot
+  const r6 = extractLocationFromSerpResult(
+    '',
+    'Technical Account Manager · Experience: * · Location: Greater Montreal. View profile on LinkedIn',
+  );
+  assert(r6 === 'Greater Montreal', 'SERP result: Location: stops at period');
+
+  // Pattern 5: "City, Country" mid-text after period
+  const r7 = extractLocationFromSerpResult(
+    '',
+    'Node.js, Laravel. Testing: Jest. mars 2014 – nov. 2017 3 år. Bangalore, India. API based automation',
+  );
+  assert(r7 !== null && r7.includes('Bangalore'), 'SERP result: mid-text Bangalore, India');
+
+  // Pattern 5: should NOT match "Senior Backend Engineer, Platform Team"
+  const r8 = extractLocationFromSerpResult(
+    '',
+    'Senior Backend Engineer, Platform Team. Built microservices at scale.',
+  );
+  assert(r8 === null, 'SERP result: job title with comma is not location');
 }
 
 // ---------------------------------------------------------------------------

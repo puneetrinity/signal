@@ -240,8 +240,8 @@ export function extractLocationFromSnippet(snippet: string): string | null {
   const cleaned = snippet.replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{26FF}]\s*/u, '');
   snippet = cleaned;
 
-  // Pattern 1: Explicit "Location: X"
-  const locationMatch = snippet.match(/Location:\s*([^·\n]+)/i);
+  // Pattern 1: Explicit "Location: X" (stop at period, middot, newline, or digit run)
+  const locationMatch = snippet.match(/Location:\s*([^·.\n]+)/i);
   if (locationMatch) {
     const loc = locationMatch[1].trim();
     if (isLikelyLocation(loc)) return loc;
@@ -267,6 +267,13 @@ export function extractLocationFromSnippet(snippet: string): string | null {
   const geoMatch = snippet.match(/(?:based in|located in|from)\s+([\p{L}][\p{L}\s,]+?)(?:\.|,|\s*·)/iu);
   if (geoMatch) {
     const loc = geoMatch[1].trim();
+    if (isLikelyLocation(loc)) return loc;
+  }
+
+  // Pattern 5: "City, Country" anywhere in snippet (handles mid-text locations like "3 years. Bangalore, India. Built ...")
+  // Require capitalized words to avoid false positives like "js, Laravel"
+  for (const inlineGeoMatch of snippet.matchAll(/(?:^|[.·|]\s*)(\p{Lu}\p{L}+(?:\s\p{L}+)*,\s*\p{Lu}\p{L}+(?:\s\p{L}+)*)(?:\s*[.·|]|$)/gu)) {
+    const loc = inlineGeoMatch[1].trim();
     if (isLikelyLocation(loc)) return loc;
   }
 
