@@ -9,7 +9,7 @@
  */
 
 import type { HintWithConfidence, EnrichedHints, HintSource } from './bridge-types';
-import { isNoisyHint, isLikelyLocationHint as isLikelyLocation } from '@/lib/sourcing/hint-sanitizer';
+import { isNoisyHint, isLikelyLocationHint as isLikelyLocation, containsGeoToken } from '@/lib/sourcing/hint-sanitizer';
 import { assessLocationCountryConsistency, extractSerpSignals } from '@/lib/search/serp-signals';
 
 /**
@@ -233,6 +233,41 @@ export function extractCompanyFromHeadline(headline: string | null): string | nu
  * - "City, Country · Connections"
  * - Geographic info in first/last segment
  */
+// Reject extracted values that look like job titles, company names, or tech skills
+const NON_LOCATION_PATTERNS = [
+  /\b(?:Inc|LLC|Ltd|Corp|GmbH|Pty|PLC|LLP)\b\.?/i,
+  /\b(?:a|an|the)\s+(?:\w+\s+)+(?:Company|company)\b/i,
+  /\b(?:CEO|CTO|COO|CFO|AVP|SVP|VP|Director|Manager|Lead|Engineer|Architect|Scientist|Fellow|Advocate|Researcher|Supervisor|Founder|Executive|Generalist|Specialist|Consultant)\b/i,
+  /\b(?:at|@)\s+\w/i,
+  /\b(?:Python|Java|React|Node|Django|Flask|Kafka|Docker|Kubernetes|Spring|FastAPI|Swift|TypeScript|PyTorch|Salesforce|AWS|Azure|GCP|NLP)\b/i,
+  /\b(?:Sales|Security|Customer|Enterprise|Product|Technical|Software|Data|Deep|AI|ML|Cloud|Platform)\b.*\b(?:Sales|Growth|Analytics|Engineering|Research|Services|Success|Onboarding)\b/i,
+  /\be-Learning\b/i,
+  /\bthe\s+#\d/i,
+];
+
+function looksLikeNonLocation(value: string): boolean {
+  return NON_LOCATION_PATTERNS.some((pattern) => pattern.test(value));
+}
+
+/**
+ * Truncate trailing prose from location fragments while preserving city abbreviations
+ * like "St. Louis, MO".
+ */
+function trimLocationSentenceTail(value: string): string {
+  const loc = value.trim();
+  if (!loc.includes('.')) return loc;
+
+  const boundaryRe = /\.\s+(?=[A-Z0-9])/g;
+  let match: RegExpExecArray | null;
+  while ((match = boundaryRe.exec(loc)) !== null) {
+    const candidate = loc.slice(0, match.index).trim();
+    if (candidate && isLikelyLocation(candidate) && !looksLikeNonLocation(candidate)) {
+      return candidate;
+    }
+  }
+  return loc;
+}
+
 export function extractLocationFromSnippet(snippet: string): string | null {
   if (!snippet) return null;
 
@@ -240,26 +275,28 @@ export function extractLocationFromSnippet(snippet: string): string | null {
   const cleaned = snippet.replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{26FF}]\s*/u, '');
   snippet = cleaned;
 
-  // Pattern 1: Explicit "Location: X" (stop at period, middot, newline, or digit run)
-  const locationMatch = snippet.match(/Location:\s*([^·.\n]+)/i);
+  // Pattern 1: Explicit "Location: X" (stop at middot or newline)
+  // Trim trailing sentence fragments: ". View profile", ". 500+ connections"
+  const locationMatch = snippet.match(/Location:\s*([^·\n]+)/i);
   if (locationMatch) {
-    const loc = locationMatch[1].trim();
-    if (isLikelyLocation(loc)) return loc;
+    const loc = trimLocationSentenceTail(locationMatch[1]);
+    if (isLikelyLocation(loc) && !looksLikeNonLocation(loc)) return loc;
   }
 
-  // Pattern 2: City/Country or City, ST pattern with common separators (Unicode-aware)
-  // "San Francisco, California · 500+ connections" or "San Francisco, CA · ..."
-  const cityMatch = snippet.match(/^([\p{L}][\p{L}\s]+(?:,\s*[\p{L}]{2,}[\p{L}\s]*)?)(?:\s*[·|])/u);
-  if (cityMatch && isLikelyLocation(cityMatch[1])) {
-    return cityMatch[1].trim();
-  }
-
-  // Pattern 3: Split by middot or pipe and check segments
+  // Pattern 2+3: First segment before middot/pipe with known geo token
+  // "Bangalore, India · 500+" or "San Francisco, CA · Senior..."
+  // Require containsGeoToken to avoid "Apache Kafka, Microservices · Experience"
   const segments = snippet.split(/\s[·|]\s/);
-  for (const seg of segments) {
-    const cleaned = seg.trim();
-    if (cleaned.length <= 50 && isLikelyLocation(cleaned)) {
-      return cleaned;
+  if (segments.length > 1) {
+    const first = segments[0].trim();
+    if (
+      first.length >= 3 &&
+      first.length <= 40 &&
+      containsGeoToken(first.toLowerCase(), first) &&
+      isLikelyLocation(first) &&
+      !looksLikeNonLocation(first)
+    ) {
+      return first;
     }
   }
 
@@ -267,14 +304,14 @@ export function extractLocationFromSnippet(snippet: string): string | null {
   const geoMatch = snippet.match(/(?:based in|located in|from)\s+([\p{L}][\p{L}\s,]+?)(?:\.|,|\s*·)/iu);
   if (geoMatch) {
     const loc = geoMatch[1].trim();
-    if (isLikelyLocation(loc)) return loc;
+    if (isLikelyLocation(loc) && !looksLikeNonLocation(loc)) return loc;
   }
 
   // Pattern 5: "City, Country" anywhere in snippet (handles mid-text locations like "3 years. Bangalore, India. Built ...")
-  // Require capitalized words to avoid false positives like "js, Laravel"
-  for (const inlineGeoMatch of snippet.matchAll(/(?:^|[.·|]\s*)(\p{Lu}\p{L}+(?:\s\p{L}+)*,\s*\p{Lu}\p{L}+(?:\s\p{L}+)*)(?:\s*[.·|]|$)/gu)) {
+  // Require containsGeoToken + capitalized words to avoid "Java, Spring" and "Co-Founder, AI"
+  for (const inlineGeoMatch of snippet.matchAll(/(?:^|[.·|]\s*)(\p{Lu}\p{L}{2,}(?:\s\p{L}+)*,\s*\p{Lu}\p{L}{2,}(?:\s\p{L}+)*)(?:\s*[.·|]|$)/gu)) {
     const loc = inlineGeoMatch[1].trim();
-    if (isLikelyLocation(loc)) return loc;
+    if (containsGeoToken(loc.toLowerCase(), loc) && isLikelyLocation(loc) && !looksLikeNonLocation(loc)) return loc;
   }
 
   return null;
@@ -288,14 +325,14 @@ export function extractLocationFromSnippet(snippet: string): string | null {
  */
 export function extractLocationFromSerpResult(title: string, snippet: string): string | null {
   const fromSnippet = extractLocationFromSnippet(snippet);
-  if (fromSnippet) return fromSnippet;
+  if (fromSnippet && !looksLikeNonLocation(fromSnippet)) return fromSnippet;
 
   if (!title) return null;
   const cleaned = title.replace(/\s*[|·-]\s*LinkedIn\s*$/i, '').trim();
   const segments = cleaned.split(/\s+-\s+/);
   for (let i = segments.length - 1; i >= 1; i--) {
     const seg = segments[i].trim();
-    if (seg.length <= 50 && isLikelyLocation(seg)) return seg;
+    if (seg.length <= 50 && isLikelyLocation(seg) && !looksLikeNonLocation(seg)) return seg;
   }
   return null;
 }
@@ -332,7 +369,7 @@ export function extractAllHints(
   }
 
   // Extract location
-  const locationHint = extractLocationFromSnippet(snippet);
+  const locationHint = extractLocationFromSerpResult(title, snippet);
 
   return {
     nameHint,

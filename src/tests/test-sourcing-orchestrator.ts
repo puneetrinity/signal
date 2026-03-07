@@ -1189,6 +1189,34 @@ console.log('\n--- extractLocationFromSerpResult ---');
     'Senior Backend Engineer, Platform Team. Built microservices at scale.',
   );
   assert(r8 === null, 'SERP result: job title with comma is not location');
+
+  // User-requested test: "Location: St. Louis, MO · ..." should extract
+  const r9 = extractLocationFromSerpResult(
+    '',
+    'Location: St. Louis, MO · 500+ connections on LinkedIn',
+  );
+  assert(r9 === 'St. Louis, MO', 'SERP result: St. Louis abbreviation');
+
+  // User-requested test: "Java, Spring" should NOT be extracted
+  const r10 = extractLocationFromSerpResult(
+    '',
+    '3 years. Java, Spring. Built microservices and REST APIs.',
+  );
+  assert(r10 === null, 'SERP result: Java, Spring is not location');
+
+  // False positive: tech skills before middot should not match
+  const r11 = extractLocationFromSerpResult(
+    '',
+    'Apache Kafka, Microservice Architecture · Experience at Google',
+  );
+  assert(r11 === null, 'SERP result: Apache Kafka is not location');
+
+  // Generic trailing prose should be trimmed from "Location: ..."
+  const r12 = extractLocationFromSerpResult(
+    '',
+    'Location: Greater Montreal Metropolitan Area. Helping customers globally.',
+  );
+  assert(r12 === 'Greater Montreal Metropolitan Area', 'SERP result: trims trailing prose after location');
 }
 
 // ---------------------------------------------------------------------------

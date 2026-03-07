@@ -1257,6 +1257,11 @@ export async function runSourcingOrchestrator(
     if (locationConsistency === 'match') adjustment -= 4;
     else if (locationConsistency === 'mismatch') adjustment += 4;
 
+    // Discovered + unknown_location: boost priority so enrichment resolves ambiguity sooner
+    if (candidate.sourceType === 'discovered' && candidate.locationMatchType === 'unknown_location') {
+      adjustment -= 5;
+    }
+
     return Math.max(1, Math.min(99, basePriority + adjustment));
   };
 
@@ -1280,7 +1285,8 @@ export async function runSourcingOrchestrator(
     if (discoveredEnrichedCount >= config.discoveredEnrichReserve) break;
     if (alreadyActiveIds.has(a.candidateId)) continue;
     try {
-      const priority = 30 + discoveredEnrichedCount; // lower priority than rank-based (10+), higher than stale (50)
+      const unknownLocBoost = a.locationMatchType === 'unknown_location' ? -5 : 0;
+      const priority = Math.max(1, 30 + discoveredEnrichedCount + unknownLocBoost); // lower priority than rank-based (10+), higher than stale (50)
       await createEnrichmentSession(tenantId, a.candidateId, { priority });
       enqueuedIds.add(a.candidateId);
       discoveredEnrichedCount++;

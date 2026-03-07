@@ -73,7 +73,7 @@ const KNOWN_STATES_FULL = new Set([
 
 // Short state codes need word-boundary matching to avoid false positives
 // (e.g. "ca" inside "vacation", "co" inside "company")
-const SHORT_STATE_CODES = ['ca', 'ny', 'tx', 'fl', 'wa', 'ma', 'il', 'ga', 'co', 'va'];
+const SHORT_STATE_CODES = ['ca', 'ny', 'tx', 'fl', 'wa', 'ma', 'il', 'ga', 'co', 'va', 'mo'];
 const SHORT_STATE_RE = new RegExp(`\\b(${SHORT_STATE_CODES.join('|')})\\b`, 'i');
 
 const LOCATION_INDICATOR_WORDS = [
@@ -81,7 +81,7 @@ const LOCATION_INDICATOR_WORDS = [
   'city', 'county', 'state', 'province',
 ];
 
-function containsGeoToken(lower: string, original: string): boolean {
+export function containsGeoToken(lower: string, original: string): boolean {
   for (const city of KNOWN_CITIES) {
     if (lower.includes(city)) return true;
   }
