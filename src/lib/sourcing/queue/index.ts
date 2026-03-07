@@ -153,6 +153,8 @@ async function processSourcingJob(
           discoveredPromotedCount: orchestratorResult.discoveredPromotedCount,
           discoveredPromotedInTopCount: orchestratorResult.discoveredPromotedInTopCount,
           unknownLocationPromotedCount: orchestratorResult.unknownLocationPromotedCount,
+          discoveredPromotionRejections: orchestratorResult.discoveredPromotionRejections,
+          discoveredDeferredFromFrontLoad: orchestratorResult.discoveredDeferredFromFrontLoad,
           roleResolutionMetrics: orchestratorResult.roleResolutionMetrics,
           locationResolutionMetrics: orchestratorResult.locationResolutionMetrics,
         }),

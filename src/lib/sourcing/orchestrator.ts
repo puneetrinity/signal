@@ -91,6 +91,16 @@ export interface OrchestratorResult {
   discoveredPromotedCount: number;
   discoveredPromotedInTopCount: number;
   unknownLocationPromotedCount: number;
+  discoveredPromotionRejections: {
+    total: number;
+    locationGate: number;
+    fitGate: number;
+    roleGate: number;
+    confidence: number;
+    phase: number;
+    unknownCap: number;
+  };
+  discoveredDeferredFromFrontLoad: number;
   roleResolutionMetrics: RoleResolutionMetrics | null;
   locationResolutionMetrics: LocationResolutionMetrics | null;
 }
@@ -536,6 +546,11 @@ export async function runSourcingOrchestrator(
   let unknownLocationPromotedCount = 0;
   const unknownLocationPromotedIds = new Set<string>();
   const promotedDiscoveredById = new Map<string, ScoredCandidate>();
+  const discoveredPromotionRejections = {
+    total: 0, locationGate: 0, fitGate: 0, roleGate: 0,
+    confidence: 0, phase: 0, unknownCap: 0,
+  };
+  let discoveredDeferredFromFrontLoad = 0;
   const scoredDiscoveredById = new Map<string, ScoredCandidate>();
   const discoveredRowsById = new Map<string, {
     id: string;
@@ -790,6 +805,8 @@ export async function runSourcingOrchestrator(
             // - fallback phase: allow in discovery_first mode when fit clears a safety floor,
             //   so strong role matches are not blocked only due to missing location hints.
             let provisionalPromotion = false;
+            let provisionalConfidenceRejected = false;
+            let provisionalPhaseRejected = false;
             if (trackDecision?.track !== 'tech' && requirements.roleFamily) {
               const dc = discoveredCandidateByIdMap.get(sc.candidateId);
               const isFromStrictPhase = !!dc && strictQueryIndices.has(dc.queryIndex);
@@ -804,8 +821,10 @@ export async function runSourcingOrchestrator(
               const candidateRoleFamily = candidateResolution.family;
               // Confidence gate: only allow promotion at >= 0.7 (per plan requirement)
               const passesConfidenceGate = candidateResolution.confidence >= 0.7;
-              if (candidateRoleFamily === requirements.roleFamily && passesConfidenceGate) {
-                if (isFromStrictPhase) {
+              if (candidateRoleFamily === requirements.roleFamily) {
+                if (!passesConfidenceGate) {
+                  provisionalConfidenceRejected = true;
+                } else if (isFromStrictPhase) {
                   provisionalPromotion = true;
                 } else if (
                   effectiveStrategy === 'discovery_first' &&
@@ -815,6 +834,8 @@ export async function runSourcingOrchestrator(
                 ) {
                   provisionalPromotion = true;
                   fallbackProvisionalPromotedCount++;
+                } else {
+                  provisionalPhaseRejected = true;
                 }
               }
             }
@@ -847,6 +868,17 @@ export async function runSourcingOrchestrator(
                 unknownLocationPromotedIds.add(sc.candidateId);
               }
               promotedDiscoveredById.set(sc.candidateId, sc);
+            } else {
+              discoveredPromotionRejections.total++;
+              if (!passesLocationGate) discoveredPromotionRejections.locationGate++;
+              if (!passesFitGate) discoveredPromotionRejections.fitGate++;
+              if (!roleGate) discoveredPromotionRejections.roleGate++;
+              if (provisionalConfidenceRejected) discoveredPromotionRejections.confidence++;
+              if (provisionalPhaseRejected) discoveredPromotionRejections.phase++;
+              if (isUnknownLocation && roleGate && sc.fitScore >= fallbackProvisionalMinFitScore &&
+                  unknownLocationPromotedCount >= maxUnknownPromoted) {
+                discoveredPromotionRejections.unknownCap++;
+              }
             }
           }
           discoveredPromotedCount = promotedDiscoveredById.size;
@@ -989,8 +1021,36 @@ export async function runSourcingOrchestrator(
       promotedDiscoveredIdsOrdered
         .filter((id) => promotedDiscoveredById.get(id)?.matchTier === 'strict_location')
   ).slice(0, discoveredReservedInOutput);
-  discoveredPromotedInTopCount = promotedDiscoveredTopIds.length;
-  const discoveredReserveRemaining = Math.max(0, discoveredReservedInOutput - discoveredPromotedInTopCount);
+
+  // Delta-based front-load for tech: only front-load discovered candidates
+  // whose fitScore is within delta of the top pool candidate. Prevents low-fit
+  // discovered from ranking above higher-fit pool with strong location matches.
+  const frontLoadDelta = 0.05;
+  let frontLoadIds = promotedDiscoveredTopIds;
+  const deferredDiscoveredIds: string[] = [];
+  if (trackDecision?.track === 'tech' && effectiveStrategy === 'discovery_first') {
+    const topPoolFit = qualifiedStrict[0]?.fitScore ?? expandedPool[0]?.fitScore ?? null;
+    if (topPoolFit !== null) {
+      const minFitForFrontLoad = topPoolFit - frontLoadDelta;
+      frontLoadIds = [];
+      for (const id of promotedDiscoveredTopIds) {
+        const fit = promotedDiscoveredById.get(id)?.fitScore ?? 0;
+        if (fit >= minFitForFrontLoad) {
+          frontLoadIds.push(id);
+        } else {
+          deferredDiscoveredIds.push(id);
+        }
+      }
+      discoveredDeferredFromFrontLoad = deferredDiscoveredIds.length;
+    }
+  }
+
+  discoveredPromotedInTopCount = frontLoadIds.length;
+  // Tech with delta: reserve minDiscoveredInOutput (not 50%) to let pool fill more slots.
+  const techAdjustedReserve = trackDecision?.track === 'tech' && deferredDiscoveredIds.length > 0
+    ? Math.min(config.minDiscoveredInOutput, discoveredCandidateIds.length)
+    : discoveredReservedInOutput;
+  const discoveredReserveRemaining = Math.max(0, techAdjustedReserve - discoveredPromotedInTopCount);
   const poolFillLimit = Math.max(0, config.targetCount - discoveredReserveRemaining);
 
   const pushDiscoveredCandidate = (candidateId: string): void => {
@@ -1023,7 +1083,8 @@ export async function runSourcingOrchestrator(
   };
 
   // Pass 1: place high-confidence discovered candidates at the top (bounded by reserve).
-  for (const candidateId of promotedDiscoveredTopIds) {
+  // For tech: only competitive discovered (within delta of top pool fit) are front-loaded.
+  for (const candidateId of frontLoadIds) {
     if (assembled.length >= config.targetCount) break;
     pushDiscoveredCandidate(candidateId);
   }
@@ -1046,11 +1107,13 @@ export async function runSourcingOrchestrator(
   }
 
   // Pass 4: Fill remaining slots with discovered candidates.
-  // Promotion-qualified discovered are consumed first, then broader discovered backfill.
-  const promotedTopIdSet = new Set(promotedDiscoveredTopIds);
+  // Deferred front-load candidates first, then other promoted, then unpromoted backfill.
+  const frontLoadIdSet = new Set(frontLoadIds);
+  const deferredIdSet = new Set(deferredDiscoveredIds);
   const discoveredFillOrder = [
-    ...promotedDiscoveredIdsOrdered.filter((candidateId) => !promotedTopIdSet.has(candidateId)),
-    ...discoveredCandidateIds.filter((candidateId) => !promotedDiscoveredById.has(candidateId)),
+    ...deferredDiscoveredIds,
+    ...promotedDiscoveredIdsOrdered.filter((id) => !frontLoadIdSet.has(id) && !deferredIdSet.has(id)),
+    ...discoveredCandidateIds.filter((id) => !promotedDiscoveredById.has(id)),
   ];
   for (const candidateId of discoveredFillOrder) {
     if (assembled.length >= config.targetCount) break;
@@ -1446,6 +1509,8 @@ export async function runSourcingOrchestrator(
     discoveredPromotedCount,
     discoveredPromotedInTopCount,
     unknownLocationPromotedCount,
+    discoveredPromotionRejections,
+    discoveredDeferredFromFrontLoad,
     roleResolutionMetrics,
     locationResolutionMetrics,
   };
