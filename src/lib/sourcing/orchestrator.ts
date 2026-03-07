@@ -823,7 +823,8 @@ export async function runSourcingOrchestrator(
               ? sc.fitBreakdown.roleScore >= 0.7
               : sc.fitBreakdown.roleScore >= 0.6;
             const isUnknownLocation = sc.locationMatchType === 'unknown_location';
-            const maxUnknownPromoted = Math.ceil(config.targetCount * 0.2);
+            const unknownLocationPromotionCapRatio = trackDecision?.track === 'tech' ? 0.1 : 0.2;
+            const maxUnknownPromoted = Math.ceil(config.targetCount * unknownLocationPromotionCapRatio);
             const allowUnknownLocationPromotion =
               hasLocationConstraint &&
               effectiveStrategy === 'discovery_first' &&
