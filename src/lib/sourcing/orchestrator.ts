@@ -677,7 +677,8 @@ export async function runSourcingOrchestrator(
         const discoveredCandidateByIdMap = new Map<string, DiscoveredCandidate>(
           discovery.candidates.map(dc => [dc.candidateId, dc])
         );
-        const fallbackProvisionalMinFitScore = Math.min(config.discoveredPromotionMinFitScore, 0.35);
+        const fallbackProvisionalFitFloor = trackDecision?.track === 'tech' ? 0.35 : 0.30;
+        const fallbackProvisionalMinFitScore = Math.min(config.discoveredPromotionMinFitScore, fallbackProvisionalFitFloor);
         const fallbackProvisionalCap = Math.max(
           config.minDiscoveredInOutput,
           Math.ceil(config.targetCount * 0.2),
