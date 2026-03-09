@@ -221,6 +221,35 @@ async function processRerankJob(
     .sort((a, b) => compareFitWithConfidence(a, b, epsilon));
   const sorted = [...strict, ...expanded];
 
+  // Post-sort: enforce top-K unknown-location sub-cap with guarded swaps
+  const topK = Math.min(20, sorted.length);
+  const unknownCapRatio = track === 'tech' ? 0.1 : 0.15;
+  const top20UnknownCap = Math.max(1, Math.ceil(topK * unknownCapRatio));
+
+  if (sorted.length > topK) {
+    const unknownInTopK = sorted.slice(0, topK)
+      .map((c, i) => ({ c, i }))
+      .filter(({ c }) => c.locationMatchType === 'unknown_location')
+      .sort((a, b) => (a.c.fitScore) - (b.c.fitScore));
+
+    if (unknownInTopK.length > top20UnknownCap) {
+      const replacements = sorted.slice(topK)
+        .map((c, i) => ({ c, i: i + topK }))
+        .filter(({ c }) => c.locationMatchType !== 'unknown_location')
+        .sort((a, b) => (b.c.fitScore) - (a.c.fitScore));
+
+      const excess = unknownInTopK.slice(0, unknownInTopK.length - top20UnknownCap);
+      let ri = 0;
+      for (const demote of excess) {
+        if (ri >= replacements.length) break;
+        const replacement = replacements[ri];
+        if (replacement.c.fitScore < demote.c.fitScore - config.fitScoreEpsilon) break;
+        [sorted[demote.i], sorted[replacement.i]] = [sorted[replacement.i], sorted[demote.i]];
+        ri++;
+      }
+    }
+  }
+
   // 7. Build lookups for DB updates
   const rowByCandidateId = new Map(rows.map(r => [r.candidateId, r]));
   const candidateById = new Map(candidates.map(c => [c.id, c]));

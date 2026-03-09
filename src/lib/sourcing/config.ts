@@ -75,6 +75,9 @@ export interface SourcingConfig {
   locationBoostWeight: number;
   // Sourcing strategy
   sourcingStrategy: 'pool_first' | 'discovery_first' | 'adaptive';
+  // Unknown-location controls
+  unknownLaneFitFloorNonTech: number;
+  unknownLocationPenaltyMultiplier: number;
 }
 
 function parseIntSafe(value: string | undefined, fallback: number): number {
@@ -190,5 +193,8 @@ export function getSourcingConfig(): SourcingConfig {
       if (raw === 'discovery_first') return 'discovery_first' as const;
       return 'adaptive' as const;
     })(),
+    // Unknown-location controls
+    unknownLaneFitFloorNonTech: clamp(parseFloatSafe(process.env.SOURCE_UNKNOWN_LANE_FIT_FLOOR_NON_TECH, 0.40), 0, 1),
+    unknownLocationPenaltyMultiplier: clamp(parseFloatSafe(process.env.SOURCE_UNKNOWN_LOCATION_PENALTY_MULTIPLIER, 0.85), 0.5, 1),
   };
 }

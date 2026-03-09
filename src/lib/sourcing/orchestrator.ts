@@ -102,6 +102,8 @@ export interface OrchestratorResult {
   };
   discoveredDeferredFromFrontLoad: number;
   unknownLocationAssemblyCapRejected: number;
+  unknownLocationPenaltyApplied: number;
+  unknownLocationTop20Demoted: number;
   roleResolutionMetrics: RoleResolutionMetrics | null;
   locationResolutionMetrics: LocationResolutionMetrics | null;
 }
@@ -545,6 +547,7 @@ export async function runSourcingOrchestrator(
   let discoveredPromotedCount = 0;
   let discoveredPromotedInTopCount = 0;
   let unknownLocationPromotedCount = 0;
+  let unknownLocationPenaltyApplied = 0;
   const unknownLocationPromotedIds = new Set<string>();
   const promotedDiscoveredById = new Map<string, ScoredCandidate>();
   const discoveredPromotionRejections = {
@@ -797,6 +800,22 @@ export async function runSourcingOrchestrator(
             preResolvedRoles: discoveredPreResolvedRoles,
             preResolvedLocations: discoveredPreResolvedLocations,
           });
+
+          // Penalize discovered unknown_location candidates that don't clear quality thresholds
+          for (const sc of scoredDiscovered) {
+            if (
+              sc.locationMatchType === 'unknown_location' &&
+              !(sc.fitScore >= 0.50 && sc.fitBreakdown.roleScore >= 0.7)
+            ) {
+              sc.fitScore *= config.unknownLocationPenaltyMultiplier;
+              unknownLocationPenaltyApplied++;
+            }
+          }
+          // Re-sort after penalty so promotion/front-load ordering reflects demotion.
+          if (unknownLocationPenaltyApplied > 0) {
+            scoredDiscovered.sort((a, b) => compareFitWithConfidence(a, b, config.fitScoreEpsilon));
+          }
+
           for (const sc of scoredDiscovered) {
             scoredDiscoveredById.set(sc.candidateId, sc);
 
@@ -842,18 +861,19 @@ export async function runSourcingOrchestrator(
               }
             }
 
-            const roleGate = trackDecision?.track === 'tech'
-              ? sc.fitBreakdown.roleScore >= 0.7
-              : sc.fitBreakdown.roleScore >= 0.6;
+            const roleGate = sc.fitBreakdown.roleScore >= 0.7;
             const isUnknownLocation = sc.locationMatchType === 'unknown_location';
-            const unknownLocationPromotionCapRatio = trackDecision?.track === 'tech' ? 0.1 : 0.2;
+            const unknownLocationPromotionCapRatio = trackDecision?.track === 'tech' ? 0.1 : 0.15;
             const maxUnknownPromoted = Math.ceil(config.targetCount * unknownLocationPromotionCapRatio);
+            const unknownLaneFitFloor = trackDecision?.track === 'tech'
+              ? fallbackProvisionalMinFitScore
+              : Math.max(fallbackProvisionalMinFitScore, config.unknownLaneFitFloorNonTech);
             const allowUnknownLocationPromotion =
               hasLocationConstraint &&
               effectiveStrategy === 'discovery_first' &&
               isUnknownLocation &&
               roleGate &&
-              sc.fitScore >= fallbackProvisionalMinFitScore &&
+              sc.fitScore >= unknownLaneFitFloor &&
               unknownLocationPromotedCount < maxUnknownPromoted;
 
             const passesLocationGate = !hasLocationConstraint || STRONG_LOCATION_TYPES.has(sc.locationMatchType);
@@ -877,7 +897,7 @@ export async function runSourcingOrchestrator(
               if (!roleGate) discoveredPromotionRejections.roleGate++;
               if (provisionalConfidenceRejected) discoveredPromotionRejections.confidence++;
               if (provisionalPhaseRejected) discoveredPromotionRejections.phase++;
-              if (isUnknownLocation && roleGate && sc.fitScore >= fallbackProvisionalMinFitScore &&
+              if (isUnknownLocation && roleGate && sc.fitScore >= unknownLaneFitFloor &&
                   unknownLocationPromotedCount >= maxUnknownPromoted) {
                 discoveredPromotionRejections.unknownCap++;
               }
@@ -920,7 +940,7 @@ export async function runSourcingOrchestrator(
   };
 
   // Hard cap: limit unknown-location candidates in final assembly (pool + discovered combined)
-  const unknownLocationAssemblyCapRatio = trackDecision?.track === 'tech' ? 0.1 : 0.2;
+  const unknownLocationAssemblyCapRatio = trackDecision?.track === 'tech' ? 0.1 : 0.15;
   const maxUnknownLocationInAssembly = Math.ceil(config.targetCount * unknownLocationAssemblyCapRatio);
   let unknownLocationAssembledCount = 0;
   let unknownLocationAssemblyCapRejected = 0;
@@ -1237,6 +1257,47 @@ export async function runSourcingOrchestrator(
     }
   }
 
+  // Post-assembly: enforce top-20 unknown-location sub-cap with guarded swaps
+  const top20Size = Math.min(20, assembled.length);
+  const unknownCapRatio = trackDecision?.track === 'tech' ? 0.1 : 0.15;
+  const top20UnknownCap = Math.max(1, Math.ceil(top20Size * unknownCapRatio));
+  let unknownLocationTop20Demoted = 0;
+
+  if (assembled.length > top20Size) {
+    // Find unknown_location in top-20, sorted by fitScore ascending (weakest first for demotion)
+    const unknownInTop20 = assembled.slice(0, top20Size)
+      .map((c, i) => ({ c, i }))
+      .filter(({ c }) => c.locationMatchType === 'unknown_location')
+      .sort((a, b) => (a.c.fitScore ?? 0) - (b.c.fitScore ?? 0));
+
+    if (unknownInTop20.length > top20UnknownCap) {
+      // Find non-unknown replacements below top-20, sorted by fitScore descending (strongest first)
+      const replacements = assembled.slice(top20Size)
+        .map((c, i) => ({ c, i: i + top20Size }))
+        .filter(({ c }) => c.locationMatchType !== 'unknown_location')
+        .sort((a, b) => (b.c.fitScore ?? 0) - (a.c.fitScore ?? 0));
+
+      const excess = unknownInTop20.slice(0, unknownInTop20.length - top20UnknownCap);
+      let ri = 0;
+      for (const demote of excess) {
+        if (ri >= replacements.length) break;
+        const replacement = replacements[ri];
+        // Guarded: only swap if replacement is not much worse
+        if ((replacement.c.fitScore ?? 0) < (demote.c.fitScore ?? 0) - config.fitScoreEpsilon) break;
+        [assembled[demote.i], assembled[replacement.i]] = [assembled[replacement.i], assembled[demote.i]];
+        unknownLocationTop20Demoted++;
+        ri++;
+      }
+
+      // Re-number ranks after swaps
+      if (unknownLocationTop20Demoted > 0) {
+        for (let i = 0; i < assembled.length; i++) {
+          assembled[i].rank = i + 1;
+        }
+      }
+    }
+  }
+
   const expandedCount = assembled.length - strictMatchedCount;
 
   // 5. Persist: deleteMany + createMany for retry idempotency
@@ -1530,6 +1591,8 @@ export async function runSourcingOrchestrator(
     discoveredPromotionRejections,
     discoveredDeferredFromFrontLoad,
     unknownLocationAssemblyCapRejected,
+    unknownLocationPenaltyApplied,
+    unknownLocationTop20Demoted,
     roleResolutionMetrics,
     locationResolutionMetrics,
   };
