@@ -97,7 +97,8 @@ export async function enqueueRerankForCandidate(
   const enqueuedRequestIds: string[] = [];
 
   for (const row of rows) {
-    const jobId = `rerank:${row.sourcingRequestId}`;
+    // BullMQ custom job IDs cannot contain ":".
+    const jobId = `rerank-${row.sourcingRequestId}`;
 
     // Safe dedup: check existing job state, skip if already pending.
     // getJob + add is not atomic — wrap add in try/catch to handle

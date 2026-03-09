@@ -38,8 +38,7 @@ const FALLBACK_KINDS = ['other_tech', 'other_non_tech', 'unknown'] as const;
 const RoleClassificationSchema = z.object({
   family: z.enum([...ROLE_FAMILIES_LIST, ...FALLBACK_KINDS]),
   confidence: z.number().min(0).max(1),
-  reasons: z.array(z.string()).catch([]).transform(arr => arr.slice(0, 3)),
-});
+}).passthrough();
 
 export interface GroqRoleResult {
   family: string;
@@ -73,6 +72,8 @@ RULES:
 - If the role is clearly non-tech but doesn't fit the 6 non-tech families, use other_non_tech.
 - Only use unknown if you truly cannot determine the role.
 - Set confidence 0.0-1.0 reflecting how certain you are.
+- Return JSON with ONLY: family, confidence.
+- Do not include reasons or any additional keys.
 
 PERSON:`;
 
@@ -209,7 +210,7 @@ async function callGroq(
     family: isFallback ? '' : familyStr,
     fallbackKind: isFallback ? familyStr : null,
     confidence: object.confidence,
-    reasons: object.reasons,
+    reasons: [],
     modelName,
     latencyMs: Date.now() - start,
     cached: false,
