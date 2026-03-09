@@ -6,7 +6,7 @@ import { createLogger } from '@/lib/logger';
 import { buildJobRequirements, type SourcingJobContextInput } from './jd-digest';
 import { rankCandidates } from './ranking';
 import { discoverCandidates, type DiscoveredCandidate, type DiscoveryTelemetry } from './discovery';
-import { getSourcingConfig } from './config';
+import { getLocationBoostWeight, getSourcingConfig } from './config';
 import { createEnrichmentSession } from '@/lib/enrichment/queue';
 import { isMeaningfulLocation, isNoisyLocationHint, canonicalizeLocation, extractPrimaryCity, compareFitWithConfidence, STRONG_LOCATION_TYPES } from './ranking';
 import { getRecentlyExposedCandidateIds } from './novelty';
@@ -106,6 +106,7 @@ export interface OrchestratorResult {
   unknownLocationPoolAssembledCount: number;
   unknownLocationDiscoveredAssembledCount: number;
   unknownLocationPenaltyApplied: number;
+  unknownLocationPoolPenaltyApplied: number;
   unknownLocationTop20Demoted: number;
   roleResolutionMetrics: RoleResolutionMetrics | null;
   locationResolutionMetrics: LocationResolutionMetrics | null;
@@ -435,7 +436,7 @@ export async function runSourcingOrchestrator(
 
   const scoredPoolRaw = rankCandidates(poolForRanking, requirements, {
     fitScoreEpsilon: config.fitScoreEpsilon,
-    locationBoostWeight: config.locationBoostWeight,
+    locationBoostWeight: getLocationBoostWeight(config, trackDecision?.track),
     track: trackDecision?.track,
     preResolvedRoles: poolPreResolvedRoles,
     preResolvedLocations: poolPreResolvedLocations,
@@ -444,8 +445,23 @@ export async function runSourcingOrchestrator(
   let countryGuardSerpLocaleSkippedCount = 0;
   const countryGuardEscapeCounts = { no_location: 0, country_match: 0, city_only_unknown_country: 0 };
   let scoredPool = scoredPoolRaw;
+  let unknownLocationPoolPenaltyApplied = 0;
+  if (trackDecision?.track !== 'non_tech') {
+    for (const sc of scoredPool) {
+      if (
+        sc.locationMatchType === 'unknown_location' &&
+        !(sc.fitScore >= 0.60 && sc.fitBreakdown.roleScore >= 0.70)
+      ) {
+        sc.fitScore *= config.unknownLocationPenaltyMultiplier;
+        unknownLocationPoolPenaltyApplied++;
+      }
+    }
+    if (unknownLocationPoolPenaltyApplied > 0) {
+      scoredPool.sort((a, b) => compareFitWithConfidence(a, b, config.fitScoreEpsilon));
+    }
+  }
   if (requestedCountryCode) {
-    scoredPool = scoredPoolRaw.filter((sc) => {
+    scoredPool = scoredPool.filter((sc) => {
       const poolCandidate = poolForRankingById.get(sc.candidateId);
       const poolRow = poolById.get(sc.candidateId);
       const candidateLocation = poolCandidate?.snapshot?.location ?? poolCandidate?.locationHint ?? null;
@@ -798,7 +814,7 @@ export async function runSourcingOrchestrator(
 
           const scoredDiscovered = rankCandidates(discoveredForRanking, requirements, {
             fitScoreEpsilon: config.fitScoreEpsilon,
-            locationBoostWeight: config.locationBoostWeight,
+            locationBoostWeight: getLocationBoostWeight(config, trackDecision?.track),
             track: trackDecision?.track,
             preResolvedRoles: discoveredPreResolvedRoles,
             preResolvedLocations: discoveredPreResolvedLocations,
@@ -1642,6 +1658,7 @@ export async function runSourcingOrchestrator(
     unknownLocationPoolAssembledCount,
     unknownLocationDiscoveredAssembledCount,
     unknownLocationPenaltyApplied,
+    unknownLocationPoolPenaltyApplied,
     unknownLocationTop20Demoted,
     roleResolutionMetrics,
     locationResolutionMetrics,

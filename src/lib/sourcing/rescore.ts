@@ -3,7 +3,7 @@ import { toJsonValue } from '@/lib/prisma/json';
 import { createLogger } from '@/lib/logger';
 import { buildJobRequirements, type SourcingJobContextInput } from './jd-digest';
 import { rankCandidates, type CandidateForRanking } from './ranking';
-import { getSourcingConfig } from './config';
+import { getLocationBoostWeight, getSourcingConfig } from './config';
 import { jobTrackToDbFilter, type JobTrack } from './types';
 
 const log = createLogger('SourcingRescore');
@@ -160,7 +160,7 @@ export async function rescoreCompletedSourcingRowsForCandidate(
     const scored = rankCandidates([rankingCandidate], requirements, {
       track,
       fitScoreEpsilon: rescoreConfig.fitScoreEpsilon,
-      locationBoostWeight: rescoreConfig.locationBoostWeight,
+      locationBoostWeight: getLocationBoostWeight(rescoreConfig, track),
     })[0];
     if (!scored) continue;
 
@@ -185,4 +185,3 @@ export async function rescoreCompletedSourcingRowsForCandidate(
 
   return updated;
 }
-

@@ -13,7 +13,7 @@ import IORedis from 'ioredis';
 import { prisma } from '@/lib/prisma';
 import { toJsonValue } from '@/lib/prisma/json';
 import { createLogger } from '@/lib/logger';
-import { getSourcingConfig } from './config';
+import { getLocationBoostWeight, getSourcingConfig } from './config';
 import { buildJobRequirements, type SourcingJobContextInput } from './jd-digest';
 import { rankCandidates, compareFitWithConfidence } from './ranking';
 import { toRankingCandidate, readTrackFromDiagnostics, isValidJobContext } from './rescore';
@@ -208,9 +208,25 @@ async function processRerankJob(
   const config = getSourcingConfig();
   const scored = rankCandidates(rankingCandidates, requirements, {
     fitScoreEpsilon: config.fitScoreEpsilon,
-    locationBoostWeight: config.locationBoostWeight,
+    locationBoostWeight: getLocationBoostWeight(config, track),
     track,
   });
+
+  if (track !== 'non_tech') {
+    let unknownPenaltyApplied = 0;
+    for (const sc of scored) {
+      if (
+        sc.locationMatchType === 'unknown_location' &&
+        !(sc.fitScore >= 0.60 && sc.fitBreakdown.roleScore >= 0.70)
+      ) {
+        sc.fitScore *= config.unknownLocationPenaltyMultiplier;
+        unknownPenaltyApplied++;
+      }
+    }
+    if (unknownPenaltyApplied > 0) {
+      scored.sort((a, b) => compareFitWithConfidence(a, b, config.fitScoreEpsilon));
+    }
+  }
 
   // 6. Sort: strict first, then expanded. Within each: epsilon comparator.
   const epsilon = config.fitScoreEpsilon;

@@ -160,6 +160,7 @@ async function processSourcingJob(
           unknownLocationPoolAssembledCount: orchestratorResult.unknownLocationPoolAssembledCount,
           unknownLocationDiscoveredAssembledCount: orchestratorResult.unknownLocationDiscoveredAssembledCount,
           unknownLocationPenaltyApplied: orchestratorResult.unknownLocationPenaltyApplied,
+          unknownLocationPoolPenaltyApplied: orchestratorResult.unknownLocationPoolPenaltyApplied,
           unknownLocationTop20Demoted: orchestratorResult.unknownLocationTop20Demoted,
           roleResolutionMetrics: orchestratorResult.roleResolutionMetrics,
           locationResolutionMetrics: orchestratorResult.locationResolutionMetrics,

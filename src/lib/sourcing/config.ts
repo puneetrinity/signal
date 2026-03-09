@@ -71,8 +71,10 @@ export interface SourcingConfig {
   // Post-enrichment rerank
   rerankAfterEnrichment: boolean;
   rerankDelayMs: number;
-  // Location soft boost
-  locationBoostWeight: number;
+  // Location soft boost (track-specific)
+  locationBoostWeightTech: number;
+  locationBoostWeightBlended: number;
+  locationBoostWeightNonTech: number;
   // Sourcing strategy
   sourcingStrategy: 'pool_first' | 'discovery_first' | 'adaptive';
   // Unknown-location controls
@@ -107,6 +109,12 @@ export function getSourcingConfig(): SourcingConfig {
   const rawQueryMode = (process.env.SOURCING_QUERY_GEN_MODE || 'deterministic').toLowerCase();
   const queryGenMode: SourcingConfig['queryGenMode'] =
     rawQueryMode === 'hybrid' ? 'hybrid' : 'deterministic';
+
+  const globalLocationBoostWeight = clamp(
+    parseFloatSafe(process.env.SOURCE_LOCATION_BOOST_WEIGHT, 0),
+    0,
+    0.20,
+  );
 
   return {
     targetCount: parseIntSafe(process.env.TARGET_COUNT, 100),
@@ -185,8 +193,22 @@ export function getSourcingConfig(): SourcingConfig {
     // Post-enrichment rerank
     rerankAfterEnrichment: process.env.SOURCE_RERANK_AFTER_ENRICHMENT !== 'false',
     rerankDelayMs: clamp(parseIntSafe(process.env.SOURCE_RERANK_DELAY_MS, 90_000), 10_000, 300_000),
-    // Location soft boost
-    locationBoostWeight: clamp(parseFloatSafe(process.env.SOURCE_LOCATION_BOOST_WEIGHT, 0), 0, 0.15),
+    // Location soft boost (track-specific; fallback to global env for backward compatibility)
+    locationBoostWeightTech: clamp(
+      parseFloatSafe(process.env.SOURCE_LOCATION_BOOST_WEIGHT_TECH, globalLocationBoostWeight || 0.10),
+      0,
+      0.20,
+    ),
+    locationBoostWeightBlended: clamp(
+      parseFloatSafe(process.env.SOURCE_LOCATION_BOOST_WEIGHT_BLENDED, globalLocationBoostWeight || 0.08),
+      0,
+      0.20,
+    ),
+    locationBoostWeightNonTech: clamp(
+      parseFloatSafe(process.env.SOURCE_LOCATION_BOOST_WEIGHT_NON_TECH, globalLocationBoostWeight),
+      0,
+      0.15,
+    ),
     // Sourcing strategy: pool_first | discovery_first | adaptive (default)
     sourcingStrategy: (() => {
       const raw = (process.env.SOURCE_STRATEGY || 'adaptive').toLowerCase();
@@ -199,4 +221,17 @@ export function getSourcingConfig(): SourcingConfig {
     unknownLocationPenaltyMultiplier: clamp(parseFloatSafe(process.env.SOURCE_UNKNOWN_LOCATION_PENALTY_MULTIPLIER, 0.85), 0.5, 1),
     unknownAssemblyDiscoveredReserveTech: parseNonNegativeIntSafe(process.env.SOURCE_UNKNOWN_ASSEMBLY_DISCOVERED_RESERVE_TECH, 2),
   };
+}
+
+export function getLocationBoostWeight(config: SourcingConfig, track?: string): number {
+  switch (track) {
+    case 'tech':
+      return config.locationBoostWeightTech;
+    case 'blended':
+      return config.locationBoostWeightBlended;
+    case 'non_tech':
+      return config.locationBoostWeightNonTech;
+    default:
+      return config.locationBoostWeightTech;
+  }
 }
