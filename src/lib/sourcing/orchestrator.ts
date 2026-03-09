@@ -101,6 +101,7 @@ export interface OrchestratorResult {
     unknownCap: number;
   };
   discoveredDeferredFromFrontLoad: number;
+  unknownLocationAssemblyCapRejected: number;
   roleResolutionMetrics: RoleResolutionMetrics | null;
   locationResolutionMetrics: LocationResolutionMetrics | null;
 }
@@ -918,12 +919,26 @@ export async function runSourcingOrchestrator(
     return 'low';
   };
 
+  // Hard cap: limit unknown-location candidates in final assembly (pool + discovered combined)
+  const unknownLocationAssemblyCapRatio = trackDecision?.track === 'tech' ? 0.1 : 0.2;
+  const maxUnknownLocationInAssembly = Math.ceil(config.targetCount * unknownLocationAssemblyCapRatio);
+  let unknownLocationAssembledCount = 0;
+  let unknownLocationAssemblyCapRejected = 0;
+
   const pushCandidate = (candidate: Omit<AssembledCandidate, 'rank' | 'dataConfidence'>): boolean => {
     if (assembled.length >= config.targetCount) return false;
     if (assembledIds.has(candidate.candidateId)) return false;
+    // Enforce hard unknown-location cap across all source types
+    if (candidate.locationMatchType === 'unknown_location' && unknownLocationAssembledCount >= maxUnknownLocationInAssembly) {
+      unknownLocationAssemblyCapRejected++;
+      return false;
+    }
     const dataConfidence = computeDataConfidence(candidate);
     assembled.push({ ...candidate, dataConfidence, rank: rank++ });
     assembledIds.add(candidate.candidateId);
+    if (candidate.locationMatchType === 'unknown_location') {
+      unknownLocationAssembledCount++;
+    }
     return true;
   };
 
@@ -1191,6 +1206,8 @@ export async function runSourcingOrchestrator(
           assembled.push(a);
         }
         rank = newRank;
+        // Recalculate unknown-location count after novelty suppression
+        unknownLocationAssembledCount = kept.filter((a) => a.locationMatchType === 'unknown_location').length;
 
         // Refill from expanded pool and discovered candidates to reach targetCount
         for (const sc of expandedPool) {
@@ -1512,6 +1529,7 @@ export async function runSourcingOrchestrator(
     unknownLocationPromotedCount,
     discoveredPromotionRejections,
     discoveredDeferredFromFrontLoad,
+    unknownLocationAssemblyCapRejected,
     roleResolutionMetrics,
     locationResolutionMetrics,
   };
