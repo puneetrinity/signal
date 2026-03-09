@@ -78,6 +78,7 @@ export interface SourcingConfig {
   // Unknown-location controls
   unknownLaneFitFloorNonTech: number;
   unknownLocationPenaltyMultiplier: number;
+  unknownAssemblyDiscoveredReserveTech: number;
 }
 
 function parseIntSafe(value: string | undefined, fallback: number): number {
@@ -196,5 +197,6 @@ export function getSourcingConfig(): SourcingConfig {
     // Unknown-location controls
     unknownLaneFitFloorNonTech: clamp(parseFloatSafe(process.env.SOURCE_UNKNOWN_LANE_FIT_FLOOR_NON_TECH, 0.40), 0, 1),
     unknownLocationPenaltyMultiplier: clamp(parseFloatSafe(process.env.SOURCE_UNKNOWN_LOCATION_PENALTY_MULTIPLIER, 0.85), 0.5, 1),
+    unknownAssemblyDiscoveredReserveTech: parseNonNegativeIntSafe(process.env.SOURCE_UNKNOWN_ASSEMBLY_DISCOVERED_RESERVE_TECH, 2),
   };
 }

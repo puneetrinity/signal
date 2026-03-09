@@ -89,11 +89,14 @@ export async function deliverCallback(
             callbackAttempts: attempt + 1,
           },
         });
-        log.info({ requestId, attempt: attempt + 1 }, 'Callback delivered');
+        log.info({ requestId, callbackUrl, attempt: attempt + 1 }, 'Callback delivered');
         return true;
       }
 
-      const errorText = `HTTP ${res.status}: ${await res.text().catch(() => '')}`;
+      const responseText = await res.text().catch(() => '');
+      const errorText = `HTTP ${res.status}: ${responseText}`;
+      const nonRetryableUnknownRequest =
+        res.status === 404 && /unknown request id/i.test(responseText);
       await prisma.jobSourcingRequest.update({
         where: { id: requestId },
         data: {
@@ -101,7 +104,11 @@ export async function deliverCallback(
           lastCallbackError: errorText,
         },
       });
-      log.warn({ requestId, attempt: attempt + 1, error: errorText }, 'Callback attempt failed');
+      log.warn({ requestId, callbackUrl, attempt: attempt + 1, error: errorText }, 'Callback attempt failed');
+      if (nonRetryableUnknownRequest) {
+        log.warn({ requestId, callbackUrl }, 'Stopping callback retries due to non-retryable unknown request ID');
+        break;
+      }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Unknown error';
       await prisma.jobSourcingRequest.update({
@@ -111,7 +118,7 @@ export async function deliverCallback(
           lastCallbackError: errorMsg,
         },
       });
-      log.warn({ requestId, attempt: attempt + 1, error: errorMsg }, 'Callback attempt error');
+      log.warn({ requestId, callbackUrl, attempt: attempt + 1, error: errorMsg }, 'Callback attempt error');
     }
   }
 

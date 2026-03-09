@@ -102,6 +102,9 @@ export interface OrchestratorResult {
   };
   discoveredDeferredFromFrontLoad: number;
   unknownLocationAssemblyCapRejected: number;
+  unknownLocationPoolCapRejected: number;
+  unknownLocationPoolAssembledCount: number;
+  unknownLocationDiscoveredAssembledCount: number;
   unknownLocationPenaltyApplied: number;
   unknownLocationTop20Demoted: number;
   roleResolutionMetrics: RoleResolutionMetrics | null;
@@ -940,24 +943,48 @@ export async function runSourcingOrchestrator(
   };
 
   // Hard cap: limit unknown-location candidates in final assembly (pool + discovered combined)
+  const isTechTrack = trackDecision?.track === 'tech';
   const unknownLocationAssemblyCapRatio = trackDecision?.track === 'tech' ? 0.1 : 0.15;
   const maxUnknownLocationInAssembly = Math.ceil(config.targetCount * unknownLocationAssemblyCapRatio);
+  const reservedDiscoveredUnknownForTech = isTechTrack
+    ? Math.min(config.unknownAssemblyDiscoveredReserveTech, maxUnknownLocationInAssembly)
+    : 0;
+  const maxPoolUnknownInAssembly = isTechTrack
+    ? Math.max(0, maxUnknownLocationInAssembly - reservedDiscoveredUnknownForTech)
+    : maxUnknownLocationInAssembly;
   let unknownLocationAssembledCount = 0;
+  let unknownLocationPoolAssembledCount = 0;
+  let unknownLocationDiscoveredAssembledCount = 0;
   let unknownLocationAssemblyCapRejected = 0;
+  let unknownLocationPoolCapRejected = 0;
 
   const pushCandidate = (candidate: Omit<AssembledCandidate, 'rank' | 'dataConfidence'>): boolean => {
     if (assembled.length >= config.targetCount) return false;
     if (assembledIds.has(candidate.candidateId)) return false;
     // Enforce hard unknown-location cap across all source types
-    if (candidate.locationMatchType === 'unknown_location' && unknownLocationAssembledCount >= maxUnknownLocationInAssembly) {
-      unknownLocationAssemblyCapRejected++;
-      return false;
+    if (candidate.locationMatchType === 'unknown_location') {
+      if (unknownLocationAssembledCount >= maxUnknownLocationInAssembly) {
+        unknownLocationAssemblyCapRejected++;
+        return false;
+      }
+      // Tech-specific source-aware split: reserve a portion of unknown slots for discovered
+      // so pool unknowns cannot consume the entire unknown budget.
+      const isPoolCandidate = candidate.sourceType === 'pool' || candidate.sourceType === 'pool_enriched';
+      if (isTechTrack && isPoolCandidate && unknownLocationPoolAssembledCount >= maxPoolUnknownInAssembly) {
+        unknownLocationPoolCapRejected++;
+        return false;
+      }
     }
     const dataConfidence = computeDataConfidence(candidate);
     assembled.push({ ...candidate, dataConfidence, rank: rank++ });
     assembledIds.add(candidate.candidateId);
     if (candidate.locationMatchType === 'unknown_location') {
       unknownLocationAssembledCount++;
+      if (candidate.sourceType === 'discovered') {
+        unknownLocationDiscoveredAssembledCount++;
+      } else {
+        unknownLocationPoolAssembledCount++;
+      }
     }
     return true;
   };
@@ -1228,6 +1255,12 @@ export async function runSourcingOrchestrator(
         rank = newRank;
         // Recalculate unknown-location count after novelty suppression
         unknownLocationAssembledCount = kept.filter((a) => a.locationMatchType === 'unknown_location').length;
+        unknownLocationPoolAssembledCount = kept.filter((a) =>
+          a.locationMatchType === 'unknown_location' && a.sourceType !== 'discovered',
+        ).length;
+        unknownLocationDiscoveredAssembledCount = kept.filter((a) =>
+          a.locationMatchType === 'unknown_location' && a.sourceType === 'discovered',
+        ).length;
 
         // Refill from expanded pool and discovered candidates to reach targetCount
         for (const sc of expandedPool) {
@@ -1403,6 +1436,11 @@ export async function runSourcingOrchestrator(
     if (candidate.sourceType === 'discovered' && candidate.locationMatchType === 'unknown_location') {
       adjustment -= 5;
     }
+    // Pool + unknown_location: medium boost to improve location coverage in the reusable pool.
+    if ((candidate.sourceType === 'pool' || candidate.sourceType === 'pool_enriched') &&
+        candidate.locationMatchType === 'unknown_location') {
+      adjustment -= 3;
+    }
 
     return Math.max(1, Math.min(99, basePriority + adjustment));
   };
@@ -1453,8 +1491,17 @@ export async function runSourcingOrchestrator(
 
   // 7. Stale-refresh queueing (separate budget)
   let staleRefreshQueued = 0;
+  const scoredPoolById = new Map(scoredPool.map((sc) => [sc.candidateId, sc]));
   const staleFromPool = poolForRanking
     .filter((r) => r.snapshot?.staleAfter && r.snapshot.staleAfter < now && !enqueuedIds.has(r.id) && !alreadyActiveIds.has(r.id))
+    .sort((a, b) => {
+      const aUnknown = scoredPoolById.get(a.id)?.locationMatchType === 'unknown_location' ? 1 : 0;
+      const bUnknown = scoredPoolById.get(b.id)?.locationMatchType === 'unknown_location' ? 1 : 0;
+      if (aUnknown !== bUnknown) return bUnknown - aUnknown;
+      const aFit = scoredPoolById.get(a.id)?.fitScore ?? 0;
+      const bFit = scoredPoolById.get(b.id)?.fitScore ?? 0;
+      return bFit - aFit;
+    })
     .slice(0, config.staleRefreshMaxPerRun);
 
   for (const r of staleFromPool) {
@@ -1591,6 +1638,9 @@ export async function runSourcingOrchestrator(
     discoveredPromotionRejections,
     discoveredDeferredFromFrontLoad,
     unknownLocationAssemblyCapRejected,
+    unknownLocationPoolCapRejected,
+    unknownLocationPoolAssembledCount,
+    unknownLocationDiscoveredAssembledCount,
     unknownLocationPenaltyApplied,
     unknownLocationTop20Demoted,
     roleResolutionMetrics,

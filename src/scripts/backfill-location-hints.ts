@@ -5,7 +5,13 @@
  * Uses shouldReplaceLocationHint to ensure we only write when the extracted
  * value is higher quality than any existing hint.
  *
- * Run: DATABASE_URL=<url> npx tsx src/scripts/backfill-location-hints.ts [--dry-run]
+ * Run:
+ *   DATABASE_URL=<url> npx tsx src/scripts/backfill-location-hints.ts [--dry-run] [--replace-weak]
+ *
+ * Flags:
+ *   --dry-run       Print proposed updates only.
+ *   --replace-weak  Also reprocess existing low-quality hints (quality < 2),
+ *                   not just null/empty locationHint.
  */
 
 import { prisma } from '@/lib/prisma';
@@ -14,9 +20,12 @@ import { normalizeHint, shouldReplaceLocationHint, locationHintQualityScore } fr
 
 const BATCH_SIZE = 500;
 const DRY_RUN = process.argv.includes('--dry-run');
+const REPLACE_WEAK = process.argv.includes('--replace-weak');
 
 async function main() {
-  console.log(`[backfill] Starting location hint backfill${DRY_RUN ? ' (DRY RUN)' : ''}...`);
+  console.log(
+    `[backfill] Starting location hint backfill${DRY_RUN ? ' (DRY RUN)' : ''}${REPLACE_WEAK ? ' (REPLACE WEAK)' : ''}...`,
+  );
 
   let cursor: string | undefined;
   let scanned = 0;
@@ -26,11 +35,15 @@ async function main() {
   while (true) {
     const candidates = await prisma.candidate.findMany({
       where: {
-        OR: [
-          { locationHint: null },
-          { locationHint: '' },
-        ],
         searchSnippet: { not: null },
+        ...(!REPLACE_WEAK
+          ? {
+              OR: [
+                { locationHint: null },
+                { locationHint: '' },
+              ],
+            }
+          : {}),
       },
       select: {
         id: true,
@@ -47,6 +60,15 @@ async function main() {
 
     for (const c of candidates) {
       scanned++;
+      const existingNormalized = normalizeHint(c.locationHint ?? undefined);
+      const existingQuality = locationHintQualityScore(existingNormalized);
+
+      // In replace-weak mode, skip medium/high-quality existing hints.
+      if (REPLACE_WEAK && existingQuality >= 2) {
+        skipped++;
+        continue;
+      }
+
       const title = c.searchTitle ?? '';
       const snippet = c.searchSnippet ?? '';
 
