@@ -1373,8 +1373,11 @@ export async function runSourcingOrchestrator(
       cap: config.techTop20RoleCap,
       epsilon: config.fitScoreEpsilon,
       getFitScore: getFitScoreAssembled,
-      // Prefer replacements that also meet skill floor to avoid guard conflicts
+      // Prefer replacements that meet skill floor AND are non-unknown to avoid guard conflicts
       preferReplacement: (a, b) => {
+        const aLocOk = a.locationMatchType !== 'unknown_location' ? 1 : 0;
+        const bLocOk = b.locationMatchType !== 'unknown_location' ? 1 : 0;
+        if (bLocOk !== aLocOk) return bLocOk - aLocOk;
         const aSkillOk = (a.fitBreakdown?.skillScore ?? 0) >= config.techTop20SkillMin ? 1 : 0;
         const bSkillOk = (b.fitBreakdown?.skillScore ?? 0) >= config.techTop20SkillMin ? 1 : 0;
         return bSkillOk - aSkillOk;
@@ -1397,6 +1400,12 @@ export async function runSourcingOrchestrator(
       cap: 0,
       epsilon: config.fitScoreEpsilon,
       getFitScore: getFitScoreAssembled,
+      // Prefer non-unknown replacements to avoid leaking unknowns into top-20
+      preferReplacement: (a, b) => {
+        const aLocOk = a.locationMatchType !== 'unknown_location' ? 1 : 0;
+        const bLocOk = b.locationMatchType !== 'unknown_location' ? 1 : 0;
+        return bLocOk - aLocOk;
+      },
     });
     if (skillFloorResult.demoted > 0) renumberRanks();
   }

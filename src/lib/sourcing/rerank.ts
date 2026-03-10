@@ -270,6 +270,9 @@ async function processRerankJob(
       epsilon: config.fitScoreEpsilon,
       getFitScore: getFitScoreRerank,
       preferReplacement: (a, b) => {
+        const aLocOk = a.locationMatchType !== 'unknown_location' ? 1 : 0;
+        const bLocOk = b.locationMatchType !== 'unknown_location' ? 1 : 0;
+        if (bLocOk !== aLocOk) return bLocOk - aLocOk;
         const aSkillOk = a.fitBreakdown.skillScore >= config.techTop20SkillMin ? 1 : 0;
         const bSkillOk = b.fitBreakdown.skillScore >= config.techTop20SkillMin ? 1 : 0;
         return bSkillOk - aSkillOk;
@@ -288,6 +291,11 @@ async function processRerankJob(
       cap: 0,
       epsilon: config.fitScoreEpsilon,
       getFitScore: getFitScoreRerank,
+      preferReplacement: (a, b) => {
+        const aLocOk = a.locationMatchType !== 'unknown_location' ? 1 : 0;
+        const bLocOk = b.locationMatchType !== 'unknown_location' ? 1 : 0;
+        return bLocOk - aLocOk;
+      },
     });
     rerankSkillSwapped = skillResult.demoted > 0;
 
