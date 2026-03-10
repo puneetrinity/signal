@@ -207,7 +207,6 @@ export async function POST(request: NextRequest) {
       enrichmentStatus: true,
       lastEnrichedAt: true,
       locationHint: true,
-      locationConfidence: true,
       headlineHint: true,
       searchTitle: true,
     },
@@ -220,8 +219,7 @@ export async function POST(request: NextRequest) {
       c.enrichmentStatus === 'completed' &&
       c.lastEnrichedAt &&
       Date.now() - c.lastEnrichedAt.getTime() < 30 * 86400 * 1000;
-    const hasGoodLocation =
-      !!c.locationHint && (c.locationConfidence ?? 0) >= 0.5;
+    const hasGoodLocation = !!c.locationHint;
 
     if (recentlyEnriched && hasGoodLocation) return 'good_location';
     if (recentlyEnriched) return 'recently_enriched';
