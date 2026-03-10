@@ -14,6 +14,7 @@ import { prisma } from '@/lib/prisma';
 import { toJsonValue } from '@/lib/prisma/json';
 import { createLogger } from '@/lib/logger';
 import { getLocationBoostWeight, getSourcingConfig } from './config';
+import { guardedTopKSwap } from './top20-guards';
 import { buildJobRequirements, type SourcingJobContextInput } from './jd-digest';
 import { rankCandidates, compareFitWithConfidence } from './ranking';
 import { toRankingCandidate, readTrackFromDiagnostics, isValidJobContext } from './rescore';
@@ -238,32 +239,69 @@ async function processRerankJob(
     .sort((a, b) => compareFitWithConfidence(a, b, epsilon));
   const sorted = [...strict, ...expanded];
 
-  // Post-sort: enforce top-K unknown-location sub-cap with guarded swaps
+  // Post-sort top-K guards (order: unknown cap → role → skill → unknown re-assert)
   const topK = Math.min(20, sorted.length);
   const unknownCapRatio = track === 'tech' ? 0.1 : 0.15;
   const top20UnknownCap = Math.max(1, Math.ceil(topK * unknownCapRatio));
+  const getFitScoreRerank = (c: typeof sorted[number]) => c.fitScore;
 
-  if (sorted.length > topK) {
-    const unknownInTopK = sorted.slice(0, topK)
-      .map((c, i) => ({ c, i }))
-      .filter(({ c }) => c.locationMatchType === 'unknown_location')
-      .sort((a, b) => (a.c.fitScore) - (b.c.fitScore));
+  // 1. Unknown-location cap (initial)
+  guardedTopKSwap({
+    items: sorted,
+    topK,
+    isViolation: (c) => c.locationMatchType === 'unknown_location',
+    isEligibleReplacement: (c) => c.locationMatchType !== 'unknown_location',
+    cap: top20UnknownCap,
+    epsilon: config.fitScoreEpsilon,
+    getFitScore: getFitScoreRerank,
+  });
 
-    if (unknownInTopK.length > top20UnknownCap) {
-      const replacements = sorted.slice(topK)
-        .map((c, i) => ({ c, i: i + topK }))
-        .filter(({ c }) => c.locationMatchType !== 'unknown_location')
-        .sort((a, b) => (b.c.fitScore) - (a.c.fitScore));
+  // 2. Role guard (tech only)
+  const rerankGuardsEnabled = config.techTop20GuardsEnabled && track === 'tech';
+  let rerankRoleSwapped = false;
+  let rerankSkillSwapped = false;
+  if (rerankGuardsEnabled) {
+    const roleResult = guardedTopKSwap({
+      items: sorted,
+      topK,
+      isViolation: (c) => c.fitBreakdown.roleScore < config.techTop20RoleMin,
+      isEligibleReplacement: (c) => c.fitBreakdown.roleScore >= config.techTop20RoleMin,
+      cap: config.techTop20RoleCap,
+      epsilon: config.fitScoreEpsilon,
+      getFitScore: getFitScoreRerank,
+      preferReplacement: (a, b) => {
+        const aSkillOk = a.fitBreakdown.skillScore >= config.techTop20SkillMin ? 1 : 0;
+        const bSkillOk = b.fitBreakdown.skillScore >= config.techTop20SkillMin ? 1 : 0;
+        return bSkillOk - aSkillOk;
+      },
+    });
+    rerankRoleSwapped = roleResult.demoted > 0;
 
-      const excess = unknownInTopK.slice(0, unknownInTopK.length - top20UnknownCap);
-      let ri = 0;
-      for (const demote of excess) {
-        if (ri >= replacements.length) break;
-        const replacement = replacements[ri];
-        if (replacement.c.fitScore < demote.c.fitScore - config.fitScoreEpsilon) break;
-        [sorted[demote.i], sorted[replacement.i]] = [sorted[replacement.i], sorted[demote.i]];
-        ri++;
-      }
+    // 3. Skill floor (tech only)
+    const skillResult = guardedTopKSwap({
+      items: sorted,
+      topK,
+      isViolation: (c) => c.fitBreakdown.skillScore < config.techTop20SkillMin,
+      isEligibleReplacement: (c) =>
+        c.fitBreakdown.skillScore >= config.techTop20SkillMin &&
+        c.fitBreakdown.roleScore >= config.techTop20RoleMin,
+      cap: 0,
+      epsilon: config.fitScoreEpsilon,
+      getFitScore: getFitScoreRerank,
+    });
+    rerankSkillSwapped = skillResult.demoted > 0;
+
+    // 4. Unknown cap re-assertion
+    if (rerankRoleSwapped || rerankSkillSwapped) {
+      guardedTopKSwap({
+        items: sorted,
+        topK,
+        isViolation: (c) => c.locationMatchType === 'unknown_location',
+        isEligibleReplacement: (c) => c.locationMatchType !== 'unknown_location',
+        cap: top20UnknownCap,
+        epsilon: config.fitScoreEpsilon,
+        getFitScore: getFitScoreRerank,
+      });
     }
   }
 

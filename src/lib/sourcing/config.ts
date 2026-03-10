@@ -81,6 +81,11 @@ export interface SourcingConfig {
   unknownLaneFitFloorNonTech: number;
   unknownLocationPenaltyMultiplier: number;
   unknownAssemblyDiscoveredReserveTech: number;
+  // Top-20 quality guards (tech only)
+  techTop20GuardsEnabled: boolean;
+  techTop20RoleMin: number;
+  techTop20RoleCap: number;
+  techTop20SkillMin: number;
 }
 
 function parseIntSafe(value: string | undefined, fallback: number): number {
@@ -220,6 +225,11 @@ export function getSourcingConfig(): SourcingConfig {
     unknownLaneFitFloorNonTech: clamp(parseFloatSafe(process.env.SOURCE_UNKNOWN_LANE_FIT_FLOOR_NON_TECH, 0.40), 0, 1),
     unknownLocationPenaltyMultiplier: clamp(parseFloatSafe(process.env.SOURCE_UNKNOWN_LOCATION_PENALTY_MULTIPLIER, 0.85), 0.5, 1),
     unknownAssemblyDiscoveredReserveTech: parseNonNegativeIntSafe(process.env.SOURCE_UNKNOWN_ASSEMBLY_DISCOVERED_RESERVE_TECH, 2),
+    // Top-20 quality guards (tech only)
+    techTop20GuardsEnabled: process.env.SOURCE_TECH_TOP20_GUARDS_ENABLED !== 'false',
+    techTop20RoleMin: clamp(parseFloatSafe(process.env.SOURCE_TECH_TOP20_ROLE_MIN, 0.30), 0, 1),
+    techTop20RoleCap: clamp(parseNonNegativeIntSafe(process.env.SOURCE_TECH_TOP20_ROLE_CAP, 1), 0, 5),
+    techTop20SkillMin: clamp(parseFloatSafe(process.env.SOURCE_TECH_TOP20_SKILL_MIN, 0.10), 0, 1),
   };
 }
 

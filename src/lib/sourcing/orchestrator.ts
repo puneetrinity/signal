@@ -13,6 +13,7 @@ import { getRecentlyExposedCandidateIds } from './novelty';
 import type { CandidateForRanking, FitBreakdown, MatchTier, LocationMatchType, ScoredCandidate } from './ranking';
 import type { TrackDecision } from './types';
 import { jobTrackToDbFilter } from './types';
+import { guardedTopKSwap } from './top20-guards';
 import {
   resolveRoleDeterministic,
   resolveRolesBatch,
@@ -107,7 +108,25 @@ export interface OrchestratorResult {
   unknownLocationDiscoveredAssembledCount: number;
   unknownLocationPenaltyApplied: number;
   unknownLocationPoolPenaltyApplied: number;
-  unknownLocationTop20Demoted: number;
+  unknownLocationTop20DemotedInitial: number;
+  unknownLocationTop20DemotedFinal: number;
+  // Top-20 quality guards (tech only)
+  roleGuardTop20Demoted: number;
+  roleGuardNoReplacementCount: number;
+  roleGuardEpsilonBlockedCount: number;
+  skillFloorTop20Demoted: number;
+  skillFloorBypassCount: number;
+  skillFloorNoReplacementCount: number;
+  skillFloorEpsilonBlockedCount: number;
+  // Supply diagnostics
+  eligibleTechRoleCount: number | null;
+  eligibleTechSkillCount: number | null;
+  preGuardLowRoleTop20: number | null;
+  preGuardLowSkillTop20: number | null;
+  postGuardLowRoleTop20: number | null;
+  postGuardLowSkillTop20: number | null;
+  // Runtime thresholds snapshot (for SQL alignment)
+  techTop20Thresholds: { roleMin: number; roleCap: number; skillMin: number; guardsEnabled: boolean } | null;
   roleResolutionMetrics: RoleResolutionMetrics | null;
   locationResolutionMetrics: LocationResolutionMetrics | null;
 }
@@ -1306,46 +1325,106 @@ export async function runSourcingOrchestrator(
     }
   }
 
-  // Post-assembly: enforce top-20 unknown-location sub-cap with guarded swaps
+  // ---------------------------------------------------------------------------
+  // Post-assembly top-20 guards (order: unknown cap → role → skill → unknown re-assert)
+  // ---------------------------------------------------------------------------
   const top20Size = Math.min(20, assembled.length);
   const unknownCapRatio = trackDecision?.track === 'tech' ? 0.1 : 0.15;
   const top20UnknownCap = Math.max(1, Math.ceil(top20Size * unknownCapRatio));
-  let unknownLocationTop20Demoted = 0;
+  const getFitScoreAssembled = (c: AssembledCandidate) => c.fitScore ?? 0;
+  const renumberRanks = () => { for (let i = 0; i < assembled.length; i++) assembled[i].rank = i + 1; };
 
-  if (assembled.length > top20Size) {
-    // Find unknown_location in top-20, sorted by fitScore ascending (weakest first for demotion)
-    const unknownInTop20 = assembled.slice(0, top20Size)
-      .map((c, i) => ({ c, i }))
-      .filter(({ c }) => c.locationMatchType === 'unknown_location')
-      .sort((a, b) => (a.c.fitScore ?? 0) - (b.c.fitScore ?? 0));
+  // 1. Unknown-location cap (initial)
+  const unknownCapInitial = guardedTopKSwap({
+    items: assembled,
+    topK: top20Size,
+    isViolation: (c) => c.locationMatchType === 'unknown_location',
+    isEligibleReplacement: (c) => c.locationMatchType !== 'unknown_location',
+    cap: top20UnknownCap,
+    epsilon: config.fitScoreEpsilon,
+    getFitScore: getFitScoreAssembled,
+  });
+  if (unknownCapInitial.demoted > 0) renumberRanks();
 
-    if (unknownInTop20.length > top20UnknownCap) {
-      // Find non-unknown replacements below top-20, sorted by fitScore descending (strongest first)
-      const replacements = assembled.slice(top20Size)
-        .map((c, i) => ({ c, i: i + top20Size }))
-        .filter(({ c }) => c.locationMatchType !== 'unknown_location')
-        .sort((a, b) => (b.c.fitScore ?? 0) - (a.c.fitScore ?? 0));
+  // Pre-guard supply diagnostics (computed after assembly + initial unknown cap, before role/skill guards)
+  const guardsEnabled = config.techTop20GuardsEnabled && trackDecision?.track === 'tech';
+  const top100Size = Math.min(100, assembled.length);
+  const eligibleTechRoleCount = guardsEnabled
+    ? assembled.slice(0, top100Size).filter(c => (c.fitBreakdown?.roleScore ?? 0) >= config.techTop20RoleMin).length
+    : null;
+  const eligibleTechSkillCount = guardsEnabled
+    ? assembled.slice(0, top100Size).filter(c => (c.fitBreakdown?.skillScore ?? 0) >= config.techTop20SkillMin).length
+    : null;
+  const preGuardLowRoleTop20 = guardsEnabled
+    ? assembled.slice(0, top20Size).filter(c => (c.fitBreakdown?.roleScore ?? 0) < config.techTop20RoleMin).length
+    : null;
+  const preGuardLowSkillTop20 = guardsEnabled
+    ? assembled.slice(0, top20Size).filter(c => (c.fitBreakdown?.skillScore ?? 0) < config.techTop20SkillMin).length
+    : null;
 
-      const excess = unknownInTop20.slice(0, unknownInTop20.length - top20UnknownCap);
-      let ri = 0;
-      for (const demote of excess) {
-        if (ri >= replacements.length) break;
-        const replacement = replacements[ri];
-        // Guarded: only swap if replacement is not much worse
-        if ((replacement.c.fitScore ?? 0) < (demote.c.fitScore ?? 0) - config.fitScoreEpsilon) break;
-        [assembled[demote.i], assembled[replacement.i]] = [assembled[replacement.i], assembled[demote.i]];
-        unknownLocationTop20Demoted++;
-        ri++;
-      }
-
-      // Re-number ranks after swaps
-      if (unknownLocationTop20Demoted > 0) {
-        for (let i = 0; i < assembled.length; i++) {
-          assembled[i].rank = i + 1;
-        }
-      }
-    }
+  // 2. Role guard (tech only) — max techTop20RoleCap candidates with roleScore < techTop20RoleMin
+  let roleGuardResult = { demoted: 0, noReplacementCount: 0, epsilonBlockedCount: 0 };
+  if (guardsEnabled) {
+    roleGuardResult = guardedTopKSwap({
+      items: assembled,
+      topK: top20Size,
+      isViolation: (c) => (c.fitBreakdown?.roleScore ?? 0) < config.techTop20RoleMin,
+      isEligibleReplacement: (c) => (c.fitBreakdown?.roleScore ?? 0) >= config.techTop20RoleMin,
+      cap: config.techTop20RoleCap,
+      epsilon: config.fitScoreEpsilon,
+      getFitScore: getFitScoreAssembled,
+      // Prefer replacements that also meet skill floor to avoid guard conflicts
+      preferReplacement: (a, b) => {
+        const aSkillOk = (a.fitBreakdown?.skillScore ?? 0) >= config.techTop20SkillMin ? 1 : 0;
+        const bSkillOk = (b.fitBreakdown?.skillScore ?? 0) >= config.techTop20SkillMin ? 1 : 0;
+        return bSkillOk - aSkillOk;
+      },
+    });
+    if (roleGuardResult.demoted > 0) renumberRanks();
   }
+
+  // 3. Skill floor (tech only) — prefer skillScore >= techTop20SkillMin
+  let skillFloorResult = { demoted: 0, noReplacementCount: 0, epsilonBlockedCount: 0 };
+  if (guardsEnabled) {
+    skillFloorResult = guardedTopKSwap({
+      items: assembled,
+      topK: top20Size,
+      isViolation: (c) => (c.fitBreakdown?.skillScore ?? 0) < config.techTop20SkillMin,
+      // Require replacements to also meet role guard to avoid undoing role guard's work
+      isEligibleReplacement: (c) =>
+        (c.fitBreakdown?.skillScore ?? 0) >= config.techTop20SkillMin &&
+        (c.fitBreakdown?.roleScore ?? 0) >= config.techTop20RoleMin,
+      cap: 0,
+      epsilon: config.fitScoreEpsilon,
+      getFitScore: getFitScoreAssembled,
+    });
+    if (skillFloorResult.demoted > 0) renumberRanks();
+  }
+  const skillFloorBypassCount = skillFloorResult.noReplacementCount + skillFloorResult.epsilonBlockedCount;
+
+  // 4. Unknown cap re-assertion (only if role/skill guards made swaps that may have re-introduced unknowns)
+  let unknownCapFinalDemoted = 0;
+  if (guardsEnabled && (roleGuardResult.demoted > 0 || skillFloorResult.demoted > 0)) {
+    const unknownCapFinal = guardedTopKSwap({
+      items: assembled,
+      topK: top20Size,
+      isViolation: (c) => c.locationMatchType === 'unknown_location',
+      isEligibleReplacement: (c) => c.locationMatchType !== 'unknown_location',
+      cap: top20UnknownCap,
+      epsilon: config.fitScoreEpsilon,
+      getFitScore: getFitScoreAssembled,
+    });
+    unknownCapFinalDemoted = unknownCapFinal.demoted;
+    if (unknownCapFinalDemoted > 0) renumberRanks();
+  }
+
+  // Post-guard top-20 counts
+  const postGuardLowRoleTop20 = guardsEnabled
+    ? assembled.slice(0, top20Size).filter(c => (c.fitBreakdown?.roleScore ?? 0) < config.techTop20RoleMin).length
+    : null;
+  const postGuardLowSkillTop20 = guardsEnabled
+    ? assembled.slice(0, top20Size).filter(c => (c.fitBreakdown?.skillScore ?? 0) < config.techTop20SkillMin).length
+    : null;
 
   const expandedCount = assembled.length - strictMatchedCount;
 
@@ -1659,7 +1738,26 @@ export async function runSourcingOrchestrator(
     unknownLocationDiscoveredAssembledCount,
     unknownLocationPenaltyApplied,
     unknownLocationPoolPenaltyApplied,
-    unknownLocationTop20Demoted,
+    unknownLocationTop20DemotedInitial: unknownCapInitial.demoted,
+    unknownLocationTop20DemotedFinal: unknownCapFinalDemoted,
+    // Top-20 quality guards
+    roleGuardTop20Demoted: roleGuardResult.demoted,
+    roleGuardNoReplacementCount: roleGuardResult.noReplacementCount,
+    roleGuardEpsilonBlockedCount: roleGuardResult.epsilonBlockedCount,
+    skillFloorTop20Demoted: skillFloorResult.demoted,
+    skillFloorBypassCount,
+    skillFloorNoReplacementCount: skillFloorResult.noReplacementCount,
+    skillFloorEpsilonBlockedCount: skillFloorResult.epsilonBlockedCount,
+    // Supply diagnostics
+    eligibleTechRoleCount,
+    eligibleTechSkillCount,
+    preGuardLowRoleTop20,
+    preGuardLowSkillTop20,
+    postGuardLowRoleTop20,
+    postGuardLowSkillTop20,
+    techTop20Thresholds: guardsEnabled
+      ? { roleMin: config.techTop20RoleMin, roleCap: config.techTop20RoleCap, skillMin: config.techTop20SkillMin, guardsEnabled: true }
+      : null,
     roleResolutionMetrics,
     locationResolutionMetrics,
   };
