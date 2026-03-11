@@ -99,11 +99,14 @@ function buildGlobalCandidateFields(
 ) {
   const snapshot = candidate.intelligenceSnapshots?.[0];
 
-  // Resolve structured location from snapshot or candidate hint
+  // Resolve structured location from snapshot or candidate hint.
+  // Only use resolved location if confidence >= 0.5 to avoid garbage
+  // (e.g. locationHint containing headline text like "Vice President, Marketing").
   const locationText = snapshot?.location ?? candidate.locationHint;
   const resolved = locationText
     ? resolveLocationDeterministic(locationText)
     : null;
+  const locationUsable = resolved && resolved.confidence >= 0.5;
 
   return {
     // Identity anchors — must be in payload so ActiveKG can find/merge
@@ -113,8 +116,8 @@ function buildGlobalCandidateFields(
     linkedin_url: candidate.linkedinUrl,
     name: candidate.nameHint || undefined,
     headline: candidate.headlineHint || undefined,
-    location_city: resolved?.city ?? undefined,
-    location_country_code: resolved?.countryCode ?? undefined,
+    location_city: locationUsable ? (resolved.city ?? undefined) : undefined,
+    location_country_code: locationUsable ? (resolved.countryCode ?? undefined) : undefined,
     location_confidence: candidate.locationConfidence ?? undefined,
     location_source: candidate.locationSource ?? undefined,
     role_family: snapshot?.roleType ?? candidate.roleType ?? undefined,

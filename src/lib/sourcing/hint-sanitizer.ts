@@ -41,7 +41,7 @@ export function shouldReplaceHint(existing: string | null, incoming: string | un
 const BIO_REJECT_PATTERNS = [
   /\b(experience|years?)\b/i,
   /\b(education|university|college|degree|institute|school)\b/i,
-  /\b(engineer|manager|developer|director|analyst|consultant|specialist|coordinator|architect)\b/i,
+  /\b(engineer|manager|developer|director|vice\s+president|president|chief|analyst|consultant|specialist|coordinator|architect|founder)\b/i,
   /\b(seeking|hiring|looking|open to)\b/i,
   /\b(proficient|expertise|responsible)\b/i,
   /\bprofessional community\b|\bconnections?\b|\bfollowers?\b/i,

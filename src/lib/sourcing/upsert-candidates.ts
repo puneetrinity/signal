@@ -5,6 +5,7 @@ import {
   shouldReplaceHint,
   shouldReplaceLocationHint,
   shouldReplaceCompanyHint,
+  locationHintQualityScore,
 } from './hint-sanitizer';
 import { enqueueGraphSync } from '@/lib/integrations/candidate-graph-sync';
 import type { ProfileSummary } from '@/types/linkedin';
@@ -38,7 +39,16 @@ export async function upsertDiscoveredCandidates(
     const extractedHints = extractAllHints(linkedinId, result.title, result.snippet);
     const nameHint = normalizeHint(result.name ?? extractedHints.nameHint ?? undefined) ?? undefined;
     const headlineHint = normalizeHint(result.headline ?? extractedHints.headlineHint ?? undefined) ?? undefined;
-    const locationHint = normalizeHint(result.location ?? extractedHints.locationHint ?? undefined) ?? undefined;
+    const providerLocation = normalizeHint(result.location ?? undefined) ?? undefined;
+    const extractedLocation = normalizeHint(extractedHints.locationHint ?? undefined) ?? undefined;
+    const providerLocScore = locationHintQualityScore(providerLocation ?? null);
+    const extractedLocScore = locationHintQualityScore(extractedLocation ?? null);
+    const locationHint =
+      providerLocScore >= extractedLocScore && providerLocScore > 0
+        ? providerLocation
+        : extractedLocScore > 0
+          ? extractedLocation
+          : undefined;
     let companyHint = normalizeHint(extractedHints.companyHint ?? undefined) ?? undefined;
     if (!companyHint && headlineHint) {
       companyHint = normalizeHint(extractCompanyFromHeadline(headlineHint) ?? undefined) ?? undefined;
