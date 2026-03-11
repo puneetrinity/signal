@@ -15,6 +15,8 @@
 import http from 'http';
 import { startEnrichmentWorker, cleanupQueue, getQueueStats } from './queue';
 import { startRerankWorker, cleanupRerankQueue } from '@/lib/sourcing/rerank';
+import { startGraphSyncWorker, stopGraphSyncWorker } from '@/lib/integrations/candidate-graph-worker';
+import { cleanupGraphSyncQueue } from '@/lib/integrations/candidate-graph-sync';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger('EnrichmentWorker');
@@ -40,6 +42,7 @@ log.info({ concurrency: CONCURRENCY, redisConfigured: !!process.env.REDIS_URL },
 // Start the workers
 const worker = startEnrichmentWorker({ concurrency: CONCURRENCY });
 const rerankWorker = startRerankWorker({ concurrency: 2 });
+startGraphSyncWorker();
 
 // Simple health check server for Railway
 const healthServer = http.createServer(async (req, res) => {
@@ -75,6 +78,8 @@ const shutdown = async (signal: string) => {
     healthServer.close();
     await cleanupQueue();
     await cleanupRerankQueue();
+    await stopGraphSyncWorker();
+    await cleanupGraphSyncQueue();
     log.info('Cleanup complete, exiting');
     process.exit(0);
   } catch (error) {

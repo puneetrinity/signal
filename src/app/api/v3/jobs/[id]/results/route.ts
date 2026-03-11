@@ -11,6 +11,7 @@ import { requireScope } from '@/lib/auth/service-scopes';
 import { prisma } from '@/lib/prisma';
 import { summarizeIdentitySignals } from '@/lib/sourcing/identity-summary';
 import { isNonTechShadow } from '@/lib/enrichment/config';
+import { resolveLocationDeterministic } from '@/lib/taxonomy/location-service';
 
 function safeObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object'
@@ -277,6 +278,14 @@ export async function GET(
             ? 'location_mismatch'
             : 'location_unknown';
 
+    // Derive countryCode from snapshot location or locationHint
+    const locationText = techSnap?.location ?? sc.candidate.locationHint;
+    let countryCode: string | null = null;
+    if (locationText) {
+      const resolved = resolveLocationDeterministic(locationText);
+      countryCode = resolved.countryCode;
+    }
+
     return {
       candidateId: sc.candidateId,
       fitScore: sc.fitScore,
@@ -284,6 +293,7 @@ export async function GET(
       matchTier,
       locationMatchType,
       locationLabel,
+      countryCode,
       dataConfidence,
       sourceType: sc.sourceType,
       enrichmentStatus: sc.enrichmentStatus,

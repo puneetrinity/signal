@@ -24,10 +24,11 @@ import {
 } from './ephemeral';
 import { generateCandidateSummary } from '../summary/generate';
 import { shouldPersistIdentity, type ScoreBreakdown } from '../scoring';
-import { extractAllHints, extractNameFromSlug, applySerpMetaOverrides } from '../hint-extraction';
+import { extractAllHints, extractNameFromSlug, applySerpMetaOverrides, calculateLocationConfidence } from '../hint-extraction';
 import { getEnrichmentMinConfidenceThreshold } from '../config';
 import { enqueueRerankForCandidate } from '@/lib/sourcing/rerank';
 import { rescoreCompletedSourcingRowsForCandidate } from '@/lib/sourcing/rescore';
+import { enqueueGraphSync } from '@/lib/integrations/candidate-graph-sync';
 import {
   type EnrichmentState,
   type PartialEnrichmentState,
@@ -1218,10 +1219,17 @@ export async function persistResultsNode(
       }
     }
 
-    // Update candidate's last enriched timestamp
+    // Update candidate's last enriched timestamp + locationConfidence
+    const locConf = calculateLocationConfidence(
+      state.hints?.locationHint ?? null,
+      state.hints?.serpSnippet || '',
+    );
     await prisma.candidate.update({
       where: { id: state.candidateId },
-      data: { lastEnrichedAt: new Date() },
+      data: {
+        lastEnrichedAt: new Date(),
+        ...(locConf > 0 ? { locationConfidence: locConf, locationSource: 'serp_snippet' } : {}),
+      },
     });
 
     const completeEvent: EnrichmentProgressEvent = {
@@ -1686,6 +1694,14 @@ export async function persistSummaryNode(
           'Failed to enqueue rerank after enrichment',
         );
       });
+
+      // Async graph sync to global memory (non-blocking, best-effort)
+      enqueueGraphSync({
+        candidateId: state.candidateId,
+        tenantId: state.tenantId,
+        trigger: 'enrichment',
+        sessionId: state.sessionId,
+      }).catch(() => {}); // fire-and-forget
     }
 
     const progressComplete: EnrichmentProgressEvent = {

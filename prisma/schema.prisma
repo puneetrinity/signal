@@ -147,6 +147,10 @@ model Candidate {
   lastEnrichedAt   DateTime?
   confidenceScore  Float? // Overall confidence (0.0-1.0)
 
+  // Location confidence (persisted from calculateLocationConfidence() output)
+  locationConfidence Float?   // 0.0-1.0
+  locationSource     String?  // 'serp_snippet' | 'serp_title' | 'profile' | 'resume' | 'llm'
+
   // Timestamps
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -157,6 +161,7 @@ model Candidate {
   enrichmentSessions  EnrichmentSession[]
   sourcingCandidates  JobSourcingCandidate[]
   intelligenceSnapshots CandidateIntelligenceSnapshot[]
+  globalLink          CandidateGlobalLink?
 
   // Tenant-scoped unique constraints
   @@unique([tenantId, linkedinUrl])
@@ -188,6 +193,10 @@ model CandidateIntelligenceSnapshot {
   sourceSessionId     String?
   sourceFingerprint   String?
   signalsJson         Json?
+
+  // Location confidence (copied from Candidate at snapshot time)
+  locationConfidence  Float?
+  locationSource      String?
 
   candidate           Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
 
@@ -452,6 +461,24 @@ model SearchCacheV2 {
   @@index([tenantId, queryHash])
   @@index([expiresAt])
   @@map("search_cache_v2")
+}
+
+/// Link from tenant-scoped Signal candidate to global memory.
+/// Created during async graph sync. Used for retrieval join.
+model CandidateGlobalLink {
+  id                String   @id @default(cuid())
+  tenantId          String
+  candidateId       String   @unique
+  globalCandidateId String   // UUID from ActiveKG global_candidates.id
+  linkedAt          DateTime @default(now())
+  linkConfidence    Float?   // identity resolution confidence at link time
+  matchMethod       String?  // 'linkedin_id_exact' | 'github_exact' | 'email_hash_exact'
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, candidateId])
+  @@index([globalCandidateId])
+  @@map("candidate_global_links")
 }
 
 model JobSourcingRequest {

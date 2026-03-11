@@ -6,6 +6,7 @@ import {
   shouldReplaceLocationHint,
   shouldReplaceCompanyHint,
 } from './hint-sanitizer';
+import { enqueueGraphSync } from '@/lib/integrations/candidate-graph-sync';
 import type { ProfileSummary } from '@/types/linkedin';
 import type { Prisma } from '@prisma/client';
 
@@ -89,6 +90,13 @@ export async function upsertDiscoveredCandidates(
       });
 
       candidateMap.set(linkedinId, candidate.id);
+
+      // Async graph sync (non-blocking, best-effort)
+      enqueueGraphSync({
+        candidateId: candidate.id,
+        tenantId,
+        trigger: 'discovery',
+      }).catch(() => {}); // fire-and-forget
     } catch (error) {
       console.error(`[sourcing] Failed to upsert candidate ${linkedinId}:`, error);
     }

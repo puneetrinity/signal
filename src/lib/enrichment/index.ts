@@ -21,7 +21,7 @@ import {
   type BridgeDiscoveryOptions,
 } from './bridge-discovery';
 import type { Candidate, EnrichmentSession, IdentityCandidate } from '@prisma/client';
-import { applySerpMetaOverrides } from './hint-extraction';
+import { applySerpMetaOverrides, calculateLocationConfidence } from './hint-extraction';
 
 const log = createLogger('Enrichment');
 
@@ -217,7 +217,8 @@ async function completeSession(
 async function updateCandidateStatus(
   candidateId: string,
   status: string,
-  confidenceScore: number | null
+  confidenceScore: number | null,
+  locationFields?: { locationConfidence: number | null; locationSource: string | null },
 ): Promise<void> {
   await prisma.candidate.update({
     where: { id: candidateId },
@@ -225,6 +226,9 @@ async function updateCandidateStatus(
       enrichmentStatus: status,
       lastEnrichedAt: new Date(),
       confidenceScore,
+      ...(locationFields?.locationConfidence != null
+        ? { locationConfidence: locationFields.locationConfidence, locationSource: locationFields.locationSource }
+        : {}),
     },
   });
 }
@@ -389,8 +393,15 @@ export async function enrichCandidate(
       durationMs: Date.now() - startTime,
     });
 
-    // Update candidate status
-    await updateCandidateStatus(candidateId, 'completed', bestConfidence);
+    // Update candidate status (persist locationConfidence from SERP data)
+    const locConf = calculateLocationConfidence(
+      candidate.locationHint,
+      candidate.searchSnippet || '',
+    );
+    await updateCandidateStatus(candidateId, 'completed', bestConfidence, {
+      locationConfidence: locConf || null,
+      locationSource: locConf > 0 ? 'serp_snippet' : null,
+    });
 
     // Audit log
     await logEnrichmentAction('enrichment.completed', candidateId, session.id, {

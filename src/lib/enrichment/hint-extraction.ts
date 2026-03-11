@@ -548,7 +548,7 @@ function calculateHeadlineConfidence(headline: string | null, title: string): nu
 /**
  * Calculate location hint confidence
  */
-function calculateLocationConfidence(location: string | null, snippet: string): number {
+export function calculateLocationConfidence(location: string | null, snippet: string): number {
   if (!location) return 0;
 
   // Explicit "Location:" pattern is very reliable
