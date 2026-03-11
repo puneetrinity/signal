@@ -57,6 +57,7 @@ function getConfig() {
     timeout: parseInt(process.env.SERPER_TIMEOUT || String(DEFAULT_TIMEOUT), 10),
     maxPages: parseInt(process.env.SERPER_MAX_PAGES || String(DEFAULT_MAX_PAGES), 10),
     numPerPage: parseInt(process.env.SERPER_NUM_PER_PAGE || String(DEFAULT_NUM_PER_PAGE), 10),
+    hl: process.env.SERPER_HL || 'en',
   };
 }
 
@@ -70,7 +71,7 @@ function sleep(ms: number) {
 
 async function executeSerperSearch(
   query: string,
-  options: { num: number; page: number; gl?: string; location?: string; tbs?: string }
+  options: { num: number; page: number; gl?: string; location?: string; tbs?: string; hl?: string }
 ): Promise<SerperResponse> {
   const config = getConfig();
   if (!config.apiKey) {
@@ -98,6 +99,7 @@ async function executeSerperSearch(
           ...(options.gl ? { gl: options.gl } : {}),
           ...(options.location ? { location: options.location } : {}),
           ...(options.tbs ? { tbs: options.tbs } : {}),
+          ...(options.hl ? { hl: options.hl } : {}),
         }),
         signal: controller.signal,
       });
@@ -203,6 +205,13 @@ function normalizeSerperTbs(tbs?: string | null): string | undefined {
   return trimmed;
 }
 
+function normalizeLanguageCode(languageCode?: string | null): string | undefined {
+  if (!languageCode) return undefined;
+  const trimmed = languageCode.trim().toLowerCase();
+  if (!/^[a-z]{2,3}(?:-[a-z]{2})?$/.test(trimmed)) return undefined;
+  return trimmed;
+}
+
 function extractLinkedInHost(url: string): string | undefined {
   try {
     const parsed = new URL(url);
@@ -278,10 +287,12 @@ export const serperProvider: SearchProvider = {
     countryCode?: string | null,
     geo?: SearchGeoContext
   ): Promise<ProfileSummary[]> {
+    const config = getConfig();
     const gl = normalizeCountryCode(geo?.countryCode ?? countryCode);
     const location = normalizeLocationText(geo?.locationText);
     const tbs = normalizeSerperTbs(geo?.tbs);
-    console.log('[Serper] Searching for LinkedIn profiles:', { query, maxResults, gl, location, tbs });
+    const hl = normalizeLanguageCode(geo?.languageCode ?? config.hl);
+    console.log('[Serper] Searching for LinkedIn profiles:', { query, maxResults, gl, location, tbs, hl });
 
     if (!isConfigured()) {
       console.warn('[Serper] API key not configured, returning empty results');
@@ -289,8 +300,6 @@ export const serperProvider: SearchProvider = {
     }
 
     try {
-      const config = getConfig();
-
       const scopedQuery = hasLinkedInSiteConstraint(query)
         ? query
         : `site:linkedin.com/in ${query}`;
@@ -313,6 +322,7 @@ export const serperProvider: SearchProvider = {
           gl,
           location,
           tbs,
+          hl,
         });
         const organic = response.organic ?? [];
         if (organic.length === 0) break;
@@ -364,6 +374,7 @@ export const serperProvider: SearchProvider = {
     const config = getConfig();
     const numPerPage = Math.min(100, Math.max(1, config.numPerPage || DEFAULT_NUM_PER_PAGE));
     const maxPages = Math.max(1, config.maxPages || DEFAULT_MAX_PAGES);
+    const hl = normalizeLanguageCode(config.hl);
 
     const results: RawSearchResult[] = [];
     const seenUrls = new Set<string>();
@@ -371,7 +382,7 @@ export const serperProvider: SearchProvider = {
     for (let page = 1; page <= maxPages && results.length < maxResults; page++) {
       const remaining = maxResults - results.length;
       const num = Math.min(numPerPage, remaining);
-      const response = await executeSerperSearch(query, { num, page });
+      const response = await executeSerperSearch(query, { num, page, hl });
       const organic = response.organic ?? [];
       if (organic.length === 0) break;
 

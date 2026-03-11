@@ -52,6 +52,10 @@ export interface SearchGeoContext {
    * Optional Serper-compatible time filter, e.g. "qdr:y2" (last 2 years).
    */
   tbs?: string | null;
+  /**
+   * Optional language hint for providers that support it, e.g. "en", "de".
+   */
+  languageCode?: string | null;
 }
 
 /**
