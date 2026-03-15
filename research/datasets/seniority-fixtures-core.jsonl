@@ -1,0 +1,25 @@
+{"id":"sen_001","caseType":"explicit_intern","headline":"Software Engineering Intern at Meta","gold":{"seniority":"intern"}}
+{"id":"sen_002","caseType":"explicit_junior","headline":"Junior Developer at Shopify","gold":{"seniority":"junior"}}
+{"id":"sen_003","caseType":"explicit_mid","headline":"Mid-Level Engineer at Acme","gold":{"seniority":"mid"}}
+{"id":"sen_004","caseType":"explicit_senior","headline":"Senior Software Engineer at Google","gold":{"seniority":"senior"}}
+{"id":"sen_005","caseType":"explicit_staff","headline":"Staff Engineer at Google","gold":{"seniority":"staff"}}
+{"id":"sen_006","caseType":"explicit_principal","headline":"Principal Architect at Netflix","gold":{"seniority":"principal"}}
+{"id":"sen_007","caseType":"explicit_lead","headline":"Lead Backend Engineer at Uber","gold":{"seniority":"lead"}}
+{"id":"sen_008","caseType":"explicit_manager","headline":"Engineering Manager at Spotify","gold":{"seniority":"manager"}}
+{"id":"sen_009","caseType":"explicit_director","headline":"Director of Engineering at Datadog","gold":{"seniority":"director"}}
+{"id":"sen_010","caseType":"explicit_vp","headline":"VP of Sales at HubSpot","gold":{"seniority":"vp"}}
+{"id":"sen_011","caseType":"explicit_cxo","headline":"CxO Advisory at McKinsey","gold":{"seniority":"cxo"}}
+{"id":"sen_012","caseType":"null_company_only","headline":"Google","gold":{"seniority":null}}
+{"id":"sen_013","caseType":"null_description","headline":"Building the future of AI","gold":{"seniority":null}}
+{"id":"sen_014","caseType":"null_empty","headline":"","gold":{"seniority":null}}
+{"id":"sen_015","caseType":"miss_implicit_mid","headline":"Software Engineer at Stripe","gold":{"seniority":"mid"}}
+{"id":"sen_016","caseType":"miss_svp","headline":"SVP Engineering at Oracle","gold":{"seniority":"vp"}}
+{"id":"sen_017","caseType":"miss_evp","headline":"EVP, Global Sales","gold":{"seniority":"vp"}}
+{"id":"sen_018","caseType":"miss_cto","headline":"CTO at Startup","gold":{"seniority":"cxo"}}
+{"id":"sen_019","caseType":"miss_ceo","headline":"CEO & Co-Founder","gold":{"seniority":"cxo"}}
+{"id":"sen_020","caseType":"miss_cfo","headline":"CFO at BigBank","gold":{"seniority":"cxo"}}
+{"id":"sen_021","caseType":"miss_coo","headline":"COO at ScaleUp","gold":{"seniority":"cxo"}}
+{"id":"sen_022","caseType":"miss_former_cto","headline":"Former CTO at Acme","gold":{"seniority":"cxo"}}
+{"id":"sen_023","caseType":"miss_sr_abbrev","headline":"Sr. Software Engineer","gold":{"seniority":"senior"}}
+{"id":"sen_024","caseType":"miss_head_of","headline":"Head of Engineering","gold":{"seniority":"director"}}
+{"id":"sen_025","caseType":"miss_associate","headline":"Associate Software Engineer","gold":{"seniority":"junior"}}

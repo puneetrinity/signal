@@ -1,0 +1,14 @@
+{
+  "name": "enrichment-location-resolution",
+  "evaluator": "location-resolution",
+  "objective": "city_accuracy",
+  "maximize": true,
+  "constraints": {},
+  "searchSpace": {},
+  "budget": {
+    "iterations": 1
+  },
+  "config": {
+    "fixturePath": "research/datasets/resolution-fixtures.jsonl"
+  }
+}

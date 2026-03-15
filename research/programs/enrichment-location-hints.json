@@ -1,0 +1,14 @@
+{
+  "name": "enrichment-location-hints",
+  "evaluator": "location-hints",
+  "objective": "city_accuracy",
+  "maximize": true,
+  "constraints": {},
+  "searchSpace": {},
+  "budget": {
+    "iterations": 1
+  },
+  "config": {
+    "fixturePath": "research/datasets/location-fixtures-core.jsonl"
+  }
+}

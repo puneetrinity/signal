@@ -1,0 +1,15 @@
+{"id":"sen_adv_001","caseType":"compound_title","headline":"Senior Staff Engineer","gold":{"seniority":"staff"}}
+{"id":"sen_adv_002","caseType":"compound_title_2","headline":"Senior Lead Designer","gold":{"seniority":"lead"}}
+{"id":"sen_adv_003","caseType":"all_caps","headline":"SENIOR MANAGER AT IBM","gold":{"seniority":"manager"}}
+{"id":"sen_adv_004","caseType":"associate_has_director","headline":"Associate Director at JP Morgan","gold":{"seniority":"director"}}
+{"id":"sen_adv_005","caseType":"acting_has_vp","headline":"Acting VP of Engineering","gold":{"seniority":"vp"}}
+{"id":"sen_adv_006","caseType":"managing_has_director","headline":"Managing Director at Goldman Sachs","gold":{"seniority":"director"}}
+{"id":"sen_adv_007","caseType":"tech_lead","headline":"Tech Lead at Airbnb","gold":{"seniority":"lead"}}
+{"id":"sen_adv_008","caseType":"emoji_noise","headline":"🚀 Staff Engineer at Startup","gold":{"seniority":"staff"}}
+{"id":"sen_adv_009","caseType":"credential_noise","headline":"Dr. Sarah Lee, PhD - Consultant","gold":{"seniority":null}}
+{"id":"sen_adv_010","caseType":"founding_not_level","headline":"Founding Engineer at Startup","gold":{"seniority":null}}
+{"id":"sen_adv_011","caseType":"no_seniority_role","headline":"Account Executive at Salesforce","gold":{"seniority":null}}
+{"id":"sen_adv_012","caseType":"number_prefix","headline":"L6 Software Engineer","gold":{"seniority":null}}
+{"id":"sen_adv_013","caseType":"lead_in_verb","headline":"Leading AI Research at DeepMind","gold":{"seniority":null}}
+{"id":"sen_adv_014","caseType":"intern_in_word","headline":"International Sales at Acme","gold":{"seniority":null}}
+{"id":"sen_adv_015","caseType":"senior_in_company","headline":"Senior Living Solutions","gold":{"seniority":null}}

@@ -18,7 +18,12 @@
     "worker:enrichment": "tsx src/lib/enrichment/worker.ts",
     "worker:sourcing": "tsx src/lib/sourcing/worker.ts",
     "eval": "tsx scripts/eval-enrichment.ts",
-    "eval:verbose": "tsx scripts/eval-enrichment.ts --verbose"
+    "eval:verbose": "tsx scripts/eval-enrichment.ts --verbose",
+    "eval:location": "tsx scripts/eval-location-hints.ts",
+    "eval:location:verbose": "tsx scripts/eval-location-hints.ts --verbose",
+    "eval:resolution": "tsx scripts/eval-location-resolution.ts",
+    "eval:resolution:verbose": "tsx scripts/eval-location-resolution.ts --verbose",
+    "research": "tsx scripts/research-runner.ts"
   },
   "dependencies": {
     "@ai-sdk/google": "^2.0.17",

@@ -1,0 +1,39 @@
+{"id":"res_001","input":"San Francisco Bay Area","gold":{"city":"san francisco","countryCode":"US"}}
+{"id":"res_002","input":"New York City","gold":{"city":"new york","countryCode":"US"}}
+{"id":"res_003","input":"Seattle, WA","gold":{"city":"seattle","countryCode":"US"}}
+{"id":"res_004","input":"Austin, TX","gold":{"city":"austin","countryCode":"US"}}
+{"id":"res_005","input":"Mountain View, California","gold":{"city":"mountain view","countryCode":"US"}}
+{"id":"res_006","input":"Washington, DC","gold":{"city":"washington","countryCode":"US"}}
+{"id":"res_007","input":"Portland, OR","gold":{"city":"portland","countryCode":"US"}}
+{"id":"res_008","input":"Bangalore, India","gold":{"city":"bangalore","countryCode":"IN"}}
+{"id":"res_009","input":"Bengaluru, Karnataka, India","gold":{"city":"bangalore","countryCode":"IN"}}
+{"id":"res_010","input":"Greater Bangalore Area","gold":{"city":"bangalore","countryCode":"IN"}}
+{"id":"res_011","input":"Bangalore Urban","gold":{"city":"bangalore","countryCode":"IN"}}
+{"id":"res_012","input":"Hyderabad India","gold":{"city":"hyderabad","countryCode":"IN"}}
+{"id":"res_013","input":"Mumbai, India","gold":{"city":"mumbai","countryCode":"IN"}}
+{"id":"res_014","input":"Delhi, India","gold":{"city":"delhi","countryCode":"IN"}}
+{"id":"res_015","input":"Noida","gold":{"city":"noida","countryCode":"IN"}}
+{"id":"res_016","input":"Gurgaon","gold":{"city":"gurgaon","countryCode":"IN"}}
+{"id":"res_017","input":"Chennai, India","gold":{"city":"chennai","countryCode":"IN"}}
+{"id":"res_018","input":"Pune, India","gold":{"city":"pune","countryCode":"IN"}}
+{"id":"res_019","input":"London, UK","gold":{"city":"london","countryCode":"GB"}}
+{"id":"res_020","input":"Greater London","gold":{"city":"london","countryCode":"GB"}}
+{"id":"res_021","input":"Manchester, UK","gold":{"city":"manchester","countryCode":"GB"}}
+{"id":"res_022","input":"Toronto, Ontario, Canada","gold":{"city":"toronto","countryCode":"CA"}}
+{"id":"res_023","input":"Vancouver, Canada","gold":{"city":"vancouver","countryCode":"CA"}}
+{"id":"res_024","input":"Greater Halifax Metropolitan Area","gold":{"city":"halifax","countryCode":"CA"}}
+{"id":"res_025","input":"Berlin, Germany","gold":{"city":"berlin","countryCode":"DE"}}
+{"id":"res_026","input":"München, Deutschland","gold":{"city":"munich","countryCode":"DE"}}
+{"id":"res_027","input":"Stockholm, Sweden","gold":{"city":"stockholm","countryCode":"SE"}}
+{"id":"res_028","input":"Tokyo, Japan","gold":{"city":"tokyo","countryCode":"JP"}}
+{"id":"res_029","input":"Singapore","gold":{"city":"singapore","countryCode":"SG"}}
+{"id":"res_030","input":"Great Hills, Austin TX","gold":{"city":"austin","countryCode":"US"}}
+{"id":"res_031","input":"Greater Seattle Area","gold":{"city":"seattle","countryCode":"US"}}
+{"id":"res_032","input":"Remote, US","gold":{"city":null,"countryCode":"US"}}
+{"id":"res_033","input":"Remote","gold":{"city":null,"countryCode":null}}
+{"id":"res_034","input":"Denver, CO","gold":{"city":"denver","countryCode":"US"}}
+{"id":"res_035","input":"Redmond, Washington","gold":{"city":"redmond","countryCode":"US"}}
+{"id":"res_036","input":"Lafayette, Colorado","gold":{"city":"lafayette","countryCode":"US"}}
+{"id":"res_037","input":"North Delhi","gold":{"city":"north delhi","countryCode":"IN"}}
+{"id":"res_038","input":"Greater Bengaluru Area","gold":{"city":"bangalore","countryCode":"IN"}}
+{"id":"res_039","input":"Redwood City","gold":{"city":"redwood city","countryCode":"US"}}

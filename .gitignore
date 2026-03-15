@@ -58,3 +58,7 @@ prisma/.env
 *.swp
 *.swo
 *~
+
+# research experiment outputs
+research/experiments/*
+!research/experiments/.gitkeep

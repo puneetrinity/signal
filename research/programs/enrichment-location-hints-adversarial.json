@@ -1,0 +1,16 @@
+{
+  "name": "enrichment-location-hints-adversarial",
+  "evaluator": "location-hints",
+  "objective": "city_accuracy",
+  "maximize": true,
+  "constraints": {
+    "false_positive_rate": { "max": 0.05 }
+  },
+  "searchSpace": {},
+  "budget": {
+    "iterations": 1
+  },
+  "config": {
+    "fixturePath": "research/datasets/location-fixtures-adversarial.jsonl"
+  }
+}
