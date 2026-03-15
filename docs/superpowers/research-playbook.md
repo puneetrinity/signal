@@ -146,6 +146,66 @@ For runtime-only improvements (skill matching rules, ranking weights):
 - Non-tech concept rule matches
 - Seniority text-parse fallback
 
+## Runtime ranking defaults
+
+Current ranking is deterministic and built from:
+
+- Skill score
+- Role score
+- Seniority score
+- Freshness score
+- Optional location boost
+
+Track weight defaults:
+
+| Track | Skill | Role | Seniority | Freshness |
+|------|-------|------|-----------|-----------|
+| **tech** | 0.45 | 0.15 | 0.25 | 0.15 |
+| **non_tech** | 0.25 | 0.30 | 0.30 | 0.15 |
+| **blended** | 0.35 | 0.25 | 0.25 | 0.15 |
+
+Location boost defaults:
+
+| Track | Default |
+|------|---------|
+| **tech** | 0.10 |
+| **blended** | 0.08 |
+| **non_tech** | 0.03 |
+
+Core ranking guardrails:
+
+- `bestMatchesMinFitScore = 0.45`
+- `strictRescueMinFitScore = 0.30`
+- `fitScoreEpsilon = 0.03`
+- `unknownLocationPenaltyMultiplier = 0.85`
+
+Top-20 tech guards:
+
+- `techTop20GuardsEnabled = true`
+- `techTop20RoleMin = 0.35`
+- `techTop20RoleCap = 1`
+- `techTop20SkillMin = 0.10`
+
+Important runtime behavior:
+
+- Tech `best_matches` now require both:
+  - `fitScore >= bestMatchesMinFitScore`
+  - `skillScore >= techTop20SkillMin`
+- Unknown-location candidates are:
+  - penalized post-rank
+  - capped in top-20
+  - capped again in final assembly
+- Rerank/rescore use the same pre-resolved role/location path as initial assembly
+- Currentness is **not** wired into ranking yet; it remains eval/audit-only until explicitly integrated
+
+Primary code paths:
+
+- `src/lib/sourcing/ranking.ts`
+- `src/lib/sourcing/orchestrator.ts`
+- `src/lib/sourcing/rerank.ts`
+- `src/lib/sourcing/rescore.ts`
+- `src/lib/sourcing/top20-guards.ts`
+
 ## What not to do
 
 - **Don't put live Serper in eval loops.** Fixtures are static. Live API is for fixture generation only.
@@ -163,7 +223,7 @@ For runtime-only improvements (skill matching rules, ranking weights):
 | Seniority | eval-seniority | core, adversarial | audit-seniority-backfill | backfill-seniority-hints | Complete (3,816 backfilled) |
 | Tech Skills | eval-skill-evidence-tech | core, adversarial, gap, precision | audit-skill-ambiguous-prod | N/A (runtime) | v1 deployed |
 | Non-Tech Skills | eval-skill-evidence-nontech | core, adversarial | audit-skill-nontech-prod | N/A (runtime) | v1 deployed |
-| Currentness | eval-serp-currentness | title-core, location-core, adversarial | — | N/A (runtime) | v1 eval done, prod audit next |
+| Currentness | eval-serp-currentness | title-core, location-core, adversarial | audit-serp-currentness-prod | N/A (runtime) | v1 eval + prod audit complete |
 
 ## Per-field specs
 

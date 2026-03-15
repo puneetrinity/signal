@@ -250,6 +250,7 @@ export async function GET(
           skillScoreMethod: fbRaw.skillScoreMethod ?? null,
           roleScore: fbRaw.roleScore ?? null,
           seniorityScore: fbRaw.seniorityScore ?? null,
+          effectiveSeniorityScore: fbRaw.effectiveSeniorityScore ?? null,
           activityFreshnessScore: fbRaw.activityFreshnessScore ?? null,
           locationBoost: fbRaw.locationBoost ?? null,
           unknownLocationPromotion: Boolean(fbRaw.unknownLocationPromotion),

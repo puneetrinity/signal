@@ -170,7 +170,59 @@ Location unknown rate is slightly above target. Accepted because:
 3. ~~Add `detectCurrentness(searchTitle, searchSnippet)` helper~~ — DONE (in evaluator, not yet in production code)
 4. Prod audit on timeline-heavy snippets — NEXT
 5. Wire into hint extraction as metadata (not blocking extraction) — after prod audit
-6. Ranking weight changes — after prod audit confirms safety
+6. Ranking integration — gated on ranking eval harness (see below)
+
+## Ranking integration decision
+
+**Not yet as a full signal. Yes as a narrow penalty, after the ranking eval harness exists.**
+
+### Stage 1: build ranking eval first (prerequisite)
+
+Before changing any scoring, build:
+- ranking fixtures (job + candidate pool → expected shortlist quality)
+- ranking evaluator (run ranking pipeline, measure shortlist metrics)
+- shortlist-quality metrics (top-20 precision, first qualified rank, stale-in-top-10 rate)
+
+Without this, currentness tuning is blind. Currentness is a secondary modifier, not a core fit signal — it must be evaluated in context of the full ranking.
+
+### Stage 2: add one narrow currentness penalty
+
+Once the ranking harness exists, add **only**:
+- **Historical title penalty**: if `titleCurrentness === 'historical'`, multiply `roleScore` by 0.75–0.80
+
+Do **not** add:
+- Current title boost (rewarding current creates bias toward recent movers)
+- Unknown penalty (penalizing unknown punishes sparse data, which is most candidates)
+- Location currentness penalty (location currentness coverage is too sparse — 43.3% unknown rate)
+
+### Why only historical title
+
+The v1 currentness audit showed:
+- Title currentness detection is strong (96.7% accuracy, 0% stale FP)
+- Location currentness is sparse (43.3% unknown rate)
+- False positives are near zero across both
+- Remaining misses are conservative unknowns, not dangerous overclaims
+
+A `roleScore *= 0.75` when `titleCurrentness === 'historical'` is the cleanest v1 integration because:
+- It only touches the stale-title problem
+- It matches the semantics (stale title → lower role confidence)
+- It is easy to evaluate (one variable, one effect)
+- It avoids compounding penalties across multiple dimensions
+
+### Recommended sequence
+
+1. Build ranking eval harness
+2. Baseline current ranking on eval fixtures
+3. Add historical-title penalty (`roleScore *= 0.75` when historical)
+4. Rerun eval
+5. Only keep if shortlist metrics improve (top-20 precision, first qualified rank)
+
+### What not to do
+
+- Do not reward `current` — absence of staleness is the default, not a bonus
+- Do not penalize `unknown` — most candidates have no temporal markers
+- Do not use location currentness in scoring yet — coverage is too low
+- Do not mix currentness into multiple score components at once
 
 ## Key files
 

@@ -1,0 +1,22 @@
+{
+  "name": "ranking-assembly-phase-b",
+  "evaluator": "ranking-assembly",
+  "objective": "bad_top10_rate",
+  "maximize": false,
+  "constraints": {
+    "must_be_top_recall_at_10": { "min": 1.0 },
+    "top1_correct": { "min": 0.83 },
+    "bad_top20_rate": { "max": 0.19 }
+  },
+  "searchSpace": {
+    "bestMatchesMinFitScore": [0.45, 0.5, 0.55, 0.6],
+    "strictRescueMinFitScore": [0.25, 0.3, 0.35],
+    "techTop20RoleMin": [0.35, 0.4, 0.45],
+    "techTop20SkillMin": [0.1, 0.15, 0.2]
+  },
+  "budget": {
+    "iterations": 108
+  },
+  "config": {},
+  "seed": 42
+}

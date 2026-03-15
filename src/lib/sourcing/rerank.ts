@@ -19,6 +19,8 @@ import { buildJobRequirements, type SourcingJobContextInput } from './jd-digest'
 import { rankCandidates, compareFitWithConfidence } from './ranking';
 import { toRankingCandidate, readTrackFromDiagnostics, isValidJobContext } from './rescore';
 import { jobTrackToDbFilter } from './types';
+import { resolveRolesBatch, type RoleBatchEntry, type RoleResolution } from '@/lib/taxonomy/role-service';
+import { resolveLocationsBatch, type LocationBatchEntry, type LocationResolution } from '@/lib/taxonomy/location-service';
 
 const log = createLogger('SourcingRerank');
 
@@ -207,10 +209,39 @@ async function processRerankJob(
 
   // 5. rankCandidates — recomputes fitScore, matchTier, locationMatchType
   const config = getSourcingConfig();
+  let preResolvedRoles: Map<string, RoleResolution> | undefined;
+  let preResolvedLocations: Map<string, LocationResolution> | undefined;
+
+  if (config.roleGroqEnabled) {
+    const roleEntries: RoleBatchEntry[] = rankingCandidates.map((c) => ({
+      key: c.id,
+      title: c.headlineHint ?? c.searchTitle ?? '',
+      context: [c.headlineHint, c.searchTitle, c.searchSnippet].filter(Boolean).join(' '),
+    }));
+    const batchResult = await resolveRolesBatch(roleEntries);
+    if (!config.roleGroqShadowMode) {
+      preResolvedRoles = batchResult.resolutions;
+    }
+  }
+
+  if (config.locationGroqEnabled) {
+    const locationEntries: LocationBatchEntry[] = rankingCandidates.map((c) => ({
+      key: c.id,
+      location: c.snapshot?.location ?? c.locationHint,
+      context: [c.headlineHint, c.searchTitle, c.searchSnippet, requirements.location].filter(Boolean).join(' '),
+    }));
+    const batchResult = await resolveLocationsBatch(locationEntries);
+    if (!config.locationGroqShadowMode) {
+      preResolvedLocations = batchResult.resolutions;
+    }
+  }
+
   const scored = rankCandidates(rankingCandidates, requirements, {
     fitScoreEpsilon: config.fitScoreEpsilon,
     locationBoostWeight: getLocationBoostWeight(config, track),
     track,
+    preResolvedRoles,
+    preResolvedLocations,
   });
 
   if (track !== 'non_tech') {
@@ -226,6 +257,19 @@ async function processRerankJob(
     }
     if (unknownPenaltyApplied > 0) {
       scored.sort((a, b) => compareFitWithConfidence(a, b, config.fitScoreEpsilon));
+    }
+  }
+
+  // Mirror initial assembly admission rule: strict/best-match tech candidates
+  // must clear both the fit floor and a minimum skill floor.
+  if (track === 'tech') {
+    for (const sc of scored) {
+      if (
+        sc.matchTier === 'strict_location' &&
+        (sc.fitScore < config.bestMatchesMinFitScore || sc.fitBreakdown.skillScore < config.techTop20SkillMin)
+      ) {
+        sc.matchTier = 'expanded_location';
+      }
     }
   }
 

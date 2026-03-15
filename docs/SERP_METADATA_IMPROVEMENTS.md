@@ -1,7 +1,8 @@
 # SERP Metadata Improvements — Implementation Plan
 
 **Created:** 2026-02-12
-**Status:** Ready for Implementation
+**Updated:** 2026-03-15
+**Status:** Steps 1-10 COMPLETE. Step 11 (fixtures) partial. Dynamic scoring in shadow mode pending cutover.
 **Scope:** Improve utilization of Serper.dev metadata across bridge discovery, hint extraction, and scoring
 
 ---
@@ -63,7 +64,7 @@ scoring.ts → dynamic confidence (shadow mode), serpPosition tiebreaker
 
 ## Implementation Steps
 
-### Step 1: SERP Metadata Plumbing (KG + answerBox)
+### Step 1: SERP Metadata Plumbing (KG + answerBox) ✅ DONE
 
 **Files:**
 - `src/lib/search/providers/types.ts`
@@ -134,7 +135,7 @@ scoring.ts → dynamic confidence (shadow mode), serpPosition tiebreaker
 
 ---
 
-### Step 2: Stale Comment Cleanup
+### Step 2: Stale Comment Cleanup ✅ DONE
 
 **Files:**
 - `src/lib/search/providers/types.ts` — Line 4: change "BrightData, SearXNG, Brave" → "Serper, Brave (legacy: BrightData, SearXNG)"
@@ -147,7 +148,7 @@ scoring.ts → dynamic confidence (shadow mode), serpPosition tiebreaker
 
 ---
 
-### Step 3: Fix Hint Data Loss (Real SERP Data Flow)
+### Step 3: Fix Hint Data Loss (Real SERP Data Flow) ✅ DONE
 
 **Files:**
 - `src/lib/enrichment/bridge-discovery.ts` — `CandidateHints` interface
@@ -198,7 +199,7 @@ scoring.ts → dynamic confidence (shadow mode), serpPosition tiebreaker
 
 ---
 
-### Step 4: Integrate KG + answerBox into Hints
+### Step 4: Integrate KG + answerBox into Hints ✅ DONE
 
 **Files:**
 - `src/lib/enrichment/hint-extraction.ts`
@@ -247,7 +248,7 @@ scoring.ts → dynamic confidence (shadow mode), serpPosition tiebreaker
 
 ---
 
-### Step 5: SERP Ranking Fix + Tiebreaker
+### Step 5: SERP Ranking Fix + Tiebreaker ✅ DONE
 
 **Files:**
 - `src/lib/search/providers/serper.ts`
@@ -301,7 +302,7 @@ scoring.ts → dynamic confidence (shadow mode), serpPosition tiebreaker
 
 ---
 
-### Step 6: Expand Bridge Queries (company_only, company_location, budget)
+### Step 6: Expand Bridge Queries (company_only, company_location, budget) ✅ DONE
 
 **Files:**
 - `src/lib/enrichment/bridge-types.ts`
@@ -354,7 +355,7 @@ scoring.ts → dynamic confidence (shadow mode), serpPosition tiebreaker
 
 ---
 
-### Step 7: Hint Extraction Low-Risk Fixes (3a)
+### Step 7: Hint Extraction Low-Risk Fixes (3a) ✅ DONE
 
 **File:** `src/lib/enrichment/hint-extraction.ts`
 
@@ -400,7 +401,7 @@ scoring.ts → dynamic confidence (shadow mode), serpPosition tiebreaker
 
 ---
 
-### Step 8: URL-Anchored Improvements
+### Step 8: URL-Anchored Improvements ✅ DONE
 
 **Files:**
 - `src/lib/enrichment/sources/search-executor.ts`
@@ -441,7 +442,7 @@ scoring.ts → dynamic confidence (shadow mode), serpPosition tiebreaker
 
 ---
 
-### Step 9: i18n Hint Extraction (3b — Higher Risk)
+### Step 9: i18n Hint Extraction (3b — Higher Risk) ✅ DONE
 
 **File:** `src/lib/enrichment/hint-extraction.ts`
 
@@ -468,7 +469,7 @@ scoring.ts → dynamic confidence (shadow mode), serpPosition tiebreaker
 
 ---
 
-### Step 10: Dynamic Confidence Scoring (Shadow Mode)
+### Step 10: Dynamic Confidence Scoring (Shadow Mode) ✅ DONE
 
 **Files:**
 - `src/lib/enrichment/hint-extraction.ts`
@@ -501,7 +502,7 @@ scoring.ts → dynamic confidence (shadow mode), serpPosition tiebreaker
 
 ---
 
-### Step 11: Tests + Eval Fixtures (Inline with Each Step)
+### Step 11: Tests + Eval Fixtures (Inline with Each Step) — PARTIAL
 
 **Files:** `eval/*`, test files
 
@@ -588,5 +589,5 @@ Run `npm run eval` after each step. Shadow scoring (step 10) logs both old and n
 
 ---
 
-**Last Updated:** 2026-02-12
+**Last Updated:** 2026-03-15
 **Owner:** Engineering

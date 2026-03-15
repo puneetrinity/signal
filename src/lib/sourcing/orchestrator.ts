@@ -1032,7 +1032,9 @@ export async function runSourcingOrchestrator(
   const strictPool = scoredPool.filter((sc) => sc.matchTier === 'strict_location');
   let expandedPool = scoredPool.filter((sc) => sc.matchTier === 'expanded_location');
 
-  // Quality guard: demote strict candidates below fitScore floor to expanded pool
+  // Quality guard: demote strict candidates below fitScore floor to expanded pool.
+  // For tech, also require a minimum skill floor for best-match admission so
+  // exact location/role/seniority cannot hide zero-skill candidates in strict.
   let strictDemotedCount = 0;
   const qualifiedStrict: typeof strictPool = [];
   const strictBeforeDemotion = strictPool.length;
@@ -1042,7 +1044,10 @@ export async function runSourcingOrchestrator(
   let strictRescueApplied = false;
   let strictRescueMinFitScoreUsed: number | null = null;
   for (const sc of strictPool) {
-    if (sc.fitScore < config.bestMatchesMinFitScore) {
+    const failsTechStrictSkillFloor =
+      trackDecision?.track === 'tech' &&
+      sc.fitBreakdown.skillScore < config.techTop20SkillMin;
+    if (sc.fitScore < config.bestMatchesMinFitScore || failsTechStrictSkillFloor) {
       sc.matchTier = 'expanded_location';
       expandedPool.push(sc);
       demotedStrictCandidates.push(sc);
@@ -1067,6 +1072,7 @@ export async function runSourcingOrchestrator(
     const rescuedStrict = demotedStrictCandidates
       .filter((sc) => {
         if (sc.fitScore < config.strictRescueMinFitScore) return false;
+        if (trackDecision?.track === 'tech' && sc.fitBreakdown.skillScore < config.techTop20SkillMin) return false;
         // Role-aware rescue gate: prevents wrong-role candidates from being rescued
         // into the top bucket purely due to location match.
         // Tech: 0.7 keeps exact + strong adjacency (fullstack↔backend), blocks devops/qa.

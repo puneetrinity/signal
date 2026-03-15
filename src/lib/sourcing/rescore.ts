@@ -5,6 +5,8 @@ import { buildJobRequirements, type SourcingJobContextInput } from './jd-digest'
 import { rankCandidates, type CandidateForRanking } from './ranking';
 import { getLocationBoostWeight, getSourcingConfig } from './config';
 import { jobTrackToDbFilter, type JobTrack } from './types';
+import { resolveRolesBatch, type RoleBatchEntry, type RoleResolution } from '@/lib/taxonomy/role-service';
+import { resolveLocationsBatch, type LocationBatchEntry, type LocationResolution } from '@/lib/taxonomy/location-service';
 
 const log = createLogger('SourcingRescore');
 
@@ -160,10 +162,39 @@ export async function rescoreCompletedSourcingRowsForCandidate(
     const rankingCandidate = toRankingCandidate(candidate, trackFilter);
     const requirements = buildJobRequirements(row.sourcingRequest.jobContext);
     const rescoreConfig = getSourcingConfig();
+    let preResolvedRoles: Map<string, RoleResolution> | undefined;
+    let preResolvedLocations: Map<string, LocationResolution> | undefined;
+
+    if (rescoreConfig.roleGroqEnabled) {
+      const roleEntries: RoleBatchEntry[] = [{
+        key: rankingCandidate.id,
+        title: rankingCandidate.headlineHint ?? rankingCandidate.searchTitle ?? '',
+        context: [rankingCandidate.headlineHint, rankingCandidate.searchTitle, rankingCandidate.searchSnippet].filter(Boolean).join(' '),
+      }];
+      const batchResult = await resolveRolesBatch(roleEntries);
+      if (!rescoreConfig.roleGroqShadowMode) {
+        preResolvedRoles = batchResult.resolutions;
+      }
+    }
+
+    if (rescoreConfig.locationGroqEnabled) {
+      const locationEntries: LocationBatchEntry[] = [{
+        key: rankingCandidate.id,
+        location: rankingCandidate.snapshot?.location ?? rankingCandidate.locationHint,
+        context: [rankingCandidate.headlineHint, rankingCandidate.searchTitle, rankingCandidate.searchSnippet, requirements.location].filter(Boolean).join(' '),
+      }];
+      const batchResult = await resolveLocationsBatch(locationEntries);
+      if (!rescoreConfig.locationGroqShadowMode) {
+        preResolvedLocations = batchResult.resolutions;
+      }
+    }
+
     const scored = rankCandidates([rankingCandidate], requirements, {
       track,
       fitScoreEpsilon: rescoreConfig.fitScoreEpsilon,
       locationBoostWeight: getLocationBoostWeight(rescoreConfig, track),
+      preResolvedRoles,
+      preResolvedLocations,
     })[0];
     if (!scored) continue;
 

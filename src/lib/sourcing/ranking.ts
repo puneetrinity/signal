@@ -6,6 +6,7 @@ import { SENIORITY_LADDER, normalizeSeniorityFromText, seniorityDistance, type S
 import {
   resolveRoleDeterministic,
   adjacencyMap,
+  type RoleFamily,
   type RoleResolution,
 } from '@/lib/taxonomy/role-service';
 import {
@@ -48,6 +49,7 @@ export interface FitBreakdown {
   skillScoreMethod: 'snapshot' | 'text_fallback';
   roleScore: number;
   seniorityScore: number;
+  effectiveSeniorityScore?: number;
   activityFreshnessScore: number;
   locationBoost: number;
   unknownLocationPromotion?: boolean;
@@ -159,6 +161,28 @@ function hasCountryTokenOverlap(targetLocation: string, candidateLocation: strin
 }
 
 const SHORT_ALIAS_ALLOWLIST = new Set(['ts', 'js', 'go', 'pg', 'k8s']);
+const TECH_SNAPSHOT_ROLE_TYPES = new Set(['engineer', 'data_scientist', 'researcher']);
+const NONTECH_SNAPSHOT_ROLE_TYPES = new Set(['founder', 'designer', 'general']);
+const NONTECH_ROLE_FAMILIES = new Set<RoleFamily>([
+  'technical_account_manager',
+  'sales_engineer',
+  'customer_success',
+  'account_executive',
+  'business_development',
+  'account_manager',
+]);
+
+function inferTargetRoleTrack(targetRoleFamily: string | null): JobTrack | null {
+  if (!targetRoleFamily) return null;
+  return NONTECH_ROLE_FAMILIES.has(targetRoleFamily as RoleFamily) ? 'non_tech' : 'tech';
+}
+
+function inferSnapshotRoleTrack(roleType: string | null | undefined): JobTrack | null {
+  if (!roleType) return null;
+  if (TECH_SNAPSHOT_ROLE_TYPES.has(roleType)) return 'tech';
+  if (NONTECH_SNAPSHOT_ROLE_TYPES.has(roleType)) return 'non_tech';
+  return null;
+}
 
 function buildSkillRegex(form: string): RegExp {
   const escaped = form.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -337,6 +361,14 @@ function computeRoleScore(
   const confidence = resolution.confidence;
 
   if (!candidateFamily) {
+    const snapshotRoleTrack = inferSnapshotRoleTrack(candidate.snapshot?.roleType);
+    const targetRoleTrack = inferTargetRoleTrack(targetRoleFamily);
+    if (snapshotRoleTrack && targetRoleTrack) {
+      if (snapshotRoleTrack === targetRoleTrack) {
+        return snapshotRoleTrack === 'tech' ? 0.35 : 0.25;
+      }
+      return 0.1;
+    }
     // For non-tech/blended, unknown role is harsher — random engineers should sink
     return track !== 'tech' ? 0.15 : 0.3;
   }
@@ -374,8 +406,9 @@ function computeFreshnessScore(candidate: CandidateForRanking): number {
 
   if (!Number.isFinite(daysSince)) return 0.1;
   if (daysSince <= 30) return 1.0;
-  if (daysSince <= 90) return 0.7;
-  if (daysSince <= 180) return 0.4;
+  if (daysSince <= 90) return 0.75;
+  if (daysSince <= 180) return 0.5;
+  if (daysSince <= 365) return 0.25;
   return 0.1;
 }
 
@@ -455,7 +488,15 @@ export function rankCandidates(
       return {
         candidateId: c.id,
         fitScore,
-        fitBreakdown: { skillScore, skillScoreMethod, roleScore, seniorityScore, activityFreshnessScore, locationBoost },
+        fitBreakdown: {
+          skillScore,
+          skillScoreMethod,
+          roleScore,
+          seniorityScore,
+          effectiveSeniorityScore: effectiveSeniority,
+          activityFreshnessScore,
+          locationBoost,
+        },
         matchTier,
         locationMatchType,
       };

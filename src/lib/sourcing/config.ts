@@ -145,7 +145,7 @@ export function getSourcingConfig(): SourcingConfig {
     minDiscoveryShareLowQuality: clamp(parseFloatSafe(process.env.SOURCE_MIN_DISCOVERY_SHARE_LOW_QUALITY, 0.40), 0, 1),
     maxDiscoveryShare: clamp(parseFloatSafe(process.env.SOURCE_MAX_DISCOVERY_SHARE, 0.70), 0, 1),
     minStrictMatchesBeforeExpand: parseIntSafe(process.env.SOURCE_MIN_STRICT_MATCHES_BEFORE_EXPAND, 20),
-    bestMatchesMinFitScore: clamp(parseFloatSafe(process.env.SOURCE_BEST_MATCHES_MIN_FIT_SCORE, 0.45), 0, 1),
+    bestMatchesMinFitScore: clamp(parseFloatSafe(process.env.SOURCE_BEST_MATCHES_MIN_FIT_SCORE, 0.60), 0, 1),
     strictRescueCount: parseIntSafe(process.env.SOURCE_STRICT_RESCUE_COUNT, 5),
     strictRescueMinFitScore: clamp(parseFloatSafe(process.env.SOURCE_STRICT_RESCUE_MIN_FIT_SCORE, 0.30), 0, 1),
     countryGuardEnabled: process.env.SOURCE_COUNTRY_GUARD_ENABLED !== 'false',
@@ -210,7 +210,7 @@ export function getSourcingConfig(): SourcingConfig {
       0.20,
     ),
     locationBoostWeightNonTech: clamp(
-      parseFloatSafe(process.env.SOURCE_LOCATION_BOOST_WEIGHT_NON_TECH, globalLocationBoostWeight),
+      parseFloatSafe(process.env.SOURCE_LOCATION_BOOST_WEIGHT_NON_TECH, globalLocationBoostWeight || 0.03),
       0,
       0.15,
     ),
@@ -227,7 +227,7 @@ export function getSourcingConfig(): SourcingConfig {
     unknownAssemblyDiscoveredReserveTech: parseNonNegativeIntSafe(process.env.SOURCE_UNKNOWN_ASSEMBLY_DISCOVERED_RESERVE_TECH, 2),
     // Top-20 quality guards (tech only)
     techTop20GuardsEnabled: process.env.SOURCE_TECH_TOP20_GUARDS_ENABLED !== 'false',
-    techTop20RoleMin: clamp(parseFloatSafe(process.env.SOURCE_TECH_TOP20_ROLE_MIN, 0.30), 0, 1),
+    techTop20RoleMin: clamp(parseFloatSafe(process.env.SOURCE_TECH_TOP20_ROLE_MIN, 0.35), 0, 1),
     techTop20RoleCap: clamp(parseNonNegativeIntSafe(process.env.SOURCE_TECH_TOP20_ROLE_CAP, 1), 0, 5),
     techTop20SkillMin: clamp(parseFloatSafe(process.env.SOURCE_TECH_TOP20_SKILL_MIN, 0.10), 0, 1),
   };
