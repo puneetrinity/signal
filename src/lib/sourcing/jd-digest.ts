@@ -16,8 +16,17 @@ const SKILL_ALIASES: Record<string, string> = {
   'angularjs': 'angular',
   'angular.js': 'angular',
   'golang': 'go',
+  'nextjs': 'next.js',
+  'next js': 'next.js',
+  'nuxtjs': 'nuxt',
+  'nuxt.js': 'nuxt',
+  'expressjs': 'express',
+  'express.js': 'express',
+  'fastapi': 'fastapi',
+  'fast api': 'fastapi',
   'postgres': 'postgresql',
   'pg': 'postgresql',
+  'postgressql': 'postgresql',
   'mongo': 'mongodb',
   'k8s': 'kubernetes',
   'ts': 'typescript',
@@ -92,6 +101,37 @@ const SKILL_CONCEPT_SURFACE_FORMS: Record<string, string[]> = {
   'integrations': ['integrations', 'integration', 'api integration', 'system integration', 'platform integration'],
   'apis': ['apis', 'api', 'rest api', 'api development', 'web api', 'api design'],
 };
+
+/**
+ * Skills whose canonical name is a common English word.
+ * These require nearby tech context in text-fallback matching to avoid FPs
+ * like "spring cleaning" or "rust removal" being treated as skill evidence.
+ */
+export const AMBIGUOUS_SKILLS = new Set([
+  'go', 'rust', 'swift', 'spring', 'spark', 'express',
+  'flask', 'ruby', 'chef', 'consul', 'puppet',
+]);
+
+/**
+ * Patterns that indicate the surrounding text is tech-related.
+ * If an ambiguous skill is found but none of these patterns match,
+ * the skill match is suppressed in text-fallback mode.
+ */
+const TECH_CONTEXT_PATTERNS = [
+  /\b(?:engineer|developer|architect|devops|sre|backend|frontend|fullstack|full[- ]stack|programmer|coder)\b/i,
+  /\b(?:software|technical|tech|development|programming|coding|api|sdk|saas|cloud|infrastructure)\b/i,
+  /\b(?:python|java|typescript|javascript|node\.?js|react|angular|vue|kubernetes|docker|aws|gcp|azure|linux|sql|nosql|redis|kafka|terraform|ansible|ci\/cd|git|github|microservice)\b/i,
+  /\b(?:senior|junior|staff|lead|principal)\s+(?:engineer|developer|architect)\b/i,
+];
+
+/**
+ * Check if an ambiguous skill match should be accepted based on tech context.
+ * Returns true if the skill is not ambiguous, or if tech context is present.
+ */
+export function hasRequiredContext(canonicalSkill: string, textBag: string): boolean {
+  if (!AMBIGUOUS_SKILLS.has(canonicalSkill)) return true;
+  return TECH_CONTEXT_PATTERNS.some(p => p.test(textBag));
+}
 
 export function canonicalizeSkill(skill: string): string {
   const lower = skill.toLowerCase().trim();
