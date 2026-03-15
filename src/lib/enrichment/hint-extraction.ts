@@ -203,7 +203,7 @@ export function extractCompanyFromHeadline(headline: string | null): string | nu
   // Pattern 1: "at Company" or "@ Company" (Unicode-aware, non-cased scripts)
   // Comma is a terminator (not in capture group) to stop before ", formerly at", ", Board Member"
   // Dash terminator requires preceding space to preserve hyphenated names like "Hewlett-Packard"
-  const atMatch = headline.match(/(?:\bat\b|@)\s+([\p{L}][\p{L}0-9\s&.'-]+?)(?:\s*[|·,]|\s+-|$)/iu);
+  const atMatch = headline.match(/(?:\bat\b|@)\s*([\p{L}][\p{L}0-9\s&.'-]+?)(?:\s*[|·,]|\s+-|$)/iu);
   if (atMatch) {
     const candidate = atMatch[1].trim();
     // Reject if it's clearly an academic institution (not a company)
