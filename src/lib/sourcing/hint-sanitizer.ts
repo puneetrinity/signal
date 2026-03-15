@@ -54,16 +54,33 @@ const BIO_REJECT_PATTERNS = [
 const KNOWN_CITIES = new Set([
   'san francisco', 'new york', 'los angeles', 'seattle', 'austin',
   'boston', 'chicago', 'denver', 'atlanta', 'miami', 'portland',
-  'london', 'berlin', 'paris', 'amsterdam', 'dublin', 'singapore',
-  'toronto', 'vancouver', 'sydney', 'melbourne', 'bangalore', 'mumbai',
+  'houston', 'dallas', 'phoenix', 'philadelphia', 'san diego', 'san jose',
+  'washington dc', 'raleigh', 'minneapolis', 'detroit', 'salt lake city',
+  'charlotte', 'nashville', 'pittsburgh', 'mountain view', 'palo alto',
+  'london', 'manchester', 'edinburgh', 'glasgow', 'bristol',
+  'berlin', 'munich', 'frankfurt', 'hamburg',
+  'paris', 'amsterdam', 'dublin', 'singapore',
+  'toronto', 'vancouver', 'montreal', 'ottawa', 'calgary', 'edmonton', 'halifax',
+  'sydney', 'melbourne', 'brisbane', 'perth',
+  'bangalore', 'bengaluru', 'mumbai', 'bombay',
   'delhi', 'new delhi', 'hyderabad', 'pune', 'chennai', 'kolkata',
   'noida', 'gurgaon', 'gurugram', 'ahmedabad', 'jaipur', 'lucknow',
-  'chandigarh', 'kochi', 'indore',
+  'chandigarh', 'kochi', 'indore', 'coimbatore', 'nagpur', 'visakhapatnam',
+  'thiruvananthapuram',
+  'tokyo', 'osaka',
+  'sao paulo', 'rio de janeiro',
+  'dubai', 'abu dhabi',
+  'jakarta',
+  'madrid', 'barcelona',
+  'rome', 'milan',
+  'mexico city', 'guadalajara', 'monterrey',
 ]);
 
 const KNOWN_COUNTRIES = new Set([
-  'india', 'germany', 'france', 'canada', 'australia',
-  'united kingdom', 'japan', 'brazil',
+  'india', 'germany', 'deutschland', 'france', 'canada', 'australia',
+  'united kingdom', 'united states', 'japan', 'brazil',
+  'singapore', 'indonesia', 'ireland', 'netherlands', 'holland',
+  'spain', 'italy', 'mexico', 'sweden',
 ]);
 
 const KNOWN_STATES_FULL = new Set([
@@ -78,7 +95,7 @@ const SHORT_STATE_RE = new RegExp(`\\b(${SHORT_STATE_CODES.join('|')})\\b`, 'i')
 
 const LOCATION_INDICATOR_WORDS = [
   'area', 'region', 'metropolitan', 'greater', 'bay',
-  'city', 'county', 'state', 'province',
+  'city', 'county', 'state', 'province', 'urban', 'district',
 ];
 
 export function containsGeoToken(lower: string, original: string): boolean {

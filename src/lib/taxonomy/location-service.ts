@@ -57,6 +57,8 @@ const LOCATION_ALIAS_REWRITES: Array<[RegExp, string]> = [
   [/\bnyc\b/gi, 'new york'],
   [/\bsf\b/gi, 'san francisco'],
   [/\bgurugram\b/gi, 'gurgaon'],
+  [/\bmünchen\b/gi, 'munich'],
+  [/\bm nchen\b/gi, 'munich'],
 ];
 
 const LOCATION_PLACEHOLDERS = new Set([
@@ -85,7 +87,7 @@ const COUNTRY_CODE_ALIASES: Record<string, string[]> = {
   AE: ['uae', 'united arab emirates', 'dubai', 'abu dhabi'],
   AU: ['australia', 'sydney', 'melbourne', 'brisbane', 'perth', 'adelaide'],
   BR: ['brazil', 'sao paulo', 'rio de janeiro'],
-  CA: ['canada', 'toronto', 'vancouver', 'montreal', 'ottawa', 'calgary', 'edmonton'],
+  CA: ['canada', 'toronto', 'vancouver', 'montreal', 'ottawa', 'calgary', 'edmonton', 'halifax', 'winnipeg'],
   DE: ['germany', 'deutschland', 'berlin', 'munich', 'frankfurt', 'hamburg'],
   ES: ['spain', 'madrid', 'barcelona'],
   FR: ['france', 'paris', 'lyon', 'marseille'],
@@ -98,13 +100,25 @@ const COUNTRY_CODE_ALIASES: Record<string, string[]> = {
   MX: ['mexico', 'mexico city', 'guadalajara', 'monterrey'],
   NL: ['netherlands', 'holland', 'amsterdam', 'rotterdam', 'the hague'],
   SG: ['singapore'],
+  SE: ['sweden', 'stockholm', 'gothenburg', 'malmo'],
   US: ['us', 'u s', 'usa', 'u s a', 'united states', 'united states of america', 'america',
     'san francisco', 'new york', 'los angeles', 'seattle', 'austin', 'boston', 'chicago',
     'denver', 'atlanta', 'miami', 'portland', 'houston', 'dallas', 'phoenix', 'philadelphia',
-    'san diego', 'san jose', 'washington dc', 'raleigh', 'minneapolis', 'detroit',
+    'san diego', 'san jose', 'washington dc', 'washington d c', 'raleigh', 'minneapolis', 'detroit',
     'salt lake city', 'charlotte', 'nashville', 'pittsburgh', 'columbus', 'indianapolis',
+    'mountain view', 'palo alto', 'redmond', 'cupertino', 'menlo park',
     'san francisco bay area', 'bay area', 'silicon valley',
-    'new york city', 'new york city metropolitan area', 'nyc metropolitan area'],
+    'new york city', 'new york city metropolitan area', 'nyc metropolitan area',
+    // US state names
+    'california', 'texas', 'florida', 'washington', 'massachusetts',
+    'illinois', 'georgia', 'colorado', 'virginia', 'oregon',
+    'north carolina', 'new jersey', 'pennsylvania', 'ohio', 'michigan',
+    'arizona', 'maryland', 'minnesota', 'tennessee', 'indiana', 'missouri', 'utah',
+    'connecticut',
+    // US state abbreviations (post-normalization form)
+    'ca', 'tx', 'fl', 'wa', 'ma', 'il', 'ga', 'co', 'va', 'or',
+    'nc', 'nj', 'pa', 'oh', 'mi', 'az', 'md', 'mn', 'tn', 'in', 'mo', 'ut', 'ct',
+    'ny', 'dc'],
 };
 
 const LOCATION_LLM_BATCH_CONCURRENCY = 16;
@@ -171,12 +185,18 @@ export function extractPrimaryCity(normalizedLocation: string): string | null {
   if (!firstSegment) return null;
   firstSegment = firstSegment
     .replace(/^greater\s+/i, '')
-    .replace(/\s+(area|metropolitan\s+region|region)$/i, '')
+    .replace(/\s+(bay\s+area|area|metropolitan\s+area|metropolitan\s+region|metropolitan|region|urban|district)$/i, '')
+    .replace(/\s+city$/i, '')
     .trim();
   if (!firstSegment) return null;
   const tokens = firstSegment.split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return null;
   if (tokens.every((token) => COUNTRY_TOKENS.has(token))) return null;
+  // Strip trailing country words (e.g. "hyderabad india" → "hyderabad")
+  if (tokens.length > 1 && COUNTRY_TOKENS.has(tokens[tokens.length - 1])) {
+    const cityTokens = tokens.slice(0, -1);
+    if (cityTokens.length > 0) return cityTokens.join(' ');
+  }
   return firstSegment;
 }
 
@@ -195,6 +215,9 @@ export function deriveCountryCodeFromLocationText(
   if (!normalized) return null;
 
   const segments = normalized.split(',').map((segment) => segment.trim()).filter(Boolean);
+  const wordTokens = segments.flatMap((seg) => seg.split(/\s+/).filter(Boolean));
+  const derivedCity = extractPrimaryCity(normalized);
+
   const candidates = [
     // Last segment (e.g. "india" from "bangalore, india")
     segments[segments.length - 1],
@@ -204,6 +227,12 @@ export function deriveCountryCodeFromLocationText(
     normalized,
     // Each individual segment (e.g. "seattle" from "seattle, wa")
     ...segments,
+    // Last word token (e.g. "india" from "hyderabad india")
+    wordTokens[wordTokens.length - 1],
+    // Last two word tokens joined (e.g. "united states")
+    wordTokens.length > 1 ? wordTokens.slice(-2).join(' ') : null,
+    // Derived city after stripping prefixes/suffixes (e.g. "bangalore" from "greater bangalore area")
+    derivedCity,
   ].filter((value): value is string => Boolean(value));
 
   const seen = new Set<string>();

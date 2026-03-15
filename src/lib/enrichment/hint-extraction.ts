@@ -9,7 +9,12 @@
  */
 
 import type { HintWithConfidence, EnrichedHints, HintSource } from './bridge-types';
-import { isNoisyHint, isLikelyLocationHint as isLikelyLocation, containsGeoToken } from '@/lib/sourcing/hint-sanitizer';
+import {
+  isNoisyHint,
+  isLikelyLocationHint as isLikelyLocation,
+  containsGeoToken,
+  locationHintQualityScore,
+} from '@/lib/sourcing/hint-sanitizer';
 import { assessLocationCountryConsistency, extractSerpSignals } from '@/lib/search/serp-signals';
 
 /**
@@ -196,7 +201,9 @@ export function extractCompanyFromHeadline(headline: string | null): string | nu
   if (!headline) return null;
 
   // Pattern 1: "at Company" or "@ Company" (Unicode-aware, non-cased scripts)
-  const atMatch = headline.match(/(?:\bat\b|@)\s+([\p{L}][\p{L}0-9\s&.,'-]+?)(?:\s*[|·\-]|$)/iu);
+  // Comma is a terminator (not in capture group) to stop before ", formerly at", ", Board Member"
+  // Dash terminator requires preceding space to preserve hyphenated names like "Hewlett-Packard"
+  const atMatch = headline.match(/(?:\bat\b|@)\s+([\p{L}][\p{L}0-9\s&.'-]+?)(?:\s*[|·,]|\s+-|$)/iu);
   if (atMatch) {
     const candidate = atMatch[1].trim();
     // Reject if it's clearly an academic institution (not a company)
@@ -207,12 +214,16 @@ export function extractCompanyFromHeadline(headline: string | null): string | nu
     }
   }
 
-  // Pattern 2: Check for known company indicators after comma/pipe
+  // Pattern 2: Check for known company indicators after comma/pipe/middot
+  // Only when headline actually has delimiters; otherwise the whole headline
+  // would be tested as a single segment, causing false positives
   const segments = headline.split(/\s*[|·,]\s*/);
-  for (let i = segments.length - 1; i >= 0; i--) {
-    const seg = segments[i].trim();
-    if (isLikelyCompany(seg)) {
-      return cleanCompanyName(seg);
+  if (segments.length > 1) {
+    for (let i = segments.length - 1; i >= 0; i--) {
+      const seg = segments[i].trim();
+      if (isLikelyCompany(seg)) {
+        return cleanCompanyName(seg);
+      }
     }
   }
 
@@ -239,14 +250,48 @@ const NON_LOCATION_PATTERNS = [
   /\b(?:a|an|the)\s+(?:\w+\s+)+(?:Company|company)\b/i,
   /\b(?:CEO|CTO|COO|CFO|AVP|SVP|VP|Director|Manager|Lead|Engineer|Architect|Scientist|Fellow|Advocate|Researcher|Supervisor|Founder|Executive|Generalist|Specialist|Consultant)\b/i,
   /\b(?:at|@)\s+\w/i,
-  /\b(?:Python|Java|React|Node|Django|Flask|Kafka|Docker|Kubernetes|Spring|FastAPI|Swift|TypeScript|PyTorch|Salesforce|AWS|Azure|GCP|NLP)\b/i,
+  /\b(?:Python|Java|React|Node|Django|Flask|Kafka|Docker|Kubernetes|Spring|FastAPI|Swift|TypeScript|PyTorch|Salesforce|AWS|Azure|GCP|NLP|Elixir|Prometheus|Terraform|Ansible|Grafana|Redis|MongoDB|Rails|Hadoop|Spark)\b/i,
   /\b(?:Sales|Security|Customer|Enterprise|Product|Technical|Software|Data|Deep|AI|ML|Cloud|Platform)\b.*\b(?:Sales|Growth|Analytics|Engineering|Research|Services|Success|Onboarding)\b/i,
   /\be-Learning\b/i,
   /\bthe\s+#\d/i,
+  // Company/institution/business words (never appear in real location names)
+  /\b(?:Technologies|Institutions?|Pvt|Private Limited|Retail|Finance|Financial|Consulting|Jewels|Jewellery|Jewelry|Exchange|Stock|Academy|IBS)\b/i,
+  // "Ex Company-Name" pattern: "Ex Reliance Retail-Urban Ladder"
+  /^Ex\s+\p{Lu}/u,
+  // Business/industry phrases that aren't locations
+  /\b(?:Commercial|Investment|Real Estate)\b.*\b(?:Investment|Services|Banking|Real Estate)\b/i,
+  // Parentheses indicate company/org descriptions: "LSEG (London Stock Exchange Group)"
+  /[()]/,
+  // All-caps org abbreviation at start: "HDFC Life", "LSEG London"
+  /^[A-Z]{2,6}\s/,
 ];
 
 function looksLikeNonLocation(value: string): boolean {
   return NON_LOCATION_PATTERNS.some((pattern) => pattern.test(value));
+}
+
+/**
+ * Reject "First Last" person-name patterns that happen to contain a city name.
+ * "Paris Williams" → true (second word not geo). "Hyderabad India" → false (both geo).
+ */
+function isTwoWordPersonName(value: string): boolean {
+  if (!value || value.includes(',')) return false;
+  const words = value.split(/\s+/);
+  if (words.length !== 2) return false;
+  if (!/^\p{Lu}\p{L}+$/u.test(words[0]) || !/^\p{Lu}\p{L}+$/u.test(words[1])) return false;
+  // If the second word is also a geo token, it's likely a location (e.g. "Hyderabad India")
+  if (containsGeoToken(words[1].toLowerCase(), words[1])) return false;
+  return true;
+}
+
+// Title fallback is much riskier than snippet extraction because LinkedIn titles
+// often look like "Name - Company - LinkedIn". Require stronger location evidence.
+function isStrongTitleLocationSegment(value: string): boolean {
+  if (!value) return false;
+  if (looksLikeNonLocation(value) || !isLikelyLocation(value)) return false;
+  if (!containsGeoToken(value.toLowerCase(), value)) return false;
+  if (/[&/@()]/.test(value)) return false;
+  return locationHintQualityScore(value) >= 2;
 }
 
 /**
@@ -275,9 +320,9 @@ export function extractLocationFromSnippet(snippet: string): string | null {
   const cleaned = snippet.replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{26FF}]\s*/u, '');
   snippet = cleaned;
 
-  // Pattern 1: Explicit "Location: X" (stop at middot or newline)
+  // Pattern 1: Explicit "Location: X" (stop at middot, newline, or parenthetical)
   // Trim trailing sentence fragments: ". View profile", ". 500+ connections"
-  const locationMatch = snippet.match(/Location:\s*([^·\n]+)/i);
+  const locationMatch = snippet.match(/Location:\s*([^·\n(]+)/i);
   if (locationMatch) {
     const loc = trimLocationSentenceTail(locationMatch[1]);
     if (isLikelyLocation(loc) && !looksLikeNonLocation(loc)) return loc;
@@ -300,6 +345,27 @@ export function extractLocationFromSnippet(snippet: string): string | null {
     }
   }
 
+  // Pattern 2b: First segment before period with known geo token
+  // "Greater Bangalore Area. Solution Architect..." or "Boston. Helping enterprises..."
+  // Stricter than middot pattern: require quality >= 2, reject person-name patterns
+  // "Paris Williams" → reject (second word not geo), "Hyderabad India" → keep (both geo)
+  const periodSegments = snippet.split(/\.\s+/);
+  if (periodSegments.length > 1) {
+    const first = periodSegments[0].trim();
+    const looksLikePersonName = isTwoWordPersonName(first);
+    if (
+      first.length >= 3 &&
+      first.length <= 50 &&
+      !looksLikePersonName &&
+      containsGeoToken(first.toLowerCase(), first) &&
+      isLikelyLocation(first) &&
+      !looksLikeNonLocation(first) &&
+      locationHintQualityScore(first) >= 2
+    ) {
+      return first;
+    }
+  }
+
   // Pattern 4: Common geographic patterns (Unicode-aware)
   const geoMatch = snippet.match(/(?:based in|located in|from)\s+([\p{L}][\p{L}\s,]+?)(?:\.|,|\s*·)/iu);
   if (geoMatch) {
@@ -307,11 +373,31 @@ export function extractLocationFromSnippet(snippet: string): string | null {
     if (isLikelyLocation(loc) && !looksLikeNonLocation(loc)) return loc;
   }
 
-  // Pattern 5: "City, Country" anywhere in snippet (handles mid-text locations like "3 years. Bangalore, India. Built ...")
+  // Pattern 5: "City, Country" anywhere in snippet (handles mid-text locations)
+  // "3 years. Bangalore, India. Built ..." or "Dec 2025 - Present 4 months. Toronto, Ontario, Canada."
   // Require containsGeoToken + capitalized words to avoid "Java, Spring" and "Co-Founder, AI"
-  for (const inlineGeoMatch of snippet.matchAll(/(?:^|[.·|]\s*)(\p{Lu}\p{L}{2,}(?:\s\p{L}+)*,\s*\p{Lu}\p{L}{2,}(?:\s\p{L}+)*)(?:\s*[.·|]|$)/gu)) {
+  for (const inlineGeoMatch of snippet.matchAll(/(?:^|[.·|]\s*)(\p{Lu}\p{L}{2,}(?:\s\p{L}+)*,\s*(?:\p{Lu}\p{L}{1,}|[A-Z]{2})(?:\s\p{L}+)*)\b(?:\s*[.·|,]|$)/gu)) {
     const loc = inlineGeoMatch[1].trim();
     if (containsGeoToken(loc.toLowerCase(), loc) && isLikelyLocation(loc) && !looksLikeNonLocation(loc)) return loc;
+  }
+
+  // Pattern 6: Single known city anywhere after sentence boundary
+  // "Senior Java Developer. Tech Mahindra. Aug 2018 - Oct 2021. Hyderabad India. Building..."
+  // Only match when preceded by ". " and followed by ". " or end
+  // Reject person-name patterns and require quality >= 2
+  for (const singleCityMatch of snippet.matchAll(/(?:^|[.·|]\s+)(\p{Lu}\p{L}{2,}(?:\s\p{Lu}\p{L}+)*)\s*[.·|]/gu)) {
+    const loc = singleCityMatch[1].trim();
+    if (
+      loc.length >= 3 &&
+      loc.length <= 40 &&
+      !isTwoWordPersonName(loc) &&
+      containsGeoToken(loc.toLowerCase(), loc) &&
+      isLikelyLocation(loc) &&
+      !looksLikeNonLocation(loc) &&
+      locationHintQualityScore(loc) >= 2
+    ) {
+      return loc;
+    }
   }
 
   return null;
@@ -332,7 +418,7 @@ export function extractLocationFromSerpResult(title: string, snippet: string): s
   const segments = cleaned.split(/\s+-\s+/);
   for (let i = segments.length - 1; i >= 1; i--) {
     const seg = segments[i].trim();
-    if (seg.length <= 50 && isLikelyLocation(seg) && !looksLikeNonLocation(seg)) return seg;
+    if (seg.length <= 50 && isStrongTitleLocationSegment(seg)) return seg;
   }
   return null;
 }
@@ -448,10 +534,22 @@ function isLikelyCompany(str: string): boolean {
     if (lower.includes(company)) return true;
   }
 
-  // Starts with a letter (Unicode-aware), reasonable length, no obvious job keywords
+  // Fallback: starts with a letter, reasonable length, not a role/title
   if (/^\p{L}/u.test(str) && str.length >= 2 && str.length <= 40) {
-    const jobKeywords = ['engineer', 'developer', 'manager', 'analyst', 'seeking', 'open to'];
-    for (const kw of jobKeywords) {
+    // Reject strings with no Latin characters (likely non-English role text)
+    if (!/[a-zA-Z]/.test(str)) return false;
+
+    // Reject known role/title words
+    const roleKeywords = [
+      'engineer', 'developer', 'manager', 'analyst', 'architect',
+      'consultant', 'director', 'designer', 'lead', 'scientist',
+      'researcher', 'specialist', 'strategist', 'coordinator', 'advisor',
+      'head of', 'chief', 'president', 'founder', 'intern', 'associate',
+      'senior', 'staff', 'principal', 'junior', 'executive', 'officer',
+      'seeking', 'open to',
+      'cto', 'cfo', 'coo', 'ceo', 'vp', 'svp', 'avp',
+    ];
+    for (const kw of roleKeywords) {
       if (lower.includes(kw)) return false;
     }
     return true;
