@@ -97,7 +97,7 @@ const SKILL_CONCEPT_SURFACE_FORMS: Record<string, string[]> = {
   'consultative selling': ['consultative selling', 'solution selling', 'challenger', 'meddic', 'value selling'],
   // Customer success / TAM concepts
   'customer success': ['customer success', 'csm', 'client success', 'customer retention', 'customer engagement'],
-  'stakeholder management': ['stakeholder management', 'account management', 'relationship management', 'client management', 'key accounts'],
+  'stakeholder management': ['stakeholder management', 'account management', 'relationship management', 'client management'],
   'integrations': ['integrations', 'integration', 'api integration', 'system integration', 'platform integration'],
   'apis': ['apis', 'api', 'rest api', 'api development', 'web api', 'api design'],
 };
@@ -131,6 +131,63 @@ const TECH_CONTEXT_PATTERNS = [
 export function hasRequiredContext(canonicalSkill: string, textBag: string): boolean {
   if (!AMBIGUOUS_SKILLS.has(canonicalSkill)) return true;
   return TECH_CONTEXT_PATTERNS.some(p => p.test(textBag));
+}
+
+// ---------------------------------------------------------------------------
+// Non-tech concept rules — narrow combinatorial detectors for multi-word
+// business skills that can't be reliably matched by single-phrase aliases.
+// Each rule requires tokens from multiple buckets to co-occur in the textBag.
+// Used only in the text fallback path, never for snapshot matching.
+// ---------------------------------------------------------------------------
+
+interface ConceptRule {
+  /** All bucket patterns must match (AND). Each bucket is an OR of terms. */
+  require: RegExp[];
+  /** If any exclude pattern matches, suppress the detection. */
+  exclude?: RegExp[];
+}
+
+const NONTECH_CONCEPT_RULES: Record<string, ConceptRule> = {
+  'enterprise sales': {
+    // Proximity rule: enterprise-bucket and sales-bucket must be within ~30 chars
+    // Prevents cross-phrase co-occurrence like "new logo...strategic partnership"
+    require: [
+      /(?:\b(?:enterprise|strategic|complex|b2b)\b.{0,30}\b(?:sales|selling|deals|account\s+executive|new\s+logo|pipeline|AE)\b|\b(?:sales|selling|deals|account\s+executive|new\s+logo|pipeline)\b.{0,30}\b(?:enterprise|strategic|complex|b2b)\b)/i,
+    ],
+  },
+  'stakeholder management': {
+    // Two patterns (OR): either phrase-proximity "account/client/… manager/management"
+    // or "key accounts" with a nearby action/ownership signal
+    require: [
+      /(?:\b(?:account|relationship|client|stakeholder)\s+manag(?:e|er|ement|ing)\b|\bmanag(?:e|er|ement|ing)\s+(?:account|relationship|client|stakeholder)\b|\bkey\s+accounts?\b.{0,40}\b(?:manag|own|oversee|renewal|expansion|adoption|relationship|retain)|\b(?:manag|own|oversee|renewal|expansion|adoption|relationship|retain)\w*\b.{0,40}\bkey\s+accounts?\b)/i,
+    ],
+  },
+  'pipeline management': {
+    require: [
+      /\b(?:pipeline)\b/i,
+      /\b(?:forecast(?:ing)?|generation|coverage|deals?)\b/i,
+    ],
+    exclude: [
+      /\b(?:weather|oil|gas|petroleum|infrastructure|refinery)\b/i,
+    ],
+  },
+};
+
+export type ConceptResult = 'match' | 'exclude' | 'no_match';
+
+/**
+ * Check if a non-tech concept rule matches the text.
+ * Returns:
+ *   'match'    — concept detected (accept)
+ *   'exclude'  — negative guard fired (reject, skip alias fallback)
+ *   'no_match' — rule exists but didn't match (fall through to alias)
+ *   undefined  — no concept rule registered (fall through to alias)
+ */
+export function detectNontechConcept(canonicalSkill: string, textBag: string): ConceptResult | undefined {
+  const rule = NONTECH_CONCEPT_RULES[canonicalSkill];
+  if (!rule) return undefined;
+  if (rule.exclude?.some(p => p.test(textBag))) return 'exclude';
+  return rule.require.every(p => p.test(textBag)) ? 'match' : 'no_match';
 }
 
 export function canonicalizeSkill(skill: string): string {

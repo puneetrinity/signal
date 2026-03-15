@@ -1,29 +1,27 @@
 #!/usr/bin/env npx tsx
 /**
- * Skill Evidence Evaluator — Tech Track
+ * Skill Evidence Evaluator — Non-Tech Track
  *
- * Tests the text fallback skill matching path (getSkillSurfaceForms + buildSkillRegex)
- * against gold-labeled fixtures.
+ * Tests the text fallback skill matching path for non-tech skills
+ * (sales, customer success, marketing, operations) against gold-labeled fixtures.
  *
- * For each fixture: given (headline, snippet, target_skills), does the matcher
- * correctly detect which skills have textual evidence?
+ * Mirrors eval-skill-evidence-tech.ts but focused on business/GTM language.
  *
  * Gold labels per skill:
  *   explicit      — skill named directly in text → expect: detected
- *   inferred      — skill implied but not named  → expect: not detected (current matcher is literal)
+ *   inferred      — skill implied but not named  → expect: not detected
  *   absent        — no evidence                  → expect: not detected
- *   false_positive — word present but not skill   → expect: not detected (ideal), detected (current)
+ *   false_positive — word present but wrong meaning → expect: not detected (ideal)
  *
  * Usage:
- *   npx tsx scripts/eval-skill-evidence-tech.ts
- *   npx tsx scripts/eval-skill-evidence-tech.ts --verbose
- *   npx tsx scripts/eval-skill-evidence-tech.ts --file research/datasets/skill-evidence-tech-adversarial.jsonl
+ *   npx tsx scripts/eval-skill-evidence-nontech.ts
+ *   npx tsx scripts/eval-skill-evidence-nontech.ts --verbose
+ *   npx tsx scripts/eval-skill-evidence-nontech.ts --file research/datasets/skill-evidence-nontech-adversarial.jsonl
  */
 
 import { readFileSync } from 'fs';
-import { getSkillSurfaceForms, canonicalizeSkill, hasRequiredContext } from '../src/lib/sourcing/jd-digest';
+import { getSkillSurfaceForms, canonicalizeSkill, hasRequiredContext, detectNontechConcept } from '../src/lib/sourcing/jd-digest';
 
-// Replicate buildSkillRegex and SHORT_ALIAS_ALLOWLIST from ranking.ts
 const SHORT_ALIAS_ALLOWLIST = new Set(['ts', 'js', 'go', 'pg', 'k8s']);
 
 function buildSkillRegex(form: string): RegExp {
@@ -39,6 +37,12 @@ function detectSkillInText(skill: string, textBag: string): boolean {
   const canonical = canonicalizeSkill(skill);
   // Ambiguous skills require nearby tech context — same guard as ranking.ts
   if (!hasRequiredContext(canonical, textBag)) return false;
+
+  // Try non-tech concept rule first (combinatorial bucket match)
+  const conceptResult = detectNontechConcept(canonical, textBag);
+  if (conceptResult === 'match') return true;
+  if (conceptResult === 'exclude') return false;
+  // 'no_match' or undefined → fall through to alias regex
 
   // Standard alias regex matching
   const forms = getSkillSurfaceForms(skill);
@@ -68,8 +72,6 @@ interface SkillResult {
 }
 
 function expectedDetection(gold: string): boolean {
-  // explicit → should detect; inferred/absent → should not detect
-  // false_positive → ideally should not detect (but current matcher may)
   return gold === 'explicit';
 }
 
@@ -98,10 +100,8 @@ function main() {
   const files = file
     ? [file]
     : [
-        'research/datasets/skill-evidence-tech-core.jsonl',
-        'research/datasets/skill-evidence-tech-adversarial.jsonl',
-        'research/datasets/skill-evidence-tech-gap.jsonl',
-        'research/datasets/skill-evidence-tech-precision.jsonl',
+        'research/datasets/skill-evidence-nontech-core.jsonl',
+        'research/datasets/skill-evidence-nontech-adversarial.jsonl',
       ];
 
   const allResults: SkillResult[] = [];
@@ -140,18 +140,15 @@ function main() {
   const correct = allResults.filter((r) => r.correct).length;
   const accuracy = total > 0 ? ((correct / total) * 100).toFixed(1) : '0';
 
-  // Precision: of skills we detected, how many were actually explicit?
   const detected = allResults.filter((r) => r.detected);
   const truePositives = detected.filter((r) => r.gold === 'explicit').length;
   const falsePositives = detected.filter((r) => r.gold !== 'explicit').length;
   const precision = detected.length > 0 ? ((truePositives / detected.length) * 100).toFixed(1) : 'N/A';
 
-  // Recall: of explicit skills, how many did we detect?
   const explicits = allResults.filter((r) => r.gold === 'explicit');
   const explicitDetected = explicits.filter((r) => r.detected).length;
   const recall = explicits.length > 0 ? ((explicitDetected / explicits.length) * 100).toFixed(1) : 'N/A';
 
-  // FP rate: of absent/inferred/false_positive, how many did we wrongly detect?
   const negatives = allResults.filter((r) => r.gold !== 'explicit');
   const falseDetections = negatives.filter((r) => r.detected).length;
   const fpRate = negatives.length > 0 ? ((falseDetections / negatives.length) * 100).toFixed(1) : 'N/A';

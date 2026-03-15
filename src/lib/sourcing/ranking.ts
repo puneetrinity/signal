@@ -1,5 +1,5 @@
 import type { JobRequirements } from './jd-digest';
-import { canonicalizeSkill, getSkillSurfaceForms, buildSkillMatchSet, hasRequiredContext } from './jd-digest';
+import { canonicalizeSkill, getSkillSurfaceForms, buildSkillMatchSet, hasRequiredContext, detectNontechConcept } from './jd-digest';
 import type { JobTrack } from './types';
 import { isNoisyHint, PLACEHOLDER_HINTS } from './hint-sanitizer';
 import { SENIORITY_LADDER, normalizeSeniorityFromText, seniorityDistance, type SeniorityBand } from '@/lib/taxonomy/seniority';
@@ -205,6 +205,13 @@ function computeSkillScore(
     const canonical = canonicalizeSkill(skill);
     // Ambiguous skills (go, rust, swift…) require nearby tech context
     if (!hasRequiredContext(canonical, textBag)) continue;
+
+    // Try non-tech concept rule first (combinatorial bucket match)
+    const conceptResult = detectNontechConcept(canonical, textBag);
+    if (conceptResult === 'match') { matchCount++; continue; }
+    if (conceptResult === 'exclude') continue;
+
+    // Standard alias regex matching
     const forms = getSkillSurfaceForms(skill);
     let matched = false;
     for (const form of forms) {
