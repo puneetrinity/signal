@@ -129,10 +129,11 @@ model Candidate {
   searchMeta    Json?            // KG + answerBox from Serper (providerMeta)
 
   // Parsed hints from search (not authoritative)
-  nameHint     String? // Parsed from title, may be wrong
-  headlineHint String? @db.Text // Parsed from title/snippet
-  locationHint String? // Parsed from snippet
-  companyHint  String? // Parsed from title/snippet
+  nameHint      String? // Parsed from title, may be wrong
+  headlineHint  String? @db.Text // Parsed from title/snippet
+  locationHint  String? // Parsed from snippet
+  companyHint   String? // Parsed from title/snippet
+  seniorityHint String? // Parsed from headline (intern/junior/mid/senior/staff/principal/lead/manager/director/vp/cxo)
 
   // Classification for enrichment routing
   roleType String? // 'engineer' | 'data_scientist' | 'researcher' | 'founder' | 'designer' | 'general'

@@ -242,6 +242,7 @@ export async function runSourcingOrchestrator(
       id: true,
       linkedinId: true,
       headlineHint: true,
+      seniorityHint: true,
       locationHint: true,
       searchTitle: true,
       searchSnippet: true,
@@ -264,6 +265,7 @@ export async function runSourcingOrchestrator(
     row: {
       id: string;
       headlineHint: string | null;
+      seniorityHint: string | null;
       locationHint: string | null;
       searchTitle: string | null;
       searchSnippet: string | null;
@@ -290,6 +292,7 @@ export async function runSourcingOrchestrator(
     return {
       id: row.id,
       headlineHint: row.headlineHint,
+      seniorityHint: row.seniorityHint,
       locationHint: row.locationHint,
       searchTitle: row.searchTitle,
       searchSnippet: row.searchSnippet,
@@ -733,6 +736,7 @@ export async function runSourcingOrchestrator(
             select: {
               id: true,
               headlineHint: true,
+              seniorityHint: true,
               locationHint: true,
               searchTitle: true,
               searchSnippet: true,

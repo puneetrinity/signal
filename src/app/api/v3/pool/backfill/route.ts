@@ -208,6 +208,7 @@ export async function POST(request: NextRequest) {
       lastEnrichedAt: true,
       locationHint: true,
       headlineHint: true,
+      seniorityHint: true,
       searchTitle: true,
     },
   });
@@ -266,7 +267,7 @@ export async function POST(request: NextRequest) {
 
   const seniorityBuckets: Record<string, number> = {};
   for (const c of candidates) {
-    const seniority = parseSeniority(c.headlineHint ?? c.searchTitle);
+    const seniority = c.seniorityHint ?? parseSeniority(c.headlineHint ?? c.searchTitle);
     seniorityBuckets[seniority] = (seniorityBuckets[seniority] ?? 0) + 1;
   }
 

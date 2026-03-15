@@ -164,6 +164,7 @@ async function upsertCandidates(
     if (!companyHint && headlineHint) {
       companyHint = normalizeHint(extractCompanyFromHeadline(headlineHint) ?? undefined) ?? undefined;
     }
+    const seniorityHint = extractedHints.seniorityHint ?? undefined;
 
     try {
       const existing = await prisma.candidate.findUnique({
@@ -173,6 +174,7 @@ async function upsertCandidates(
           headlineHint: true,
           locationHint: true,
           companyHint: true,
+          seniorityHint: true,
         },
       });
 
@@ -187,6 +189,7 @@ async function upsertCandidates(
       if (shouldReplaceHint(existing?.headlineHint ?? null, headlineHint)) updateData.headlineHint = headlineHint;
       if (shouldReplaceLocationHint(existing?.locationHint ?? null, locationHint)) updateData.locationHint = locationHint;
       if (shouldReplaceCompanyHint(existing?.companyHint ?? null, companyHint)) updateData.companyHint = companyHint;
+      if (shouldReplaceHint(existing?.seniorityHint ?? null, seniorityHint)) updateData.seniorityHint = seniorityHint;
 
       const candidate = await prisma.candidate.upsert({
         where: { tenantId_linkedinId: { tenantId, linkedinId } },
@@ -202,6 +205,7 @@ async function upsertCandidates(
           headlineHint: shouldReplaceHint(null, headlineHint) ? headlineHint : undefined,
           locationHint: shouldReplaceLocationHint(null, locationHint) ? locationHint : undefined,
           companyHint: shouldReplaceCompanyHint(null, companyHint) ? companyHint : undefined,
+          seniorityHint,
           roleType: roleType || undefined,
           captureSource: 'search',
           searchQuery,

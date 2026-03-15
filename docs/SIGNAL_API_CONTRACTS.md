@@ -197,6 +197,7 @@ GET /api/v3/jobs/{externalJobId}/results?requestId=<id>
         "headlineHint": "Senior Software Engineer",
         "locationHint": "San Francisco, CA",
         "companyHint": "Acme Corp",
+        "seniorityHint": "senior",
         "searchSnippet": "Senior Software Engineer at Acme Corp...",
         "enrichmentStatus": "completed",
         "confidenceScore": 0.92,

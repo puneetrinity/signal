@@ -16,6 +16,7 @@ import {
   locationHintQualityScore,
 } from '@/lib/sourcing/hint-sanitizer';
 import { assessLocationCountryConsistency, extractSerpSignals } from '@/lib/search/serp-signals';
+import { normalizeSeniorityFromText } from '@/lib/taxonomy/seniority';
 
 /**
  * Extracted hints from LinkedIn SERP data
@@ -25,6 +26,7 @@ export interface ExtractedHints {
   headlineHint: string | null;
   locationHint: string | null;
   companyHint: string | null;
+  seniorityHint: string | null;
   nameSource: 'title' | 'slug' | null;
 }
 
@@ -457,11 +459,15 @@ export function extractAllHints(
   // Extract location
   const locationHint = extractLocationFromSerpResult(title, snippet);
 
+  // Extract seniority from headline
+  const seniorityHint = normalizeSeniorityFromText(headlineHint);
+
   return {
     nameHint,
     headlineHint,
     locationHint,
     companyHint,
+    seniorityHint,
     nameSource,
   };
 }

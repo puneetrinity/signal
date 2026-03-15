@@ -22,6 +22,7 @@ export type SnapshotRow = {
 export type CandidateRow = {
   id: string;
   headlineHint: string | null;
+  seniorityHint: string | null;
   locationHint: string | null;
   searchTitle: string | null;
   searchSnippet: string | null;
@@ -61,6 +62,7 @@ export function toRankingCandidate(
   return {
     id: candidate.id,
     headlineHint: candidate.headlineHint,
+    seniorityHint: candidate.seniorityHint,
     locationHint: candidate.locationHint,
     searchTitle: candidate.searchTitle,
     searchSnippet: candidate.searchSnippet,
@@ -100,6 +102,7 @@ export async function rescoreCompletedSourcingRowsForCandidate(
       select: {
         id: true,
         headlineHint: true,
+        seniorityHint: true,
         locationHint: true,
         searchTitle: true,
         searchSnippet: true,

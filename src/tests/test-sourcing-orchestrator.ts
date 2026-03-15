@@ -59,6 +59,7 @@ function makeCandidates(count: number, opts?: {
     headlineHint: i < enriched
       ? `${seniority} Software Engineer · ${skills.join(', ')}`
       : `Engineer`,
+    seniorityHint: null,
     locationHint: i % 2 === 0 ? location : 'New York',
     searchTitle: `${seniority} ${skills[0]} Developer`,
     searchSnippet: `Experienced in ${skills.join(' and ')} development`,

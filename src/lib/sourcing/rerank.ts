@@ -187,7 +187,7 @@ async function processRerankJob(
   const candidates = await prisma.candidate.findMany({
     where: { id: { in: candidateIds } },
     select: {
-      id: true, headlineHint: true, locationHint: true,
+      id: true, headlineHint: true, seniorityHint: true, locationHint: true,
       searchTitle: true, searchSnippet: true,
       enrichmentStatus: true, lastEnrichedAt: true,
       intelligenceSnapshots: {

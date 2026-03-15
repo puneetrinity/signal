@@ -257,6 +257,7 @@ export interface IdentityCandidateData {
     linkedinUrl: string;
     nameHint: string | null;
     headlineHint?: string | null;
+    seniorityHint?: string | null;
     roleType?: string | null;
   };
 }
@@ -319,6 +320,7 @@ export interface CandidateData {
   linkedinId: string;
   linkedinUrl: string;
   nameHint: string | null;
+  seniorityHint?: string | null;
   enrichmentStatus: string;
   confidenceScore: number | null;
   lastEnrichedAt: string | null;

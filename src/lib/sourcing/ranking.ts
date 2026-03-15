@@ -20,6 +20,7 @@ import {
 export interface CandidateForRanking {
   id: string;
   headlineHint: string | null;
+  seniorityHint?: string | null;
   locationHint: string | null;
   searchTitle: string | null;
   searchSnippet: string | null;
@@ -234,6 +235,8 @@ function computeSeniorityScore(candidate: CandidateForRanking, targetLevel: stri
   let candidateBand: SeniorityBand | null = null;
   if (candidate.snapshot?.seniorityBand) {
     candidateBand = candidate.snapshot.seniorityBand as SeniorityBand;
+  } else if (candidate.seniorityHint) {
+    candidateBand = candidate.seniorityHint as SeniorityBand;
   } else {
     candidateBand = normalizeSeniorityFromText(candidate.headlineHint);
   }
