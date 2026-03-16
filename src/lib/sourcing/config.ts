@@ -80,6 +80,7 @@ export interface SourcingConfig {
   // Unknown-location controls
   unknownLaneFitFloorNonTech: number;
   unknownLocationPenaltyMultiplier: number;
+  nonTechLocationMismatchPenaltyMultiplier: number;
   unknownAssemblyDiscoveredReserveTech: number;
   // Top-20 quality guards (tech only)
   techTop20GuardsEnabled: boolean;
@@ -224,6 +225,11 @@ export function getSourcingConfig(): SourcingConfig {
     // Unknown-location controls
     unknownLaneFitFloorNonTech: clamp(parseFloatSafe(process.env.SOURCE_UNKNOWN_LANE_FIT_FLOOR_NON_TECH, 0.40), 0, 1),
     unknownLocationPenaltyMultiplier: clamp(parseFloatSafe(process.env.SOURCE_UNKNOWN_LOCATION_PENALTY_MULTIPLIER, 0.85), 0.5, 1),
+    nonTechLocationMismatchPenaltyMultiplier: clamp(
+      parseFloatSafe(process.env.SOURCE_NON_TECH_LOCATION_MISMATCH_PENALTY_MULTIPLIER, 0.75),
+      0.4,
+      1,
+    ),
     unknownAssemblyDiscoveredReserveTech: parseNonNegativeIntSafe(process.env.SOURCE_UNKNOWN_ASSEMBLY_DISCOVERED_RESERVE_TECH, 2),
     // Top-20 quality guards (tech only)
     techTop20GuardsEnabled: process.env.SOURCE_TECH_TOP20_GUARDS_ENABLED !== 'false',

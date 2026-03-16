@@ -108,6 +108,7 @@ export interface OrchestratorResult {
   unknownLocationDiscoveredAssembledCount: number;
   unknownLocationPenaltyApplied: number;
   unknownLocationPoolPenaltyApplied: number;
+  nonTechLocationMismatchPenaltyApplied: number;
   unknownLocationTop20DemotedInitial: number;
   unknownLocationTop20DemotedFinal: number;
   // Top-20 quality guards (tech only)
@@ -479,6 +480,18 @@ export async function runSourcingOrchestrator(
       }
     }
     if (unknownLocationPoolPenaltyApplied > 0) {
+      scoredPool.sort((a, b) => compareFitWithConfidence(a, b, config.fitScoreEpsilon));
+    }
+  }
+  let nonTechLocationMismatchPenaltyApplied = 0;
+  if (trackDecision?.track === 'non_tech' && hasLocationConstraint) {
+    for (const sc of scoredPool) {
+      if (sc.locationMatchType === 'none') {
+        sc.fitScore *= config.nonTechLocationMismatchPenaltyMultiplier;
+        nonTechLocationMismatchPenaltyApplied++;
+      }
+    }
+    if (nonTechLocationMismatchPenaltyApplied > 0) {
       scoredPool.sort((a, b) => compareFitWithConfidence(a, b, config.fitScoreEpsilon));
     }
   }
@@ -1757,6 +1770,7 @@ export async function runSourcingOrchestrator(
     unknownLocationDiscoveredAssembledCount,
     unknownLocationPenaltyApplied,
     unknownLocationPoolPenaltyApplied,
+    nonTechLocationMismatchPenaltyApplied,
     unknownLocationTop20DemotedInitial: unknownCapInitial.demoted,
     unknownLocationTop20DemotedFinal: unknownCapFinalDemoted,
     // Top-20 quality guards

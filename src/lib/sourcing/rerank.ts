@@ -243,6 +243,7 @@ async function processRerankJob(
     preResolvedRoles,
     preResolvedLocations,
   });
+  const hasLocationConstraint = Boolean(requirements.location?.trim());
 
   if (track !== 'non_tech') {
     let unknownPenaltyApplied = 0;
@@ -259,27 +260,83 @@ async function processRerankJob(
       scored.sort((a, b) => compareFitWithConfidence(a, b, config.fitScoreEpsilon));
     }
   }
-
-  // Mirror initial assembly admission rule: strict/best-match tech candidates
-  // must clear both the fit floor and a minimum skill floor.
-  if (track === 'tech') {
+  if (track === 'non_tech' && hasLocationConstraint) {
+    let locationMismatchPenaltyApplied = 0;
     for (const sc of scored) {
-      if (
-        sc.matchTier === 'strict_location' &&
-        (sc.fitScore < config.bestMatchesMinFitScore || sc.fitBreakdown.skillScore < config.techTop20SkillMin)
-      ) {
-        sc.matchTier = 'expanded_location';
+      if (sc.locationMatchType === 'none') {
+        sc.fitScore *= config.nonTechLocationMismatchPenaltyMultiplier;
+        locationMismatchPenaltyApplied++;
       }
+    }
+    if (locationMismatchPenaltyApplied > 0) {
+      scored.sort((a, b) => compareFitWithConfidence(a, b, config.fitScoreEpsilon));
+    }
+  }
+
+  // Mirror initial assembly admission logic: strict candidates must clear the
+  // best-match floor, with tech also enforcing the skill floor. If all strict
+  // candidates are demoted, apply the same role-aware strict rescue gate.
+  const strictPool = scored.filter((c) => c.matchTier === 'strict_location');
+  let expandedPool = scored.filter((c) => c.matchTier !== 'strict_location');
+  const qualifiedStrict: typeof strictPool = [];
+  const demotedStrictCandidates: typeof strictPool = [];
+  const strictBeforeDemotion = strictPool.length;
+  let strictDemotedCount = 0;
+  let strictRescuedCount = 0;
+  let strictRescueApplied = false;
+  let strictRescueMinFitScoreUsed: number | null = null;
+
+  for (const sc of strictPool) {
+    const failsTechStrictSkillFloor =
+      track === 'tech' &&
+      sc.fitBreakdown.skillScore < config.techTop20SkillMin;
+    if (sc.fitScore < config.bestMatchesMinFitScore || failsTechStrictSkillFloor) {
+      sc.matchTier = 'expanded_location';
+      expandedPool.push(sc);
+      demotedStrictCandidates.push(sc);
+      strictDemotedCount++;
+    } else {
+      qualifiedStrict.push(sc);
+    }
+  }
+
+  if (strictDemotedCount > 0) {
+    expandedPool.sort((a, b) => compareFitWithConfidence(a, b, config.fitScoreEpsilon));
+  }
+
+  if (
+    qualifiedStrict.length === 0 &&
+    demotedStrictCandidates.length > 0 &&
+    config.strictRescueCount > 0
+  ) {
+    const rescuedStrict = demotedStrictCandidates
+      .filter((sc) => {
+        if (sc.fitScore < config.strictRescueMinFitScore) return false;
+        if (track === 'tech' && sc.fitBreakdown.skillScore < config.techTop20SkillMin) return false;
+        if (track === 'tech' && sc.fitBreakdown.roleScore < 0.7) return false;
+        if (track !== 'tech' && sc.fitBreakdown.roleScore < 0.6) return false;
+        return true;
+      })
+      .slice(0, config.strictRescueCount);
+
+    if (rescuedStrict.length > 0) {
+      const rescuedIds = new Set(rescuedStrict.map((sc) => sc.candidateId));
+      for (const sc of rescuedStrict) {
+        sc.matchTier = 'strict_location';
+      }
+      expandedPool = expandedPool.filter((sc) => !rescuedIds.has(sc.candidateId));
+      qualifiedStrict.push(...rescuedStrict);
+      strictRescuedCount = rescuedStrict.length;
+      strictRescueApplied = true;
+      strictRescueMinFitScoreUsed = config.strictRescueMinFitScore;
     }
   }
 
   // 6. Sort: strict first, then expanded. Within each: epsilon comparator.
   const epsilon = config.fitScoreEpsilon;
-  const strict = scored
-    .filter(c => c.matchTier === 'strict_location')
+  const strict = qualifiedStrict
     .sort((a, b) => compareFitWithConfidence(a, b, epsilon));
-  const expanded = scored
-    .filter(c => c.matchTier !== 'strict_location')
+  const expanded = expandedPool
     .sort((a, b) => compareFitWithConfidence(a, b, epsilon));
   const sorted = [...strict, ...expanded];
 
@@ -386,10 +443,35 @@ async function processRerankJob(
     }),
   );
 
-  // 9. Mark rerank timestamp
+  const strictMatchedCount = sorted.filter((c) => c.matchTier === 'strict_location').length;
+  const expandedCount = sorted.length - strictMatchedCount;
+  const expansionReason =
+    hasLocationConstraint && strictMatchedCount < config.targetCount
+      ? (strictDemotedCount > 0 ? 'strict_low_quality' : 'insufficient_strict_location_matches')
+      : null;
+
+  const diagnosticsObj =
+    request.diagnostics && typeof request.diagnostics === 'object'
+      ? request.diagnostics as Record<string, unknown>
+      : {};
+
+  // 9. Mark rerank timestamp and keep diagnostics aligned with the final rows.
   await prisma.jobSourcingRequest.update({
     where: { id: requestId },
-    data: { lastRerankedAt: new Date() },
+    data: {
+      lastRerankedAt: new Date(),
+      diagnostics: toJsonValue({
+        ...diagnosticsObj,
+        strictMatchedCount,
+        expandedCount,
+        expansionReason,
+        strictDemotedCount,
+        strictRescuedCount,
+        strictRescueApplied,
+        strictRescueMinFitScoreUsed,
+        strictBeforeDemotion,
+      }),
+    },
   });
 
   log.info({ requestId, reranked: sorted.length }, 'Rerank completed');

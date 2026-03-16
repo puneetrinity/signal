@@ -2,6 +2,7 @@ import type { JobRequirements } from './jd-digest';
 import { canonicalizeSkill, getSkillSurfaceForms, buildSkillMatchSet, hasRequiredContext, detectNontechConcept } from './jd-digest';
 import type { JobTrack } from './types';
 import { isNoisyHint, PLACEHOLDER_HINTS } from './hint-sanitizer';
+import { detectLocationCurrentness } from '@/lib/search/currentness';
 import { SENIORITY_LADDER, normalizeSeniorityFromText, seniorityDistance, type SeniorityBand } from '@/lib/taxonomy/seniority';
 import {
   resolveRoleDeterministic,
@@ -46,7 +47,7 @@ export type MatchTier = 'strict_location' | 'expanded_location';
 
 export interface FitBreakdown {
   skillScore: number;
-  skillScoreMethod: 'snapshot' | 'text_fallback';
+  skillScoreMethod: 'snapshot' | 'text_fallback' | 'hybrid_nontech';
   roleScore: number;
   seniorityScore: number;
   effectiveSeniorityScore?: number;
@@ -67,9 +68,20 @@ export function compareFitWithConfidence(a: ScoredCandidate, b: ScoredCandidate,
   const delta = b.fitScore - a.fitScore;
   if (Math.abs(delta) >= epsilon) return delta;
 
-  // Within epsilon: prefer snapshot-scored (higher confidence) over text fallback
-  const confA = a.fitBreakdown.skillScoreMethod === 'snapshot' ? 1 : 0;
-  const confB = b.fitBreakdown.skillScoreMethod === 'snapshot' ? 1 : 0;
+  // Within epsilon: prefer richer scoring paths. Pure snapshot is highest confidence,
+  // non-tech hybrid is next, then raw text fallback.
+  const confA =
+    a.fitBreakdown.skillScoreMethod === 'snapshot'
+      ? 2
+      : a.fitBreakdown.skillScoreMethod === 'hybrid_nontech'
+        ? 1
+        : 0;
+  const confB =
+    b.fitBreakdown.skillScoreMethod === 'snapshot'
+      ? 2
+      : b.fitBreakdown.skillScoreMethod === 'hybrid_nontech'
+        ? 1
+        : 0;
   if (confA !== confB) return confB - confA;
 
   // Deterministic tie-breaker: stable ordering across runs
@@ -193,33 +205,11 @@ function buildSkillRegex(form: string): RegExp {
   return new RegExp(`${prefix}${escaped}${suffix}`, 'i');
 }
 
-function computeSkillScore(
+function computeTextFallbackSkillScore(
   candidate: CandidateForRanking,
   topSkills: string[],
   domain: string | null,
-): { score: number; method: 'snapshot' | 'text_fallback' } {
-  if (topSkills.length === 0) return { score: 0, method: 'text_fallback' };
-
-  // Prefer snapshot skills (concept-expanded set intersection)
-  if (candidate.snapshot?.skillsNormalized?.length) {
-    const snapshotSet = buildSkillMatchSet(candidate.snapshot.skillsNormalized);
-    let matchCount = 0;
-    for (const skill of topSkills) {
-      const forms = getSkillSurfaceForms(skill);
-      if (forms.some((form) => snapshotSet.has(canonicalizeSkill(form)))) matchCount++;
-    }
-    const overlapRatio = matchCount / topSkills.length;
-
-    let domainMatch = 0;
-    if (domain) {
-      const domainForms = getSkillSurfaceForms(domain);
-      if (domainForms.some((form) => snapshotSet.has(canonicalizeSkill(form)))) domainMatch = 1;
-    }
-
-    return { score: 0.8 * overlapRatio + 0.2 * domainMatch, method: 'snapshot' };
-  }
-
-  // Fallback: textBag regex with alias-aware matching
+): number {
   const textBag = [candidate.headlineHint, candidate.searchTitle, candidate.searchSnippet]
     .filter(Boolean)
     .join(' ');
@@ -256,7 +246,59 @@ function computeSkillScore(
     }
   }
 
-  return { score: 0.8 * overlapRatio + 0.2 * domainMatch, method: 'text_fallback' };
+  return 0.8 * overlapRatio + 0.2 * domainMatch;
+}
+
+function computeSkillScore(
+  candidate: CandidateForRanking,
+  topSkills: string[],
+  domain: string | null,
+  track?: JobTrack,
+): { score: number; method: 'snapshot' | 'text_fallback' | 'hybrid_nontech' } {
+  if (topSkills.length === 0) return { score: 0, method: 'text_fallback' };
+
+  // Prefer snapshot skills (concept-expanded set intersection)
+  if (candidate.snapshot?.skillsNormalized?.length) {
+    const snapshotSet = buildSkillMatchSet(candidate.snapshot.skillsNormalized);
+    let matchCount = 0;
+    for (const skill of topSkills) {
+      const forms = getSkillSurfaceForms(skill);
+      if (forms.some((form) => snapshotSet.has(canonicalizeSkill(form)))) matchCount++;
+    }
+    const overlapRatio = matchCount / topSkills.length;
+
+    let domainMatch = 0;
+    if (domain) {
+      const domainForms = getSkillSurfaceForms(domain);
+      if (domainForms.some((form) => snapshotSet.has(canonicalizeSkill(form)))) domainMatch = 1;
+    }
+
+    const snapshotScore = 0.8 * overlapRatio + 0.2 * domainMatch;
+
+    // Non-tech snapshots are often sparse/incomplete. If structured skill overlap is
+    // weak but text evidence clearly supports the job, blend text back in rather than
+    // forcing a zero-signal snapshot score to dominate.
+    if (track === 'non_tech' || track === 'blended') {
+      const textScore = computeTextFallbackSkillScore(candidate, topSkills, domain);
+      const snapshotSparse = candidate.snapshot.skillsNormalized.length < 4 || snapshotScore < 0.2;
+      if (snapshotSparse && textScore > snapshotScore) {
+        const blendedScore = snapshotScore === 0
+          ? textScore
+          : (snapshotScore * 0.35) + (textScore * 0.65);
+        return {
+          score: Math.max(snapshotScore, blendedScore),
+          method: 'hybrid_nontech',
+        };
+      }
+    }
+
+    return { score: snapshotScore, method: 'snapshot' };
+  }
+
+  return {
+    score: computeTextFallbackSkillScore(candidate, topSkills, domain),
+    method: 'text_fallback',
+  };
 }
 
 function computeSeniorityScore(candidate: CandidateForRanking, targetLevel: string | null): number {
@@ -305,6 +347,18 @@ function classifyLocationMatch(
   }
 
   const candidateLocation = loc!;
+
+  // Historical location evidence must not qualify as a current geographic match.
+  // Downgrade stale SERP-backed locations to unknown so they cannot enter strict tiers.
+  const locationCurrentness = detectLocationCurrentness(
+    candidate.searchTitle ?? '',
+    candidate.searchSnippet ?? '',
+    candidateLocation,
+  );
+  if (locationCurrentness === 'historical') {
+    return { matchTier: 'expanded_location', locationMatchType: 'unknown_location' };
+  }
+
   const targetResolution = resolveLocationDeterministic(target);
   const targetNorm = targetResolution.normalized;
   const targetCity = targetResolution.city;
@@ -457,7 +511,12 @@ export function rankCandidates(
 
   return candidates
     .map((c) => {
-      const { score: skillScore, method: skillScoreMethod } = computeSkillScore(c, requirements.topSkills, requirements.domain);
+      const { score: skillScore, method: skillScoreMethod } = computeSkillScore(
+        c,
+        requirements.topSkills,
+        requirements.domain,
+        options?.track,
+      );
       // Prefer candidate-id keyed pre-resolved roles; keep title-key fallback for compatibility.
       const preResolved = options?.preResolvedRoles?.get(c.id)
         ?? options?.preResolvedRoles?.get((c.headlineHint ?? c.searchTitle ?? '').trim().toLowerCase())

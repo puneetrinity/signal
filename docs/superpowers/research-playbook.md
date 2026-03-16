@@ -174,7 +174,7 @@ Location boost defaults:
 
 Core ranking guardrails:
 
-- `bestMatchesMinFitScore = 0.45`
+- `bestMatchesMinFitScore = 0.60`
 - `strictRescueMinFitScore = 0.30`
 - `fitScoreEpsilon = 0.03`
 - `unknownLocationPenaltyMultiplier = 0.85`
@@ -224,6 +224,32 @@ Primary code paths:
 | Tech Skills | eval-skill-evidence-tech | core, adversarial, gap, precision | audit-skill-ambiguous-prod | N/A (runtime) | v1 deployed |
 | Non-Tech Skills | eval-skill-evidence-nontech | core, adversarial | audit-skill-nontech-prod | N/A (runtime) | v1 deployed |
 | Currentness | eval-serp-currentness | title-core, location-core, adversarial | audit-serp-currentness-prod | N/A (runtime) | v1 eval + prod audit complete |
+| Ranking (Phase A) | eval-ranking | ranking-tech-core, ranking-nontech-core | N/A | N/A (runtime) | Complete: nDCG@10=0.983, freshness curve patched |
+| Ranking (Phase B) | eval-ranking-assembly | ranking-assembly-tech, ranking-assembly-nontech | Prod sanity 2026-03-16 | bestMatchesMinFitScore 0.45→0.60 | Complete: bad_top10 reduced 50%, deployed |
+
+## Ranking optimization
+
+### Phase A: Scoring (complete 2026-03-15)
+
+Tested `rankCandidates()` in isolation. Freshness curve patched (181-365d band added). Post-patch nDCG@10=0.983, top-1=100%, must_be_top recall@10=100%. No weight changes needed — remaining leakage mapped to assembly policy.
+
+Evaluator: `scripts/eval-ranking.ts`
+Fixtures: `research/datasets/ranking-tech-core.jsonl`, `ranking-nontech-core.jsonl`
+
+### Phase B: Assembly/guards (complete 2026-03-16)
+
+Tested orchestrator-level assembly: strict demotion, strict rescue, unknown-location penalty, top-20 guards. Parameter sweep found `bestMatchesMinFitScore=0.60` as the key lever — reduced bad_top10_rate by 50% across 6 fixtures without harming must_be_top recall.
+
+Key change: `bestMatchesMinFitScore` raised from 0.45 to 0.60 in `src/lib/sourcing/config.ts`. Weak strict-location candidates (low skill/role scores) are now properly demoted to expanded tier.
+Runtime follow-up (2026-03-16): stale SERP location evidence is now downgraded before location matching in `src/lib/sourcing/ranking.ts`, so historical locations no longer qualify for `strict_location` / `country_only` matches.
+
+Evaluator: `scripts/eval-ranking-assembly.ts`
+Fixtures: `research/datasets/ranking-assembly-tech.jsonl`, `ranking-assembly-nontech.jsonl`
+Sweep: `research/programs/ranking-assembly-phase-b.json`
+
+Prod verification (2026-03-16): Job 101 "Senior Backend Engineer" — 153/154 strict candidates correctly demoted (skill scores 0.000-0.133). Broader pool surfaces stronger candidates (fit 0.51-0.73) ahead of weak strict matches. No over-demotion.
+
+Design spec: `docs/superpowers/specs/2026-03-15-ranking-optimization-experiment-design.md`
 
 ## Per-field specs
 

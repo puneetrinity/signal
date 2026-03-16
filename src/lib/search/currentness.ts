@@ -7,8 +7,10 @@
  * Used by:
  *   - scripts/eval-serp-currentness.ts (evaluator)
  *   - scripts/audit-serp-currentness-prod.ts (prod audit)
+ *   - src/lib/sourcing/ranking.ts (stale-location downgrade before location matching)
  *
- * Not yet wired into production hint extraction. Measure first.
+ * Title/location currentness is still not persisted on Candidate; runtime ranking only uses
+ * the location historical signal to prevent stale strict/current location matches.
  */
 
 import {
@@ -63,6 +65,13 @@ const FALSE_TEMPORAL_PATTERNS = [
   /\bformer'?s\b/i,                     // possessive or company name
 ];
 
+const TEMPORARY_DURATION_PATTERNS = [
+  /\bfor\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|a|an)\s+(?:day|days|week|weeks|month|months|year|years)\b/i,
+  /\bfor\s+a\s+couple\s+of\s+(?:days|weeks|months|years)\b/i,
+  /\bfor\s+the\s+past\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:days|weeks|months|years)\b/i,
+  /\btemporar(?:y|ily)\s+in\b/i,
+];
+
 function hasFalseTemporalMatch(text: string): boolean {
   return FALSE_TEMPORAL_PATTERNS.some(p => p.test(text));
 }
@@ -75,6 +84,11 @@ function hasCurrentMarker(text: string): boolean {
 function hasHistoricalMarker(text: string): boolean {
   if (!text) return false;
   return HISTORICAL_PATTERNS.some(p => p.test(text));
+}
+
+function hasTemporaryDurationMarker(text: string): boolean {
+  if (!text) return false;
+  return TEMPORARY_DURATION_PATTERNS.some(p => p.test(text));
 }
 
 function normalizeText(text: string | null | undefined): string {
@@ -176,6 +190,9 @@ export function detectLocationCurrentness(searchTitle: string, searchSnippet: st
     const nextClause = nextNonEmptyClause(clauses, i) ?? '';
     const local = clause.trim();
 
+    // Temporary duration near a location is not strong evidence of a stable current base.
+    // Treat it as historical/non-current for ranking so short visits do not qualify as strict matches.
+    if (hasTemporaryDurationMarker(`${local} ${nextClause}`.trim())) return 'historical';
     if (/\b(?:previously|formerly)\s+in\b/i.test(local)) return 'historical';
     if (hasHistoricalMarker(local) && !hasCurrentMarker(local)) return 'historical';
     if (hasCurrentMarker(local) && !hasHistoricalMarker(local)) return 'current';
@@ -190,6 +207,10 @@ export function detectLocationCurrentness(searchTitle: string, searchSnippet: st
 
   const normalizedSnippet = normalizeText(searchSnippet);
   const normalizedLocation = normalizeText(extractedLocation);
+
+  if (normalizedSnippet.includes(normalizedLocation) && hasTemporaryDurationMarker(searchSnippet)) {
+    return 'historical';
+  }
 
   // Direction-aware relocation: "to X" means X is current, "from X" means X is historical
   const toPattern = /\b(?:now\s+(?:based\s+)?in|moved\s+to|relocated\s+to)\s+([a-z][a-z\s,.-]+)/i;

@@ -2,7 +2,7 @@
 
 Current scoring weights, guards, and thresholds for the sourcing ranking system.
 
-**Last verified:** 2026-03-15
+**Last verified:** 2026-03-16
 
 ---
 
@@ -59,7 +59,7 @@ Source: `src/lib/sourcing/config.ts:202-212`
 
 | Setting | Default | Env var | Purpose |
 |---------|--------:|---------|---------|
-| Best-match floor | 0.45 | `SOURCE_BEST_MATCHES_MIN_FIT_SCORE` | Strict candidates below this are demoted to expanded |
+| Best-match floor | 0.60 | `SOURCE_BEST_MATCHES_MIN_FIT_SCORE` | Strict candidates below this are demoted to expanded |
 | Strict rescue floor | 0.30 | `SOURCE_STRICT_RESCUE_MIN_FIT_SCORE` | Rescued stricts must exceed this |
 | Fit epsilon | 0.03 | `SOURCE_FIT_SCORE_EPSILON` | Score differences below this are ties |
 | Unknown-location penalty | 0.85 | `SOURCE_UNKNOWN_LOCATION_PENALTY_MULTIPLIER` | Post-rank multiplier for unknown-location candidates |
@@ -83,10 +83,14 @@ Source: `src/lib/sourcing/config.ts:229-232`, `orchestrator.ts:1336`, `rerank.ts
 ### Tech best_matches admission
 
 Strict tech candidates are demoted to expanded_location if **either**:
-- `fitScore < bestMatchesMinFitScore` (0.45)
+- `fitScore < bestMatchesMinFitScore` (0.60)
 - `skillScore < techTop20SkillMin` (0.10)
 
 This applies in initial assembly (`orchestrator.ts:1045`) and rerank (`rerank.ts:232`).
+
+### Currentness-gated location matching
+
+Historical location evidence from SERP no longer qualifies as a current geographic match. In `src/lib/sourcing/ranking.ts`, if `detectLocationCurrentness(..., candidateLocation) === 'historical'`, location classification is downgraded to `expanded_location + unknown_location` before strict/country matching is computed.
 
 ---
 
