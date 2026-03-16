@@ -14,6 +14,7 @@ import { toJsonValue } from '@/lib/prisma/json';
 import { createLogger } from '@/lib/logger';
 import { getNonTechConfig } from '../config';
 import { getSourcingConfig } from '@/lib/sourcing/config';
+import { isLikelyLocationHint } from '@/lib/sourcing/hint-sanitizer';
 import {
   extractCompanyAlignment,
   extractSeniorityValidation,
@@ -22,6 +23,7 @@ import {
   extractContradictions,
 } from './extractors';
 import { scoreNonTech } from './scoring';
+import { extractNonTechSkills } from './skills';
 import type { EnrichmentState, PartialEnrichmentState } from '../graph/types';
 import type { NonTechSignals } from './types';
 
@@ -107,6 +109,15 @@ export async function nonTechEnrichmentNode(
     const staleDays = getSourcingConfig().snapshotStaleDays;
     const now = new Date();
     const staleAfter = new Date(now.getTime() + staleDays * 24 * 60 * 60 * 1000);
+    const structured = state.summaryStructured as Record<string, unknown> | null;
+    const skillsNormalized = extractNonTechSkills({
+      summaryStructured: structured,
+      headlineHint: candidate.headlineHint,
+      searchTitle: candidate.searchTitle,
+      searchSnippet: candidate.searchSnippet,
+    });
+    const rawLocation = candidate.locationHint?.trim() ?? null;
+    const snapshotLocation = rawLocation && isLikelyLocationHint(rawLocation) ? rawLocation : null;
 
     await prisma.candidateIntelligenceSnapshot.upsert({
       where: {
@@ -120,10 +131,10 @@ export async function nonTechEnrichmentNode(
         candidateId: state.candidateId,
         tenantId: state.tenantId,
         track: 'non-tech',
-        skillsNormalized: [],
-        roleType: null,
+        skillsNormalized,
+        roleType: state.hints?.roleType ?? 'general',
         seniorityBand: seniorityValidation.normalizedBand,
-        location: null,
+        location: snapshotLocation,
         activityRecencyDays: freshness.ageDays,
         computedAt: now,
         staleAfter,
@@ -141,7 +152,10 @@ export async function nonTechEnrichmentNode(
         }),
       },
       update: {
+        skillsNormalized,
+        roleType: state.hints?.roleType ?? 'general',
         seniorityBand: seniorityValidation.normalizedBand,
+        location: snapshotLocation,
         activityRecencyDays: freshness.ageDays,
         computedAt: now,
         staleAfter,
@@ -163,6 +177,7 @@ export async function nonTechEnrichmentNode(
       {
         candidateId: state.candidateId,
         sessionId: state.sessionId,
+        skillCount: skillsNormalized.length,
         tier: score.tier,
         overallScore: score.overallScore,
         shadow: config.shadow,

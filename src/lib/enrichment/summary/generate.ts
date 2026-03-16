@@ -51,17 +51,55 @@ export interface GenerateSummaryInput {
   mode?: SummaryMode;
   /** Number of confirmed identities used (for verified mode) */
   confirmedCount?: number;
+  /** Optional track hint for track-aware summary generation */
+  track?: 'tech' | 'non_tech';
 }
 
+function inferSummaryTrack(input: GenerateSummaryInput): 'tech' | 'non_tech' {
+  if (input.track) return input.track;
+  if (
+    input.candidate.roleType === 'engineer' ||
+    input.candidate.roleType === 'data_scientist' ||
+    input.candidate.roleType === 'researcher'
+  ) {
+    return 'tech';
+  }
 
-function buildPrompt(input: GenerateSummaryInput): string {
+  const textBag = [
+    input.candidate.headlineHint,
+    input.candidate.companyHint,
+    ...input.platformData.map((item) => JSON.stringify(item.data ?? {})),
+    JSON.stringify(input.supplementalData ?? {}),
+  ]
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .join(' ')
+    .toLowerCase();
+
+  const TECH_PATTERNS = [
+    /\b(?:engineer|developer|software|backend|frontend|full[- ]stack|sre|devops|architect)\b/i,
+    /\b(?:typescript|javascript|python|java|react|node\.?js|aws|gcp|azure|kubernetes|docker|api|sdk)\b/i,
+    /\b(?:repo|repository|github|pull request|commit|framework|programming)\b/i,
+  ];
+  const NONTECH_PATTERNS = [
+    /\b(?:account executive|enterprise sales|sales|customer success|renewal|expansion|territory|quota|pipeline|outbound)\b/i,
+    /\b(?:stakeholder|implementation|onboarding|crm|salesforce|hubspot|outreach|gong|meddic)\b/i,
+    /\b(?:account manager|client success|technical account manager|solutions consultant)\b/i,
+  ];
+
+  const looksTech = TECH_PATTERNS.some((pattern) => pattern.test(textBag));
+  const looksNonTech = NONTECH_PATTERNS.some((pattern) => pattern.test(textBag));
+
+  if (looksNonTech && !looksTech) return 'non_tech';
+  return 'tech';
+}
+
+function buildTechPrompt(modeInstructions: string, input: GenerateSummaryInput): string {
   const {
     candidate,
     identities,
     platformData,
     supplementalData,
     mode = 'draft',
-    confirmedCount = 0,
   } = input;
 
   const identityLines = identities.slice(0, 25).map((i) => ({
@@ -77,14 +115,6 @@ function buildPrompt(input: GenerateSummaryInput): string {
     profileUrl: p.profileUrl,
     data: p.data,
   }));
-
-  // Mode-specific instructions
-  const modeInstructions = mode === 'verified'
-    ? `VERIFICATION STATUS: This summary is based on ${confirmedCount} CONFIRMED identities that have been verified by a recruiter.
-Write with higher confidence since identities have been verified.`
-    : `VERIFICATION STATUS: This is a DRAFT summary based on UNCONFIRMED identities.
-The identities have been matched algorithmically but NOT verified by a human.
-Include appropriate caveats about unverified sources. Be more cautious with claims.`;
 
   return `You are helping a recruiter understand a software engineering candidate. Write a concise summary using ONLY the provided inputs.
 
@@ -118,6 +148,84 @@ Supplemental data (if provided; may include enriched profile context):
 ${JSON.stringify(supplementalData ?? {}, null, 2)}
 
 Return valid JSON matching schema: { summary, structured: { skills, highlights, talkingPoints }, confidence, caveats }.`;
+}
+
+function buildNonTechPrompt(modeInstructions: string, input: GenerateSummaryInput): string {
+  const {
+    candidate,
+    identities,
+    platformData,
+    supplementalData,
+    mode = 'draft',
+  } = input;
+
+  const identityLines = identities.slice(0, 25).map((i) => ({
+    platform: i.platform,
+    platformId: i.platformId,
+    profileUrl: i.profileUrl,
+    confidence: i.confidence,
+  }));
+
+  const platformDataLines = platformData.slice(0, 25).map((p) => ({
+    platform: p.platform,
+    platformId: p.platformId,
+    profileUrl: p.profileUrl,
+    data: p.data,
+  }));
+
+  return `You are helping a recruiter understand a non-technical go-to-market or customer-facing candidate. Write a concise summary using ONLY the provided inputs.
+
+${modeInstructions}
+
+STRICT RULES:
+- Do NOT include or infer email addresses, phone numbers, home addresses, or any private identifiers.
+- Extract SKILLS from: sales/customer-success methodologies, CRM/tools, account ownership terms, customer lifecycle terms, revenue motions, partnerships, renewals, expansions, implementations, integrations, and stakeholder-management signals.
+- HIGHLIGHTS should include: role scope, segment ownership, logos or companies, territory hints, customer lifecycle work, notable achievements, and platform/tool usage when explicitly present.
+- TALKING POINTS should be recruiter-relevant conversation starters.
+- Prefer explicit business terms over generic traits. Do not invent skills.
+${mode === 'draft' ? '- CAVEATS must include a note about unverified identity sources.' : ''}
+
+OUTPUT REQUIREMENTS:
+- "skills": Array of canonical non-tech skills/tools/methodologies (e.g., "enterprise sales", "consultative selling", "salesforce", "customer success", "stakeholder management", "renewals", "outbound", "integrations").
+- "highlights": Notable scope, companies, segment ownership, customer motion, or measurable achievements explicitly supported by the inputs.
+- "talkingPoints": Questions or topics to discuss with the candidate.
+- "summary": 2-3 sentence overview.
+- "confidence": 0-1 based on data quality${mode === 'draft' ? ' (cap at 0.7 for unverified sources)' : ''}.
+- "caveats": Important warnings or limitations${mode === 'draft' ? ' (MUST include unverified source warning)' : ''}.
+
+Candidate (SERP hints):
+${JSON.stringify(candidate, null, 2)}
+
+Discovered identities:
+${JSON.stringify(identityLines, null, 2)}
+
+Platform data:
+${JSON.stringify(platformDataLines, null, 2)}
+
+Supplemental data (if provided; may include enriched profile context):
+${JSON.stringify(supplementalData ?? {}, null, 2)}
+
+Return valid JSON matching schema: { summary, structured: { skills, highlights, talkingPoints }, confidence, caveats }.`;
+}
+
+
+function buildPrompt(input: GenerateSummaryInput): string {
+  const {
+    mode = 'draft',
+    confirmedCount = 0,
+  } = input;
+
+  // Mode-specific instructions
+  const modeInstructions = mode === 'verified'
+    ? `VERIFICATION STATUS: This summary is based on ${confirmedCount} CONFIRMED identities that have been verified by a recruiter.
+Write with higher confidence since identities have been verified.`
+    : `VERIFICATION STATUS: This is a DRAFT summary based on UNCONFIRMED identities.
+The identities have been matched algorithmically but NOT verified by a human.
+Include appropriate caveats about unverified sources. Be more cautious with claims.`;
+
+  return inferSummaryTrack(input) === 'non_tech'
+    ? buildNonTechPrompt(modeInstructions, input)
+    : buildTechPrompt(modeInstructions, input);
 }
 
 /**
