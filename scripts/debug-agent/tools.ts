@@ -18,6 +18,10 @@ function textResult(text: string) {
   return { content: [{ type: 'text' as const, text }] };
 }
 
+function logTool(name: string, args: Record<string, unknown>) {
+  console.log(`[${name}]`, JSON.stringify(args).slice(0, 200));
+}
+
 // ---- 1. get_request_results ----
 
 export const getRequestResults = tool(
@@ -30,6 +34,7 @@ export const getRequestResults = tool(
     includeDiagnostics: z.boolean().default(true).describe('Include track decision from diagnostics JSON'),
   },
   async (args) => {
+    logTool('get_request_results', args);
     const request = await prisma.jobSourcingRequest.findUnique({
       where: { id: args.requestId },
     });
@@ -94,6 +99,7 @@ export const getCandidateDetails = tool(
     sessionLimit: z.number().default(3).describe('Max enrichment sessions to return (default 3)'),
   },
   async (args) => {
+    logTool('get_candidate_details', args);
     const candidate = await prisma.candidate.findUnique({
       where: { id: args.candidateId },
     });
@@ -144,6 +150,7 @@ export const getRequestCandidate = tool(
     candidateId: z.string().describe('Candidate.id (UUID)'),
   },
   async (args) => {
+    logTool('get_request_candidate', args);
     const jsc = await prisma.jobSourcingCandidate.findFirst({
       where: { sourcingRequestId: args.requestId, candidateId: args.candidateId },
       include: { sourcingRequest: true },
@@ -227,6 +234,7 @@ export const getJobSummary = tool(
     tenantId: z.string().describe('Tenant ID (required — externalJobId is not globally unique)'),
   },
   async (args) => {
+    logTool('get_job_summary', args);
     const requests = await prisma.jobSourcingRequest.findMany({
       where: { externalJobId: args.externalJobId, tenantId: args.tenantId },
       orderBy: { requestedAt: 'desc' },

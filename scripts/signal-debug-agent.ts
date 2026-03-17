@@ -12,14 +12,27 @@
  *   npx tsx scripts/signal-debug-agent.ts --request-id <id> --candidate-id <id> --question "why rank X above Y?"
  */
 
+// ---- Railway read-only connection ----
+// Must be set BEFORE any imports that trigger Prisma client initialization.
+
+const RAILWAY_RO_URL = 'postgresql://signal_debug_ro:debugReadOnly2026!@crossover.proxy.rlwy.net:18271/railway';
+
+if (process.argv.includes('--railway')) {
+  process.env.DATABASE_URL = RAILWAY_RO_URL;
+}
+
 import { query, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { buildPrompt, type DebugAgentArgs } from './debug-agent/prompt';
 import { allTools } from './debug-agent/tools';
 
 // ---- CLI parsing ----
 
-function parseArgs(): DebugAgentArgs {
-  const args: DebugAgentArgs = {};
+interface CliFlags extends DebugAgentArgs {
+  railway?: boolean;
+}
+
+function parseArgs(): CliFlags {
+  const args: CliFlags = {};
   const argv = process.argv.slice(2);
 
   for (let i = 0; i < argv.length; i++) {
@@ -39,6 +52,9 @@ function parseArgs(): DebugAgentArgs {
       case '--question':
         args.question = argv[++i];
         break;
+      case '--railway':
+        args.railway = true;
+        break;
       case '--help':
       case '-h':
         printUsage();
@@ -53,7 +69,7 @@ function parseArgs(): DebugAgentArgs {
   return args;
 }
 
-function validate(args: DebugAgentArgs): void {
+function validate(args: CliFlags): void {
   const hasId = args.requestId || args.candidateId || args.externalJobId;
   if (!hasId) {
     console.error('Error: At least one ID flag is required.');
@@ -81,6 +97,7 @@ Flags:
   --external-job-id <id>   External job ID (requires --tenant-id)
   --tenant-id <id>         Tenant UUID (required with --external-job-id)
   --question <text>        Supplementary question (requires at least one ID flag)
+  --railway                Connect to Railway prod DB (read-only)
 `);
 }
 
@@ -89,6 +106,10 @@ Flags:
 async function main() {
   const args = parseArgs();
   validate(args);
+
+  if (args.railway) {
+    console.log('Using Railway DB (read-only)');
+  }
 
   const prompt = buildPrompt(args);
 
@@ -105,9 +126,17 @@ async function main() {
     prompt,
     options: {
       cwd: process.cwd(),
-      allowedTools: ['Read', 'Grep', 'Glob'],
-      permissionMode: 'dontAsk',
-      maxTurns: 12,
+      allowedTools: [
+        'Read', 'Grep', 'Glob',
+        'mcp__signal-debug__get_request_results',
+        'mcp__signal-debug__get_candidate_details',
+        'mcp__signal-debug__get_request_candidate',
+        'mcp__signal-debug__run_sql_readonly',
+        'mcp__signal-debug__get_job_summary',
+      ],
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
+      maxTurns: 30,
       mcpServers: { 'signal-debug': signalTools },
     },
   })) {
