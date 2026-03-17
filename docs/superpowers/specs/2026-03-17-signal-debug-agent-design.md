@@ -36,11 +36,13 @@ Not a production component. A diagnostic tool for post-hoc analysis of ranking r
 ```
 npx tsx scripts/signal-debug-agent.ts --request-id <id>
 npx tsx scripts/signal-debug-agent.ts --candidate-id <id>
-npx tsx scripts/signal-debug-agent.ts --external-job-id <id>
+npx tsx scripts/signal-debug-agent.ts --external-job-id <id> --tenant-id <id>
 npx tsx scripts/signal-debug-agent.ts --question "why did request X rank candidate Y above Z?"
 ```
 
 Flags can be combined: `--request-id <id> --candidate-id <id>` narrows to a specific candidate within a request.
+
+`--tenant-id` is required when using `--external-job-id` (because `externalJobId` is only unique within a tenant + jobContextHash, not globally). Not required with `--request-id` or `--candidate-id` (those are globally unique UUIDs).
 
 `--question` is supplementary context — at least one ID flag is required. If only `--question` is provided, exit with usage help.
 
@@ -96,7 +98,7 @@ Fetch a sourcing request with ranked candidates.
   },
   candidateCounts: {
     total, enriched, withSnapshot, withIdentity,
-    byLocationMatchType: { city_exact, city_alias, country_only, unknown, none },
+    byLocationMatchType: { city_exact, city_alias, country_only, unknown_location, none },
     bySkillScoreMethod: { snapshot, text_fallback, hybrid_nontech }
   },
   candidates: [
@@ -228,7 +230,7 @@ Execute a validated read-only SQL query against the database.
 6. Reject SQL comments (`--`, `/* */`)
 7. If no `LIMIT` clause present, append `LIMIT 100`
 8. Hard truncate: max 100 rows, max 2000 chars per cell
-9. Query timeout: 10 seconds
+9. Best-effort row limit only for v1 (no per-query timeout — Prisma's shared client has no per-query timeout API; a `SET statement_timeout` wrapper or dedicated pg client can be added later if needed)
 10. Log executed SQL to stdout before execution
 
 **Execution:** `prisma.$queryRawUnsafe(validatedQuery)`
@@ -245,10 +247,11 @@ Execute a validated read-only SQL query against the database.
 
 ### 5. `get_job_summary`
 
-Fetch sourcing request metadata by external job ID.
+Fetch sourcing request metadata by external job ID. Requires tenant scoping because `externalJobId` is only unique within a tenant + `jobContextHash`, not globally.
 
 **Parameters:**
 - `externalJobId` (string, required) — the external job identifier
+- `tenantId` (string, required) — tenant scope (externalJobId is not globally unique)
 
 **Returns normalized summary:**
 ```
