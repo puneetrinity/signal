@@ -23,11 +23,13 @@
     "eval:location:verbose": "tsx scripts/eval-location-hints.ts --verbose",
     "eval:resolution": "tsx scripts/eval-location-resolution.ts",
     "eval:resolution:verbose": "tsx scripts/eval-location-resolution.ts --verbose",
-    "research": "tsx scripts/research-runner.ts"
+    "research": "tsx scripts/research-runner.ts",
+    "debug-agent": "tsx scripts/signal-debug-agent.ts"
   },
   "dependencies": {
     "@ai-sdk/google": "^2.0.17",
     "@ai-sdk/groq": "^2.0.33",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.77",
     "@clerk/nextjs": "^6.36.3",
     "@langchain/core": "^1.1.6",
     "@langchain/langgraph": "^1.0.5",
