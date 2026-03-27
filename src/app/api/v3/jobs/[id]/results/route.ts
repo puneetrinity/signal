@@ -163,6 +163,13 @@ export async function GET(
   const diagnosticsObj = sourcingRequest.diagnostics as Record<string, unknown> | null;
   const diag = diagnosticsObj ?? {};
   const discoveredPromotedInTopCount = (diag.discoveredPromotedInTopCount as number) ?? 0;
+  const requestJobContext = safeObject(sourcingRequest.jobContext);
+  const requestedLocation = safeOptionalString(requestJobContext?.location);
+  const targetHasCity = Boolean(
+    requestedLocation
+      ? resolveLocationDeterministic(requestedLocation).city
+      : null,
+  );
 
   const candidateResults = sourcingRequest.candidates.map((sc) => {
     const techSnap = sc.candidate.intelligenceSnapshots.find((s) => s.track === 'tech') ?? null;
@@ -272,8 +279,10 @@ export async function GET(
       );
 
     const locationLabel =
-      locationMatchType === 'city_exact' || locationMatchType === 'city_alias' || locationMatchType === 'country_only'
+      locationMatchType === 'city_exact' || locationMatchType === 'city_alias'
         ? 'location_verified'
+        : locationMatchType === 'country_only'
+          ? (targetHasCity ? 'location_partial' : 'location_verified')
         : locationMatchType === 'unknown_location'
           ? (unknownLocationPromotion ? 'location_unverified_promoted' : 'location_unverified')
           : locationMatchType === 'none'
