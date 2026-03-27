@@ -21,9 +21,7 @@ if (process.argv.includes('--railway')) {
   process.env.DATABASE_URL = RAILWAY_RO_URL;
 }
 
-import { query, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { buildPrompt, type DebugAgentArgs } from './debug-agent/prompt';
-import { allTools } from './debug-agent/tools';
 
 // ---- CLI parsing ----
 
@@ -119,6 +117,22 @@ async function main() {
   console.log(`  External Job ID: ${args.externalJobId ?? '-'}`);
   console.log(`  Question: ${args.question ?? '-'}`);
   console.log('');
+
+  let query: typeof import('@anthropic-ai/claude-agent-sdk').query;
+  let createSdkMcpServer: typeof import('@anthropic-ai/claude-agent-sdk').createSdkMcpServer;
+  let allTools: typeof import('./debug-agent/tools').allTools;
+
+  try {
+    ({ query, createSdkMcpServer } = await import('@anthropic-ai/claude-agent-sdk'));
+    ({ allTools } = await import('./debug-agent/tools'));
+  } catch (err) {
+    console.error('Signal Debug Agent requires an optional local dependency that is not installed.');
+    console.error('Run: npm install -D @anthropic-ai/claude-agent-sdk');
+    console.error('Then rerun: npx tsx scripts/signal-debug-agent.ts ...');
+    console.error('');
+    console.error(err);
+    process.exit(1);
+  }
 
   const signalTools = createSdkMcpServer({ name: 'signal-debug', tools: allTools });
 

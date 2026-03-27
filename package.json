@@ -68,7 +68,6 @@
     "zustand": "^5.0.2"
   },
   "devDependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.77",
     "@eslint/eslintrc": "^3",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
