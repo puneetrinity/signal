@@ -29,7 +29,6 @@
   "dependencies": {
     "@ai-sdk/google": "^2.0.17",
     "@ai-sdk/groq": "^2.0.33",
-    "@anthropic-ai/claude-agent-sdk": "^0.2.77",
     "@clerk/nextjs": "^6.36.3",
     "@langchain/core": "^1.1.6",
     "@langchain/langgraph": "^1.0.5",
@@ -69,6 +68,7 @@
     "zustand": "^5.0.2"
   },
   "devDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.77",
     "@eslint/eslintrc": "^3",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
