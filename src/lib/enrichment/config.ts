@@ -46,7 +46,7 @@ export function isNonTechEnforce(): boolean {
   return process.env.ENRICHMENT_NONTECH_ENFORCE === 'true';
 }
 
-export const DEFAULT_NONTECH_MIN_CORROBORATION = 2;
+export const DEFAULT_NONTECH_MIN_CORROBORATION = 1;
 export const DEFAULT_NONTECH_MAX_SOURCE_AGE_DAYS = 180;
 export const DEFAULT_NONTECH_SENIORITY_MIN_CONF = 0.8;
 export const DEFAULT_NONTECH_SCORE_FLOOR = 0.80;

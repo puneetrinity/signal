@@ -47,6 +47,8 @@ export interface GenerateSummaryInput {
   platformData: EphemeralPlatformDataItem[];
   /** Optional supplemental data (e.g., PDL enrichment) */
   supplementalData?: Record<string, unknown> | null;
+  /** Optional job context from the sourcing request */
+  jobContext?: Record<string, unknown> | null;
   /** Summary mode - affects prompt and caveats */
   mode?: SummaryMode;
   /** Number of confirmed identities used (for verified mode) */
@@ -60,6 +62,7 @@ function buildPrompt(input: GenerateSummaryInput): string {
     identities,
     platformData,
     supplementalData,
+    jobContext,
     mode = 'draft',
     confirmedCount = 0,
   } = input;
@@ -86,24 +89,58 @@ Write with higher confidence since identities have been verified.`
 The identities have been matched algorithmically but NOT verified by a human.
 Include appropriate caveats about unverified sources. Be more cautious with claims.`;
 
-  return `You are helping a recruiter understand a software engineering candidate. Write a concise summary using ONLY the provided inputs.
+  // Determine persona based on roleType or jobContext
+  const jobTitle = typeof jobContext?.title === 'string' ? jobContext.title : null;
+  const isTechRole = !candidate.roleType
+    || candidate.roleType === 'software_engineering'
+    || candidate.roleType === 'data_engineering'
+    || candidate.roleType === 'devops';
 
-${modeInstructions}
+  const persona = jobTitle
+    ? `candidate for the ${jobTitle} role`
+    : (isTechRole ? 'software engineering candidate' : 'business or GTM professional');
+
+  const contextInstructions = jobContext ? `\nJOB CONTEXT PROVIDED:
+Analyze the candidate's data specifically against the following job requirements.
+Focus on identifying skills, experiences, and highlights that are directly relevant to this role.
+Job Data: ${JSON.stringify(jobContext, null, 2)}\n` : '';
+
+  const skillExtractionInstructions = jobContext
+    ? `- Extract SKILLS by comparing the candidate's evidence to the provided JOB CONTEXT. Highlight skills they explicitly possess that the job requires, and any other standout relevant skills. Do NOT hallucinate skills they do not have.`
+    : (isTechRole
+      ? '- Extract SKILLS from: programming languages in repos, technologies mentioned in bio/headline, frameworks evident from repo names.'
+      : '- Extract SKILLS from: business methodologies (e.g. MEDDIC, challenger sale), domain expertise (e.g. enterprise SaaS, financial services), GTM tools (e.g. Salesforce, HubSpot, Gong), soft skills (e.g. stakeholder management, pipeline generation), and functional areas (e.g. customer success, revenue operations).\n- Do NOT include programming languages or engineering tools unless they are explicitly mentioned and relevant.');
+
+  const skillsOutputFormat = jobContext
+    ? `- "skills": Array of relevant skills matching the job context (e.g., "React", "Enterprise Sales"). Extract ONLY from candidate data. Min 3 if signal exists.`
+    : (isTechRole
+      ? '- "skills": Array of programming languages/frameworks/tools (e.g., "JavaScript", "React", "Python", "AWS"). Extract from languages array and repo names.'
+      : '- "skills": Array of business skills/methodologies/tools (e.g., "Enterprise Sales", "Customer Success", "Salesforce", "Pipeline Management", "SaaS", "Revenue Operations"). Min 3 if any signal exists — prefer specificity.');
+
+  const highlightsFormat = isTechRole
+    ? '- "highlights": Notable repos (especially with stars), years of experience indicators, companies worked at.'
+    : '- "highlights": Quota attainment, key accounts, company names, team size, revenue impact, and role progression.';
+
+  const gapsInstruction = jobContext ? `\n- Include explicit notes about any missing critical skills from the job description in "caveats".` : '';
+
+  return `You are helping a recruiter understand a ${persona}. Write a concise summary using ONLY the provided inputs.
+
+${modeInstructions}${contextInstructions}
 
 STRICT RULES:
 - Do NOT include or infer email addresses, phone numbers, home addresses, or any private identifiers.
-- Extract SKILLS from: programming languages in repos, technologies mentioned in bio/headline, frameworks evident from repo names.
-- HIGHLIGHTS should include: notable repos (especially with stars), years of experience indicators, companies worked at.
+${skillExtractionInstructions}
+${highlightsFormat}
 - TALKING POINTS should be conversation starters a recruiter could use.
-${mode === 'draft' ? '- CAVEATS must include a note about unverified identity sources.' : ''}
+${mode === 'draft' ? '- CAVEATS must include a note about unverified identity sources.' : ''}${gapsInstruction}
 
 OUTPUT REQUIREMENTS:
-- "skills": Array of programming languages/frameworks/tools (e.g., "JavaScript", "React", "Python", "AWS"). Extract from languages array and repo names.
-- "highlights": Notable achievements, metrics (stars, repos, followers), companies.
+${skillsOutputFormat}
+- "highlights": As described above.
 - "talkingPoints": Questions or topics to discuss with the candidate.
 - "summary": 2-3 sentence overview.
 - "confidence": 0-1 based on data quality${mode === 'draft' ? ' (cap at 0.7 for unverified sources)' : ''}.
-- "caveats": Important warnings or limitations${mode === 'draft' ? ' (MUST include unverified source warning)' : ''}.
+- "caveats": Important warnings or limitations${mode === 'draft' ? ' (MUST include unverified source warning)' : ''}${jobContext ? ' and note notable skill gaps' : ''}.
 
 Candidate (SERP hints):
 ${JSON.stringify(candidate, null, 2)}

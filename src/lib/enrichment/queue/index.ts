@@ -472,8 +472,8 @@ async function processSummaryOnlyJob(
 
     const identityCandidates = identityCandidateIds.length > 0
       ? await prisma.identityCandidate.findMany({
-          where: { id: { in: identityCandidateIds }, tenantId },
-        })
+        where: { id: { in: identityCandidateIds }, tenantId },
+      })
       : [];
 
     // Create a map for quick lookup
@@ -515,6 +515,18 @@ async function processSummaryOnlyJob(
       };
     });
 
+    // Fetch the latest job context (if any) for this candidate
+    const latestJobCandidate = await prisma.jobSourcingCandidate.findFirst({
+      where: { candidateId, tenantId },
+      orderBy: { sourcingRequest: { requestedAt: 'desc' } },
+      include: { sourcingRequest: true }
+    });
+
+    let jobContext = null;
+    if (latestJobCandidate?.sourcingRequest?.jobContext) {
+      jobContext = latestJobCandidate.sourcingRequest.jobContext as Record<string, unknown>;
+    }
+
     // Generate verified summary
     const { summary, evidence, model, tokens, meta } = await generateCandidateSummary({
       candidate: {
@@ -528,6 +540,7 @@ async function processSummaryOnlyJob(
       },
       identities,
       platformData: [], // Skip platform data fetch for now (can be enhanced later)
+      jobContext,
       mode: 'verified',
       confirmedCount: confirmedIdentities.length,
     });
@@ -665,6 +678,18 @@ async function processPdlEnrichmentJob(
     const contactInfo = allowContactStorage ? pdlResult.contactInfo : null;
     const contactRestricted = !allowContactStorage && pdlResult.contactInfo;
 
+    // Fetch the latest job context (if any) for this candidate
+    const latestJobCandidate = await prisma.jobSourcingCandidate.findFirst({
+      where: { candidateId, tenantId },
+      orderBy: { sourcingRequest: { requestedAt: 'desc' } },
+      include: { sourcingRequest: true }
+    });
+
+    let jobContext = null;
+    if (latestJobCandidate?.sourcingRequest?.jobContext) {
+      jobContext = latestJobCandidate.sourcingRequest.jobContext as Record<string, unknown>;
+    }
+
     const { summary, evidence, model, tokens, meta } = await generateCandidateSummary({
       candidate: {
         linkedinId: candidate.linkedinId,
@@ -680,6 +705,7 @@ async function processPdlEnrichmentJob(
       supplementalData: {
         pdl: pdlResult.summaryData,
       },
+      jobContext,
       mode: 'draft',
       confirmedCount: 0,
     });

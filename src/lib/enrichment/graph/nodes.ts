@@ -306,7 +306,7 @@ function buildRunTrace(state: EnrichmentState): EnrichmentRunTrace {
   const aggregatedTier1Gap = aggregateTier1Gap(platformResults);
   const dominantTier1EnforceReason = aggregatedTier1Shadow
     ? Object.entries(aggregatedTier1Shadow.enforceReasonCounts)
-        .sort((a, b) => b[1] - a[1])[0]?.[0]
+      .sort((a, b) => b[1] - a[1])[0]?.[0]
     : undefined;
 
   return {
@@ -409,7 +409,7 @@ export async function loadCandidateNode(
     let locationHint: string | null = candidate.locationHint || null;
 
     if ((!nameHint || !headlineHint || !locationHint || !companyHint) &&
-        (candidate.searchTitle || candidate.searchSnippet)) {
+      (candidate.searchTitle || candidate.searchSnippet)) {
       const reDerived = extractAllHints(
         candidate.linkedinId || candidate.id,
         candidate.searchTitle || '',
@@ -1497,6 +1497,18 @@ export async function generateSummaryNode(
 
     const identities = [...state.identitiesFound].sort((a, b) => b.confidence - a.confidence).slice(0, 10);
 
+    // Fetch the latest job context (if any) for this candidate
+    const latestJobCandidate = await prisma.jobSourcingCandidate.findFirst({
+      where: { candidateId: state.candidateId, tenantId: state.tenantId },
+      orderBy: { sourcingRequest: { requestedAt: 'desc' } },
+      include: { sourcingRequest: true }
+    });
+
+    let jobContext = null;
+    if (latestJobCandidate?.sourcingRequest?.jobContext) {
+      jobContext = latestJobCandidate.sourcingRequest.jobContext as Record<string, unknown>;
+    }
+
     // Generate as DRAFT mode (no confirmed identities during initial enrichment)
     const { summary, evidence, model, tokens, meta } = await generateCandidateSummary({
       candidate: {
@@ -1510,6 +1522,7 @@ export async function generateSummaryNode(
       },
       identities,
       platformData,
+      jobContext,
       mode: 'draft',
       confirmedCount: 0,
     });

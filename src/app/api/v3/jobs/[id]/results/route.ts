@@ -3,6 +3,7 @@
  *
  * Returns sourcing results for a job. Optionally filter by requestId.
  * Scope: jobs:results
+ * Note: Prisma types were recently regenerated.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -49,6 +50,10 @@ export async function GET(
   const { id: externalJobId } = await params;
   const tenantId = auth.context.tenantId;
   const requestId = request.nextUrl.searchParams.get('requestId');
+  const includeSummary = request.nextUrl.searchParams.get('includeSummary') === 'true';
+  const includeEvidence = request.nextUrl.searchParams.get('includeEvidence') === 'true';
+  const includeScoreBreakdown = request.nextUrl.searchParams.get('includeScoreBreakdown') === 'true';
+  const limit = parseInt(request.nextUrl.searchParams.get('limit') || '100', 10);
 
   const where = requestId
     ? { id: requestId, tenantId, externalJobId }
@@ -60,6 +65,7 @@ export async function GET(
     include: {
       candidates: {
         orderBy: { rank: 'asc' },
+        take: limit,
         include: {
           candidate: {
             select: {
@@ -76,6 +82,17 @@ export async function GET(
               enrichmentStatus: true,
               confidenceScore: true,
               lastEnrichedAt: true,
+              enrichmentSessions: {
+                orderBy: { createdAt: 'desc' },
+                take: 1,
+                select: {
+                  id: true,
+                  status: true,
+                  summary: true,
+                  summaryStructured: true,
+                  summaryGeneratedAt: true,
+                }
+              },
               intelligenceSnapshots: {
                 where: { track: { in: ['tech', 'non-tech'] } },
                 orderBy: { computedAt: 'desc' },
@@ -107,33 +124,37 @@ export async function GET(
   const candidateIds = sourcingRequest.candidates.map((c) => c.candidateId);
   const [identitySignals, confirmedSignals] = candidateIds.length > 0
     ? await Promise.all([
-        prisma.identityCandidate.findMany({
-          where: {
-            tenantId,
-            candidateId: { in: candidateIds },
-          },
-          select: {
-            candidateId: true,
-            platform: true,
-            status: true,
-            confidence: true,
-            bridgeTier: true,
-            updatedAt: true,
-            discoveredAt: true,
-          },
-        }),
-        prisma.confirmedIdentity.findMany({
-          where: {
-            tenantId,
-            candidateId: { in: candidateIds },
-          },
-          select: {
-            candidateId: true,
-            platform: true,
-            confirmedAt: true,
-          },
-        }),
-      ])
+      prisma.identityCandidate.findMany({
+        where: {
+          tenantId,
+          candidateId: { in: candidateIds },
+        },
+        select: {
+          id: true,
+          candidateId: true,
+          platform: true,
+          profileUrl: true,
+          status: true,
+          confidence: true,
+          bridgeTier: true,
+          ...(includeEvidence ? { evidence: true } : {}),
+          ...(includeScoreBreakdown ? { scoreBreakdown: true } : {}),
+          updatedAt: true,
+          discoveredAt: true,
+        },
+      }),
+      prisma.confirmedIdentity.findMany({
+        where: {
+          tenantId,
+          candidateId: { in: candidateIds },
+        },
+        select: {
+          candidateId: true,
+          platform: true,
+          confirmedAt: true,
+        },
+      }),
+    ])
     : [[], []];
 
   const identityByCandidateId = new Map<string, typeof identitySignals>();
@@ -152,11 +173,7 @@ export async function GET(
 
   const now = new Date();
 
-  // Compute per-candidate results and collect snapshot stats
-  let totalWithSnapshot = 0;
-  let staleCount = 0;
-  let totalAgeDays = 0;
-
+  // Compute per-candidate results
   const nonTechShadow = isNonTechShadow();
   const diagnosticsObj = sourcingRequest.diagnostics as Record<string, unknown> | null;
   const diag = diagnosticsObj ?? {};
@@ -170,18 +187,6 @@ export async function GET(
       confirmedByCandidateId.get(sc.candidateId) ?? [],
     );
     const searchSignals = readSearchSignals(sc.candidate.searchMeta);
-
-    let snapshotAgeDays: number | null = null;
-    let staleServed = false;
-    if (techSnap) {
-      totalWithSnapshot++;
-      snapshotAgeDays = Math.floor(
-        (now.getTime() - techSnap.computedAt.getTime()) / (24 * 60 * 60 * 1000),
-      );
-      totalAgeDays += snapshotAgeDays;
-      staleServed = techSnap.staleAfter < now;
-      if (staleServed) staleCount++;
-    }
 
     // Build professionalValidation from non-tech snapshot (null-safe)
     let professionalValidation: {
@@ -213,13 +218,13 @@ export async function GET(
     // Build snapshot output (tech only, preserving existing shape)
     const snapshot = techSnap
       ? {
-          skillsNormalized: techSnap.skillsNormalized,
-          roleType: techSnap.roleType,
-          seniorityBand: techSnap.seniorityBand,
-          location: techSnap.location,
-          computedAt: techSnap.computedAt,
-          staleAfter: techSnap.staleAfter,
-        }
+        skillsNormalized: techSnap.skillsNormalized,
+        roleType: techSnap.roleType,
+        seniorityBand: techSnap.seniorityBand,
+        location: techSnap.location,
+        computedAt: techSnap.computedAt,
+        staleAfter: techSnap.staleAfter,
+      }
       : null;
 
     // Extract tier metadata from persisted fitBreakdown JSON
@@ -234,24 +239,24 @@ export async function GET(
     const rawLocationMatchType = (fbRaw?.locationMatchType as string) ?? null;
     const locationMatchType =
       rawLocationMatchType === 'city_exact' ||
-      rawLocationMatchType === 'city_alias' ||
-      rawLocationMatchType === 'country_only' ||
-      rawLocationMatchType === 'unknown_location' ||
-      rawLocationMatchType === 'none'
+        rawLocationMatchType === 'city_alias' ||
+        rawLocationMatchType === 'country_only' ||
+        rawLocationMatchType === 'unknown_location' ||
+        rawLocationMatchType === 'none'
         ? rawLocationMatchType
         : null;
 
     // Clean fitBreakdown: score fields + method flag (strip tier metadata)
     const fitBreakdown = fbRaw
       ? {
-          skillScore: fbRaw.skillScore ?? null,
-          skillScoreMethod: fbRaw.skillScoreMethod ?? null,
-          roleScore: fbRaw.roleScore ?? null,
-          seniorityScore: fbRaw.seniorityScore ?? null,
-          activityFreshnessScore: fbRaw.activityFreshnessScore ?? null,
-          locationBoost: fbRaw.locationBoost ?? null,
-          unknownLocationPromotion: Boolean(fbRaw.unknownLocationPromotion),
-        }
+        skillScore: fbRaw.skillScore ?? null,
+        skillScoreMethod: fbRaw.skillScoreMethod ?? null,
+        roleScore: fbRaw.roleScore ?? null,
+        seniorityScore: fbRaw.seniorityScore ?? null,
+        activityFreshnessScore: fbRaw.activityFreshnessScore ?? null,
+        locationBoost: fbRaw.locationBoost ?? null,
+        unknownLocationPromotion: Boolean(fbRaw.unknownLocationPromotion),
+      }
       : null;
 
     const rawDataConfidence = fbRaw?.dataConfidence;
@@ -277,100 +282,57 @@ export async function GET(
             ? 'location_mismatch'
             : 'location_unknown';
 
+    const session = sc.candidate.enrichmentSessions?.[0];
+
+    const identities = (identityByCandidateId.get(sc.candidateId) ?? []).map(ident => ({
+      platform: ident.platform,
+      profileUrl: ident.profileUrl,
+      confidence: ident.confidence,
+      ...(includeScoreBreakdown && ident.scoreBreakdown ? { scoreBreakdown: ident.scoreBreakdown } : {})
+    }));
+
+    let aiSummary: { text: string; structured: { skills: string[] }, confidence?: number, caveats?: string[] } | null = null;
+    if (includeSummary && session?.summary) {
+      const structured = (session.summaryStructured as { skills?: string[], highlights?: string[], caveats?: string[], confidence?: number }) || {};
+      aiSummary = {
+        text: session.summary,
+        structured: {
+          skills: structured?.skills ?? [],
+        },
+      };
+
+      if (structured?.confidence != null) {
+        aiSummary.confidence = structured.confidence;
+      }
+      if (structured?.caveats && structured.caveats.length > 0) {
+        aiSummary.caveats = structured.caveats;
+      }
+    }
+
     return {
-      candidateId: sc.candidateId,
-      fitScore: sc.fitScore,
-      fitBreakdown,
-      matchTier,
-      locationMatchType,
-      locationLabel,
-      dataConfidence,
-      sourceType: sc.sourceType,
-      enrichmentStatus: sc.enrichmentStatus,
-      rank: sc.rank,
       candidate: {
         id: sc.candidate.id,
         linkedinUrl: sc.candidate.linkedinUrl,
-        linkedinId: sc.candidate.linkedinId,
         nameHint: sc.candidate.nameHint,
-        headlineHint: sc.candidate.headlineHint,
-        locationHint: sc.candidate.locationHint,
-        companyHint: sc.candidate.companyHint,
-        searchSnippet: sc.candidate.searchSnippet ?? null,
-        searchMeta: sc.candidate.searchMeta ?? null,
-        searchProvider: sc.candidate.searchProvider ?? null,
-        searchSignals,
-        enrichmentStatus: sc.candidate.enrichmentStatus,
-        confidenceScore: sc.candidate.confidenceScore,
-        lastEnrichedAt: sc.candidate.lastEnrichedAt,
       },
-      identitySummary,
-      snapshot,
-      freshness: {
-        snapshotAgeDays,
-        staleServed,
-        lastEnrichedAt: sc.candidate.lastEnrichedAt?.toISOString() ?? null,
+      sourcingContext: {
+        rank: sc.rank,
       },
-      professionalValidation,
+      ...(identities.length > 0 ? {
+        identitySummary: {
+          topConfidence: Math.max(...identities.map(i => i.confidence)),
+          platforms: Array.from(new Set(identities.map(i => i.platform)))
+        },
+        identities
+      } : {}),
+      ...(aiSummary ? { aiSummary } : {}),
     };
   });
 
-  const snapshotStats = {
-    totalWithSnapshot,
-    staleCount,
-    avgAgeDays: totalWithSnapshot > 0
-      ? Math.round((totalAgeDays / totalWithSnapshot) * 10) / 10
-      : null,
-  };
-
-  // Extract trackDecision from diagnostics (null-safe for pre-classifier requests)
-  const trackDecision = diagnosticsObj?.trackDecision ?? null;
-
-  // Compute group counts from candidate tier data
-  const strictCount = candidateResults.filter((c) => c.matchTier === 'best_matches').length;
-  const expandedCount = candidateResults.filter((c) => c.matchTier === 'broader_pool').length;
-  const groupCounts = {
-    bestMatches: strictCount,
-    broaderPool: expandedCount,
-    strictMatchedCount: strictCount,
-    expandedCount,
-    expansionReason: (diag.expansionReason as string) ?? null,
-    requestedLocation: (diag.requestedLocation as string) ?? null,
-    strictDemotedCount: (diag.strictDemotedCount as number) ?? 0,
-    strictRescuedCount: (diag.strictRescuedCount as number) ?? 0,
-    strictRescueApplied: (diag.strictRescueApplied as boolean) ?? false,
-    strictRescueMinFitScoreUsed: (diag.strictRescueMinFitScoreUsed as number) ?? null,
-    countryGuardFilteredCount: (diag.countryGuardFilteredCount as number) ?? 0,
-    minDiscoveryPerRunApplied: (diag.minDiscoveryPerRunApplied as number) ?? 0,
-    minDiscoveredInOutputApplied: (diag.minDiscoveredInOutputApplied as number) ?? 0,
-    discoveredPromotedCount: (diag.discoveredPromotedCount as number) ?? 0,
-    discoveredPromotedInTopCount: (diag.discoveredPromotedInTopCount as number) ?? 0,
-    unknownLocationPromotedCount: (diag.unknownLocationPromotedCount as number) ?? 0,
-    discoveredOrphanCount: (diag.discoveredOrphanCount as number) ?? 0,
-    discoveredOrphanQueued: (diag.discoveredOrphanQueued as number) ?? 0,
-    locationMatchCounts: (diag.locationMatchCounts as Record<string, number>) ?? null,
-    demotedStrictWithCityMatch: (diag.demotedStrictWithCityMatch as number) ?? 0,
-    strictBeforeDemotion: (diag.strictBeforeDemotion as number) ?? 0,
-    selectedSnapshotTrack: (diag.selectedSnapshotTrack as string) ?? 'tech',
-  };
-
   return NextResponse.json({
-    success: true,
     requestId: sourcingRequest.id,
     externalJobId: sourcingRequest.externalJobId,
-    status: sourcingRequest.status,
-    callbackStatus: sourcingRequest.callbackStatus ?? null,
-    callbackSentAt: sourcingRequest.callbackSentAt?.toISOString() ?? null,
-    requestedAt: sourcingRequest.requestedAt.toISOString(),
-    completedAt: sourcingRequest.completedAt?.toISOString() ?? null,
-    lastRerankedAt: sourcingRequest.lastRerankedAt?.toISOString() ?? null,
     resultCount: sourcingRequest.resultCount,
-    qualityGateTriggered: sourcingRequest.qualityGateTriggered,
-    queriesExecuted: sourcingRequest.queriesExecuted,
-    diagnostics: sourcingRequest.diagnostics,
-    trackDecision,
-    groupCounts,
-    snapshotStats,
-    candidates: candidateResults,
+    data: candidateResults,
   });
 }

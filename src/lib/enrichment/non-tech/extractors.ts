@@ -43,28 +43,40 @@ export function extractCompanyAlignment(
     return { sources, corroborationCount: 0, freshnessDays: null };
   }
 
+  // Primary company token: first meaningful word (avoids LLC/Inc noise for partial match)
+  const companyFirstToken = companyHint.split(/[\s,]+/)[0];
+  const usePartialMatch = companyFirstToken && companyFirstToken.length >= 4;
+
+  function mentionsCompany(text: string): 'exact' | 'fuzzy' | null {
+    const lower = text.toLowerCase();
+    if (lower.includes(companyHint!)) return 'exact';
+    if (usePartialMatch && lower.includes(companyFirstToken!)) return 'fuzzy';
+    return null;
+  }
+
   // Check headline for company mention
   if (candidate.headlineHint) {
-    const headlineLower = candidate.headlineHint.toLowerCase();
-    if (headlineLower.includes(companyHint)) {
-      sources.push({ source: 'headline', company: candidate.companyHint!, matchType: 'exact' });
-    }
+    const match = mentionsCompany(candidate.headlineHint);
+    if (match) sources.push({ source: 'headline', company: candidate.companyHint!, matchType: match });
   }
 
   // Check SERP title for company mention
   if (candidate.searchTitle) {
-    const titleLower = candidate.searchTitle.toLowerCase();
-    if (titleLower.includes(companyHint)) {
-      sources.push({ source: 'serp_title', company: candidate.companyHint!, matchType: 'exact' });
-    }
+    const match = mentionsCompany(candidate.searchTitle);
+    if (match) sources.push({ source: 'serp_title', company: candidate.companyHint!, matchType: match });
   }
 
   // Check SERP snippet for company mention
   if (candidate.searchSnippet) {
-    const snippetLower = candidate.searchSnippet.toLowerCase();
-    if (snippetLower.includes(companyHint)) {
-      sources.push({ source: 'serp_snippet', company: candidate.companyHint!, matchType: 'exact' });
-    }
+    const match = mentionsCompany(candidate.searchSnippet);
+    if (match) sources.push({ source: 'serp_snippet', company: candidate.companyHint!, matchType: match });
+  }
+
+  // Implicit presence fallback: the SERP result IS their LinkedIn profile — companyHint comes
+  // from that profile. If no SERP text repeated the name (thin snippet), still count 1 fuzzy source
+  // from the profile itself so the corroboration gate doesn't drop real candidates to Tier 3.
+  if (sources.length === 0 && candidate.companyHint) {
+    sources.push({ source: 'linkedin_profile', company: candidate.companyHint, matchType: 'fuzzy' });
   }
 
   // NOTE: Do not count identity rows as corroboration for company alignment.
@@ -86,6 +98,7 @@ export function extractCompanyAlignment(
     freshnessDays,
   };
 }
+
 
 export function extractSeniorityValidation(
   candidate: CandidateData,

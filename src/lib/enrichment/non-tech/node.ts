@@ -47,6 +47,7 @@ export async function nonTechEnrichmentNode(
         searchSnippet: true,
         searchMeta: true,
         lastEnrichedAt: true,
+        roleType: true,
       },
     });
 
@@ -100,6 +101,12 @@ export async function nonTechEnrichmentNode(
       contradictions,
     };
 
+    // Extract skills from the AI summary (already populated by generateSummaryNode)
+    const structured = state.summaryStructured as Record<string, unknown> | null;
+    const skillsFromSummary: string[] = Array.isArray(structured?.skills)
+      ? (structured.skills as string[]).filter((s): s is string => typeof s === 'string' && s.length > 0)
+      : [];
+
     // Score
     const score = scoreNonTech(signals, config);
 
@@ -120,10 +127,10 @@ export async function nonTechEnrichmentNode(
         candidateId: state.candidateId,
         tenantId: state.tenantId,
         track: 'non-tech',
-        skillsNormalized: [],
-        roleType: null,
+        skillsNormalized: skillsFromSummary,
+        roleType: candidate.roleType ?? null,
         seniorityBand: seniorityValidation.normalizedBand,
-        location: null,
+        location: candidate.locationHint ?? null,
         activityRecencyDays: freshness.ageDays,
         computedAt: now,
         staleAfter,
@@ -141,7 +148,10 @@ export async function nonTechEnrichmentNode(
         }),
       },
       update: {
+        skillsNormalized: skillsFromSummary,
+        roleType: candidate.roleType ?? null,
         seniorityBand: seniorityValidation.normalizedBand,
+        location: candidate.locationHint ?? null,
         activityRecencyDays: freshness.ageDays,
         computedAt: now,
         staleAfter,
