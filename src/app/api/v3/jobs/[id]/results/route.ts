@@ -291,22 +291,13 @@ export async function GET(
       ...(includeScoreBreakdown && ident.scoreBreakdown ? { scoreBreakdown: ident.scoreBreakdown } : {})
     }));
 
-    let aiSummary: { text: string; structured: { skills: string[] }, confidence?: number, caveats?: string[] } | null = null;
+    let aiSummary: { text: string; skills: string[] } | null = null;
     if (includeSummary && session?.summary) {
-      const structured = (session.summaryStructured as { skills?: string[], highlights?: string[], caveats?: string[], confidence?: number }) || {};
+      const structured = (session.summaryStructured as { skills?: string[] }) || {};
       aiSummary = {
         text: session.summary,
-        structured: {
-          skills: structured?.skills ?? [],
-        },
+        skills: structured?.skills ?? [],
       };
-
-      if (structured?.confidence != null) {
-        aiSummary.confidence = structured.confidence;
-      }
-      if (structured?.caveats && structured.caveats.length > 0) {
-        aiSummary.caveats = structured.caveats;
-      }
     }
 
     return {

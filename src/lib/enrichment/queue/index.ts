@@ -515,18 +515,6 @@ async function processSummaryOnlyJob(
       };
     });
 
-    // Fetch the latest job context (if any) for this candidate
-    const latestJobCandidate = await prisma.jobSourcingCandidate.findFirst({
-      where: { candidateId, tenantId },
-      orderBy: { sourcingRequest: { requestedAt: 'desc' } },
-      include: { sourcingRequest: true }
-    });
-
-    let jobContext = null;
-    if (latestJobCandidate?.sourcingRequest?.jobContext) {
-      jobContext = latestJobCandidate.sourcingRequest.jobContext as Record<string, unknown>;
-    }
-
     // Generate verified summary
     const { summary, evidence, model, tokens, meta } = await generateCandidateSummary({
       candidate: {
@@ -539,8 +527,7 @@ async function processSummaryOnlyJob(
         roleType: candidate.roleType,
       },
       identities,
-      platformData: [], // Skip platform data fetch for now (can be enhanced later)
-      jobContext,
+      platformData: [],
       mode: 'verified',
       confirmedCount: confirmedIdentities.length,
     });
@@ -582,7 +569,7 @@ async function processSummaryOnlyJob(
       data: {
         status: 'completed',
         summary: summary.summary,
-        summaryStructured: toJsonValue(summary.structured),
+        summaryStructured: toJsonValue({ skills: summary.skills }),
         summaryEvidence: toJsonValue(evidence),
         summaryModel: model,
         summaryTokens: tokens,
@@ -678,18 +665,6 @@ async function processPdlEnrichmentJob(
     const contactInfo = allowContactStorage ? pdlResult.contactInfo : null;
     const contactRestricted = !allowContactStorage && pdlResult.contactInfo;
 
-    // Fetch the latest job context (if any) for this candidate
-    const latestJobCandidate = await prisma.jobSourcingCandidate.findFirst({
-      where: { candidateId, tenantId },
-      orderBy: { sourcingRequest: { requestedAt: 'desc' } },
-      include: { sourcingRequest: true }
-    });
-
-    let jobContext = null;
-    if (latestJobCandidate?.sourcingRequest?.jobContext) {
-      jobContext = latestJobCandidate.sourcingRequest.jobContext as Record<string, unknown>;
-    }
-
     const { summary, evidence, model, tokens, meta } = await generateCandidateSummary({
       candidate: {
         linkedinId: candidate.linkedinId,
@@ -705,13 +680,12 @@ async function processPdlEnrichmentJob(
       supplementalData: {
         pdl: pdlResult.summaryData,
       },
-      jobContext,
       mode: 'draft',
       confirmedCount: 0,
     });
 
     const summaryStructured = {
-      ...summary.structured,
+      skills: summary.skills,
       ...(contactInfo ? { contact: contactInfo } : {}),
       ...(contactRestricted ? { contactRestricted: true } : {}),
       source: 'pdl',
@@ -747,7 +721,7 @@ async function processPdlEnrichmentJob(
         identitiesAboveMinConfidence: 0,
         identitiesPassingPersistGuard: 0,
         identitiesPersisted: 0,
-        bestConfidence: summary.confidence ?? null,
+        bestConfidence: null,
         durationMs: Date.now() - startTime,
         summaryMeta: meta,
       },
@@ -760,7 +734,7 @@ async function processPdlEnrichmentJob(
         sourcesExecuted: toJsonValue(['pdl']),
         queriesExecuted: 1,
         identitiesFound: 0,
-        finalConfidence: summary.confidence ?? null,
+        finalConfidence: null,
         summary: summary.summary,
         summaryStructured: toJsonValue(summaryStructured),
         summaryEvidence: toJsonValue(evidence),
@@ -778,7 +752,7 @@ async function processPdlEnrichmentJob(
       data: {
         enrichmentStatus: 'completed',
         lastEnrichedAt: new Date(),
-        confidenceScore: summary.confidence ?? null,
+        confidenceScore: null,
       },
     });
 
@@ -804,7 +778,7 @@ async function processPdlEnrichmentJob(
       candidateId,
       status: 'completed',
       identitiesFound: 0,
-      bestConfidence: summary.confidence ?? null,
+      bestConfidence: null,
       durationMs: Date.now() - startTime,
     };
   } catch (error) {

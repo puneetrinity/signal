@@ -1497,18 +1497,6 @@ export async function generateSummaryNode(
 
     const identities = [...state.identitiesFound].sort((a, b) => b.confidence - a.confidence).slice(0, 10);
 
-    // Fetch the latest job context (if any) for this candidate
-    const latestJobCandidate = await prisma.jobSourcingCandidate.findFirst({
-      where: { candidateId: state.candidateId, tenantId: state.tenantId },
-      orderBy: { sourcingRequest: { requestedAt: 'desc' } },
-      include: { sourcingRequest: true }
-    });
-
-    let jobContext = null;
-    if (latestJobCandidate?.sourcingRequest?.jobContext) {
-      jobContext = latestJobCandidate.sourcingRequest.jobContext as Record<string, unknown>;
-    }
-
     // Generate as DRAFT mode (no confirmed identities during initial enrichment)
     const { summary, evidence, model, tokens, meta } = await generateCandidateSummary({
       candidate: {
@@ -1522,7 +1510,6 @@ export async function generateSummaryNode(
       },
       identities,
       platformData,
-      jobContext,
       mode: 'draft',
       confirmedCount: 0,
     });
@@ -1543,13 +1530,13 @@ export async function generateSummaryNode(
     const progressComplete: EnrichmentProgressEvent = {
       type: 'node_complete',
       node: 'generateSummary',
-      data: { identitiesFound: identities.length, confidence: summary.confidence },
+      data: { identitiesFound: identities.length, confidence: undefined },
       timestamp: new Date().toISOString(),
     };
 
     return {
       summaryText: summary.summary,
-      summaryStructured: summary.structured as unknown as Record<string, unknown>,
+      summaryStructured: { skills: summary.skills } as unknown as Record<string, unknown>,
       summaryEvidence: evidence as unknown as Array<Record<string, unknown>>,
       summaryModel: model,
       summaryTokens: tokens,
