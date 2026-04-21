@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "prisma generate && next build",
-    "start": "bash scripts/migrate-with-baseline.sh && next start",
+    "start": "(npx prisma migrate deploy || echo '[start] Migration failed or not needed, starting server anyway') && next start",
     "lint": "eslint",
     "postinstall": "prisma generate",
     "db:push": "prisma db push",
