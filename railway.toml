@@ -8,7 +8,13 @@ builder = "nixpacks"
 
 [deploy]
 # Don't set startCommand here - let each service configure its own in dashboard
-healthcheckPath = "/api/health"
+#
+# healthcheckPath is NOT set here because this railway.toml is shared across
+# all services (signal, worker-enrich, worker-sourcing). Each service has a
+# different health endpoint:
+#   - signal:          /api/health   (set in Railway dashboard)
+#   - worker-enrich:   /health       (set in Railway dashboard)
+#   - worker-sourcing: /health       (set in Railway dashboard)
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
