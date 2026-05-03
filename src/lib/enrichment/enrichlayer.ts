@@ -57,7 +57,19 @@ export interface EnrichLayerVerificationResult {
   };
 }
 
-const ENRICHLAYER_TIMEOUT_MS = 30_000;
+// Profile fetches can fall back to live scraping when the cache misses, which
+// occasionally takes 100–150s. Default to 120s. Email is already optional via
+// soft-fail in enrichWithEnrichLayer, so we keep its timeout short.
+function profileTimeoutMs(): number {
+  const raw = process.env.ENRICHLAYER_PROFILE_TIMEOUT_MS;
+  const n = raw ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 120_000;
+}
+function emailTimeoutMs(): number {
+  const raw = process.env.ENRICHLAYER_EMAIL_TIMEOUT_MS;
+  const n = raw ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 30_000;
+}
 
 // Read URLs at call time so tests can stand up a mock server and override the env var
 // without needing dynamic import gymnastics.
@@ -93,10 +105,14 @@ export class EnrichLayerUnrecoverableError extends Error {
   }
 }
 
-async function getJson<T>(url: string, params: Record<string, string>): Promise<T> {
+async function getJson<T>(
+  url: string,
+  params: Record<string, string>,
+  timeoutMs: number,
+): Promise<T> {
   const qs = new URLSearchParams(params).toString();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), ENRICHLAYER_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   let res: Response;
   try {
@@ -114,7 +130,7 @@ async function getJson<T>(url: string, params: Record<string, string>): Promise<
     const isAbort = err instanceof Error && err.name === 'AbortError';
     throw new Error(
       isAbort
-        ? `EnrichLayer request timed out after ${ENRICHLAYER_TIMEOUT_MS}ms`
+        ? `EnrichLayer request timed out after ${timeoutMs}ms`
         : `EnrichLayer network error: ${message}`,
     );
   } finally {
@@ -279,16 +295,19 @@ function compactProfile(payload: EnrichLayerProfileResponse): Record<string, unk
 }
 
 export async function fetchEnrichLayerProfile(linkedinUrl: string): Promise<EnrichLayerProfileResponse> {
-  return getJson<EnrichLayerProfileResponse>(profileUrl(), {
-    profile_url: linkedinUrl,
-  });
+  return getJson<EnrichLayerProfileResponse>(
+    profileUrl(),
+    { profile_url: linkedinUrl },
+    profileTimeoutMs(),
+  );
 }
 
 export async function fetchEnrichLayerPersonalEmail(linkedinUrl: string): Promise<EnrichLayerEmailResponse> {
-  return getJson<EnrichLayerEmailResponse>(personalEmailUrl(), {
-    profile_url: linkedinUrl,
-    email_validation: 'fast',
-  });
+  return getJson<EnrichLayerEmailResponse>(
+    personalEmailUrl(),
+    { profile_url: linkedinUrl, email_validation: 'fast' },
+    emailTimeoutMs(),
+  );
 }
 
 export async function enrichWithEnrichLayer(linkedinUrl: string): Promise<EnrichLayerEnrichmentResult> {
