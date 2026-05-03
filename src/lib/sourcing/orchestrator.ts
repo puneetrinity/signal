@@ -86,6 +86,7 @@ export interface OrchestratorResult {
   discoveredEnrichedCount: number;
   discoveredOrphanCount: number;
   discoveredOrphanQueued: number;
+  backgroundLangGraphQueued: number;
   dynamicQueryBudgetUsed: boolean;
   minDiscoveryPerRunApplied: number;
   minDiscoveredInOutputApplied: number;
@@ -152,6 +153,12 @@ function secondsUntilUtcDayEnd(date = new Date()): number {
   const end = new Date(date);
   end.setUTCHours(23, 59, 59, 999);
   return Math.max(1, Math.ceil((end.getTime() - date.getTime()) / 1000));
+}
+
+function getBackgroundLangGraphCandidateCount(): number {
+  const raw = Number.parseInt(process.env.SOURCING_BACKGROUND_LANGGRAPH_TOP_K ?? '0', 10);
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  return Math.min(raw, 100);
 }
 
 async function getDiscoveryQueryBudget(
@@ -1616,6 +1623,44 @@ export async function runSourcingOrchestrator(
     }
   }
 
+  // 6d. Background LangGraph for top already-enriched candidates that still
+  // lack a verified GitHub identity. This keeps V1 fast while allowing deeper
+  // public-profile discovery after shortlist assembly.
+  const backgroundLangGraphTopK = getBackgroundLangGraphCandidateCount();
+  let backgroundLangGraphQueued = 0;
+  if (backgroundLangGraphTopK > 0) {
+    const topCandidateIds = assembled.slice(0, backgroundLangGraphTopK).map((a) => a.candidateId);
+    const existingGitHubIdentities = topCandidateIds.length > 0
+      ? await prisma.identityCandidate.findMany({
+          where: {
+            tenantId,
+            candidateId: { in: topCandidateIds },
+            platform: 'github',
+            status: { not: 'rejected' },
+          },
+          select: { candidateId: true },
+        })
+      : [];
+    const candidatesWithGitHubIdentity = new Set(existingGitHubIdentities.map((row) => row.candidateId));
+
+    for (const candidate of assembled.slice(0, backgroundLangGraphTopK)) {
+      if (alreadyActiveIds.has(candidate.candidateId) || enqueuedIds.has(candidate.candidateId)) continue;
+      if (candidate.enrichmentStatus !== 'completed') continue;
+      if (candidatesWithGitHubIdentity.has(candidate.candidateId)) continue;
+
+      try {
+        await createEnrichmentSession(tenantId, candidate.candidateId, {
+          providerOverride: 'langgraph',
+          priority: 60 + backgroundLangGraphQueued,
+        });
+        enqueuedIds.add(candidate.candidateId);
+        backgroundLangGraphQueued++;
+      } catch (error) {
+        log.warn({ error, candidateId: candidate.candidateId, requestId }, 'Background LangGraph enqueue failed');
+      }
+    }
+  }
+
   // 7. Stale-refresh queueing (separate budget)
   let staleRefreshQueued = 0;
   const scoredPoolById = new Map(scoredPool.map((sc) => [sc.candidateId, sc]));
@@ -1756,6 +1801,7 @@ export async function runSourcingOrchestrator(
     discoveredEnrichedCount,
     discoveredOrphanCount: discoveredOrphanCandidates.length,
     discoveredOrphanQueued,
+    backgroundLangGraphQueued,
     dynamicQueryBudgetUsed,
     minDiscoveryPerRunApplied: Math.min(config.minDiscoveryPerRun, maxDiscoveryTarget),
     minDiscoveredInOutputApplied: discoveredReservedInOutput,

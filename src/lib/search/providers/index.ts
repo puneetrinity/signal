@@ -5,8 +5,8 @@
  * fallback logic when primary provider fails or returns no results.
  *
  * Environment Variables:
- * - SEARCH_PROVIDER: 'brightdata' | 'searxng' | 'brave' | 'serper' (default: 'serper')
- * - SEARCH_FALLBACK_PROVIDER: Optional fallback provider
+ * - SEARCH_PROVIDER: 'crustdata' | 'brightdata' | 'searxng' | 'brave' | 'serper' (default: 'crustdata')
+ * - SEARCH_FALLBACK_PROVIDER: Optional fallback provider (default: 'serper' when primary is crustdata)
  *
  * @see docs/ARCHITECTURE_V2.1.md Section 4
  */
@@ -22,6 +22,7 @@ import { brightdataProvider } from './brightdata';
 import { searxngProvider } from './searxng';
 import { braveProvider } from './brave';
 import { serperProvider } from './serper';
+import { crustdataProvider } from './crustdata';
 
 // Re-export types
 export * from './types';
@@ -30,6 +31,7 @@ export * from './types';
  * Provider registry
  */
 const providers: Record<SearchProviderType, SearchProvider> = {
+  crustdata: crustdataProvider,
   brightdata: brightdataProvider,
   searxng: searxngProvider,
   brave: braveProvider,
@@ -39,12 +41,12 @@ const providers: Record<SearchProviderType, SearchProvider> = {
 /**
  * Get the configured primary provider
  */
-function getPrimaryProvider(): SearchProviderType {
+export function getPrimaryProvider(): SearchProviderType {
   const env = process.env.SEARCH_PROVIDER?.toLowerCase();
   if (env && env in providers) {
     return env as SearchProviderType;
   }
-  return 'serper';
+  return 'crustdata';
 }
 
 /**
@@ -55,6 +57,8 @@ function getFallbackProvider(): SearchProviderType | null {
   if (env && env in providers) {
     return env as SearchProviderType;
   }
+  const primary = getPrimaryProvider();
+  if (primary === 'crustdata') return 'serper';
   return null;
 }
 
@@ -367,4 +371,49 @@ export async function searchLinkedInProfilesWithMeta(
     providerUsed: primaryType, // Report primary even if it failed
     usedFallback: false,
   };
+}
+
+/**
+ * Structured-spec search via the primary provider, if it supports it.
+ *
+ * Returns null if the primary provider does not implement searchByJobSpec —
+ * caller should fall back to the legacy SERP-style multi-query path.
+ *
+ * If the primary provider supports it but throws or returns 0 results, we
+ * report that explicitly so the caller can decide whether to invoke the
+ * SERP fallback (typically yes — same behaviour as searchLinkedInProfilesWithMeta).
+ */
+export async function searchByJobSpecWithMeta(
+  spec: import('./types').StructuredJobSearchSpec,
+  maxResults: number = 100,
+  geo?: SearchGeoContext,
+): Promise<{
+  results: ProfileSummary[];
+  providerUsed: SearchProviderType;
+  usedFallback: false;
+  error?: string;
+} | null> {
+  const primaryType = getPrimaryProvider();
+  const primary = getProvider(primaryType);
+
+  if (!primary.searchByJobSpec) {
+    return null;
+  }
+
+  try {
+    const results = await primary.searchByJobSpec(spec, maxResults, geo);
+    console.log(
+      `[SearchProviders] ${primaryType} structured search returned ${results.length} results`,
+    );
+    return { results, providerUsed: primaryType, usedFallback: false };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[SearchProviders] ${primaryType} structured search failed:`, message);
+    return {
+      results: [],
+      providerUsed: primaryType,
+      usedFallback: false,
+      error: message,
+    };
+  }
 }

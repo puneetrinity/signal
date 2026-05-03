@@ -11,7 +11,7 @@
  * @see docs/ARCHITECTURE_V2.1.md
  */
 
-import { Queue, Worker, Job, QueueEvents } from 'bullmq';
+import { Queue, Worker, Job, QueueEvents, UnrecoverableError } from 'bullmq';
 import IORedis from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
 import { prisma } from '@/lib/prisma';
@@ -21,7 +21,13 @@ import type { EnrichmentBudget, EnrichmentGraphOutput, EnrichmentRunTrace } from
 import { runEnrichment } from '../graph/builder';
 import { generateCandidateSummary } from '../summary/generate';
 import { enrichWithPdl } from '../pdl';
-import { getEnrichmentProvider } from '../provider';
+import {
+  enrichWithEnrichLayer,
+  verifyEnrichLayerMatch,
+  EnrichLayerUnrecoverableError,
+} from '../enrichlayer';
+import { getEnrichmentProvider, type EnrichmentProvider } from '../provider';
+import { verifyDirectGitHubIdentity, type CandidateHints } from '../bridge-discovery';
 import { getTenantSettings } from '@/lib/tenant/settings';
 import { logPiiAccess } from '@/lib/audit';
 import type { DiscoveredIdentity } from '../sources/types';
@@ -32,6 +38,76 @@ const log = createLogger('EnrichmentQueue');
 /** Single contained cast for JSON values going into Prisma */
 function toJsonValue(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
+
+async function upsertVerifiedIdentityCandidate(
+  tenantId: string,
+  candidateId: string,
+  sessionId: string,
+  identity: {
+    platform: string;
+    platformId: string;
+    profileUrl: string;
+    confidence: number;
+    confidenceBucket: string;
+    scoreBreakdown: unknown;
+    evidence: unknown;
+    hasContradiction: boolean;
+    contradictionNote: string | null;
+    bridgeTier?: number;
+    bridge?: { signals?: string[] } | null;
+    persistReason?: string;
+  }
+): Promise<void> {
+  const scoreBreakdown = identity.scoreBreakdown
+    ? toJsonValue(identity.scoreBreakdown)
+    : undefined;
+  const evidence = identity.evidence
+    ? toJsonValue(identity.evidence)
+    : undefined;
+  const bridgeSignals = identity.bridge?.signals
+    ? toJsonValue(identity.bridge.signals)
+    : undefined;
+
+  await prisma.identityCandidate.upsert({
+    where: {
+      tenantId_candidateId_platform_platformId: {
+        tenantId,
+        candidateId,
+        platform: identity.platform,
+        platformId: identity.platformId,
+      },
+    },
+    update: {
+      confidence: identity.confidence,
+      confidenceBucket: identity.confidenceBucket,
+      scoreBreakdown,
+      evidence,
+      hasContradiction: identity.hasContradiction,
+      contradictionNote: identity.contradictionNote,
+      bridgeTier: identity.bridgeTier || undefined,
+      bridgeSignals,
+      persistReason: identity.persistReason || undefined,
+      discoveredBy: sessionId,
+    },
+    create: {
+      tenantId,
+      candidateId,
+      platform: identity.platform,
+      platformId: identity.platformId,
+      profileUrl: identity.profileUrl,
+      confidence: identity.confidence,
+      confidenceBucket: identity.confidenceBucket,
+      scoreBreakdown,
+      evidence,
+      hasContradiction: identity.hasContradiction,
+      contradictionNote: identity.contradictionNote,
+      bridgeTier: identity.bridgeTier || undefined,
+      bridgeSignals,
+      persistReason: identity.persistReason || undefined,
+      discoveredBy: sessionId,
+    },
+  });
 }
 
 /**
@@ -56,6 +132,7 @@ export interface EnrichmentJobData {
   candidateId: string;
   tenantId: string; // Required for multi-tenancy
   jobType?: EnrichmentJobType;
+  providerOverride?: EnrichmentProvider;
   roleType?: RoleType;
   budget?: Partial<EnrichmentBudget>;
   priority?: number;
@@ -226,6 +303,7 @@ export async function createEnrichmentSession(
   tenantId: string,
   candidateId: string,
   options?: {
+    providerOverride?: EnrichmentProvider;
     roleType?: RoleType;
     budget?: Partial<EnrichmentBudget>;
     priority?: number;
@@ -263,6 +341,7 @@ export async function createEnrichmentSession(
       sessionId,
       candidateId,
       tenantId,
+      providerOverride: options?.providerOverride,
       roleType: options?.roleType,
       budget: options?.budget,
       priority: options?.priority,
@@ -806,6 +885,270 @@ async function processPdlEnrichmentJob(
 }
 
 /**
+ * Process EnrichLayer enrichment job (LinkedIn profile + personal email)
+ */
+async function processEnrichLayerEnrichmentJob(
+  job: Job<EnrichmentJobData, EnrichmentJobResult>
+): Promise<EnrichmentJobResult> {
+  const { sessionId, candidateId, tenantId } = job.data;
+  const startTime = Date.now();
+
+  log.info({ jobId: job.id, candidateId, tenantId, sessionId }, 'Processing EnrichLayer enrichment job');
+
+  await updateSessionStatus(sessionId, {
+    status: 'running',
+    startedAt: new Date(),
+  });
+
+  try {
+    const candidate = await prisma.candidate.findFirst({
+      where: { id: candidateId, tenantId },
+      select: {
+        linkedinId: true,
+        linkedinUrl: true,
+        nameHint: true,
+        headlineHint: true,
+        locationHint: true,
+        companyHint: true,
+        roleType: true,
+      },
+    });
+
+    if (!candidate) {
+      throw new UnrecoverableError(`Candidate not found or access denied: ${candidateId}`);
+    }
+
+    if (!candidate.linkedinUrl) {
+      throw new UnrecoverableError('EnrichLayer enrichment requires candidate.linkedinUrl');
+    }
+
+    await job.updateProgress({ event: 'enrichlayer_request', timestamp: new Date().toISOString() });
+
+    const enrichLayerResult = await enrichWithEnrichLayer(candidate.linkedinUrl);
+
+    await job.updateProgress({ event: 'enrichlayer_response', timestamp: new Date().toISOString() });
+
+    const verification = verifyEnrichLayerMatch(
+      {
+        linkedinUrl: candidate.linkedinUrl,
+        nameHint: candidate.nameHint,
+        headlineHint: candidate.headlineHint,
+        companyHint: candidate.companyHint,
+      },
+      enrichLayerResult.profile,
+    );
+
+    if (!verification.accepted) {
+      // Same data would come back on retry — terminal.
+      throw new UnrecoverableError(
+        `EnrichLayer verification failed: ${verification.reasons.join(', ') || 'low_confidence_match'}`
+      );
+    }
+
+    const candidateHints: CandidateHints = {
+      linkedinId: candidate.linkedinId,
+      linkedinUrl: candidate.linkedinUrl,
+      nameHint: candidate.nameHint,
+      headlineHint: candidate.headlineHint,
+      locationHint: candidate.locationHint,
+      companyHint: candidate.companyHint,
+      roleType: candidate.roleType,
+    };
+
+    let githubVerification: {
+      verified: boolean;
+      reason: string;
+      profileUrl: string | null;
+      bridgeTier?: number;
+      confidence?: number;
+    } | null = null;
+    if (verification.extracted.githubUrl) {
+      const githubResult = await verifyDirectGitHubIdentity(
+        candidateHints,
+        verification.extracted.githubUrl,
+      );
+
+      githubVerification = {
+        verified: Boolean(githubResult.identity),
+        reason: githubResult.reason,
+        profileUrl: githubResult.identity?.profileUrl ?? verification.extracted.githubUrl,
+        bridgeTier: githubResult.identity?.bridgeTier,
+        confidence: githubResult.identity?.confidence,
+      };
+
+      if (githubResult.identity) {
+        await upsertVerifiedIdentityCandidate(
+          tenantId,
+          candidateId,
+          sessionId,
+          githubResult.identity,
+        );
+      }
+    }
+
+    const settings = await getTenantSettings(tenantId);
+    const allowContactStorage = settings.allowContactStorage;
+
+    const contactInfo = allowContactStorage ? enrichLayerResult.contactInfo : null;
+    const contactRestricted = !allowContactStorage && enrichLayerResult.contactInfo;
+
+    const { summary, evidence, model, tokens, meta } = await generateCandidateSummary({
+      candidate: {
+        linkedinId: candidate.linkedinId,
+        linkedinUrl: candidate.linkedinUrl,
+        nameHint: candidate.nameHint,
+        headlineHint: candidate.headlineHint,
+        locationHint: candidate.locationHint,
+        companyHint: candidate.companyHint || null,
+        roleType: candidate.roleType,
+      },
+      identities: [],
+      platformData: [],
+      supplementalData: {
+        enrichlayer: enrichLayerResult.summaryData,
+      },
+      mode: 'draft',
+      confirmedCount: 0,
+    });
+
+    const summaryStructured = {
+      ...summary.structured,
+      ...(contactInfo ? { contact: contactInfo } : {}),
+      ...(contactRestricted ? { contactRestricted: true } : {}),
+      source: 'enrichlayer',
+      matchedBy: enrichLayerResult.matchedBy,
+      verification: {
+        score: verification.score,
+        reasons: verification.reasons,
+        extracted: verification.extracted,
+      },
+      ...(githubVerification ? { githubVerification } : {}),
+    };
+
+    const runTrace: Partial<EnrichmentRunTrace> = {
+      input: {
+        candidateId,
+        linkedinId: candidate.linkedinId,
+        linkedinUrl: candidate.linkedinUrl,
+      },
+      seed: {
+        nameHint: candidate.nameHint,
+        headlineHint: candidate.headlineHint,
+        locationHint: candidate.locationHint,
+        companyHint: candidate.companyHint || null,
+        roleType: candidate.roleType,
+      },
+      platformResults: {
+        enrichlayer: {
+          queriesExecuted: 2,
+          rawResultCount: enrichLayerResult.profile ? 1 : 0,
+          identitiesFound: 0,
+          bestConfidence: null,
+          durationMs: Date.now() - startTime,
+          verification,
+          ...(githubVerification ? { githubVerification } : {}),
+        },
+      },
+      final: {
+        totalQueriesExecuted: 2,
+        platformsQueried: 1,
+        platformsWithHits: enrichLayerResult.profile ? 1 : 0,
+        identitiesFoundTotal: 0,
+        identitiesAboveMinConfidence: 0,
+        identitiesPassingPersistGuard: 0,
+        identitiesPersisted: 0,
+        bestConfidence: summary.confidence ?? null,
+        durationMs: Date.now() - startTime,
+        summaryMeta: meta,
+      },
+    };
+
+    await prisma.enrichmentSession.update({
+      where: { id: sessionId },
+      data: {
+        status: 'completed',
+        sourcesExecuted: toJsonValue(['enrichlayer']),
+        queriesExecuted: 2,
+        identitiesFound: 0,
+        finalConfidence: summary.confidence ?? null,
+        summary: summary.summary,
+        summaryStructured: toJsonValue(summaryStructured),
+        summaryEvidence: toJsonValue(evidence),
+        summaryModel: model,
+        summaryTokens: tokens,
+        summaryGeneratedAt: new Date(),
+        runTrace: toJsonValue(runTrace),
+        completedAt: new Date(),
+        durationMs: Date.now() - startTime,
+      },
+    });
+
+    await prisma.candidate.update({
+      where: { id: candidateId },
+      data: {
+        enrichmentStatus: 'completed',
+        lastEnrichedAt: new Date(),
+        confidenceScore: summary.confidence ?? null,
+      },
+    });
+
+    if (enrichLayerResult.contactInfo) {
+      await logPiiAccess(
+        'enrichment_session',
+        sessionId,
+        allowContactStorage ? 'stored' : 'accessed',
+        {
+          candidateId,
+          provider: 'enrichlayer',
+          emails: enrichLayerResult.contactInfo.emails.length,
+          phones: enrichLayerResult.contactInfo.phones.length,
+          contactStored: allowContactStorage,
+        }
+      );
+    }
+
+    log.info({ jobId: job.id, sessionId }, 'Completed EnrichLayer enrichment job');
+
+    return {
+      sessionId,
+      candidateId,
+      status: 'completed',
+      identitiesFound: 0,
+      bestConfidence: summary.confidence ?? null,
+      durationMs: Date.now() - startTime,
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    const isUnrecoverable =
+      error instanceof UnrecoverableError ||
+      error instanceof EnrichLayerUnrecoverableError;
+
+    // Mark session failed on every attempt. If BullMQ retries, the next attempt's
+    // start (line ~895) sets status back to 'running'. If it succeeds, the success
+    // path sets 'completed'. So we don't need to track which attempt we're on —
+    // the final state is always correct.
+    await updateSessionStatus(sessionId, {
+      status: 'failed',
+      errorMessage,
+      completedAt: new Date(),
+      durationMs: Date.now() - startTime,
+    });
+
+    log.error(
+      { jobId: job.id, sessionId, error: errorMessage, isUnrecoverable },
+      'EnrichLayer enrichment attempt failed',
+    );
+
+    // Lift transport-level unrecoverable to BullMQ's UnrecoverableError so the queue
+    // doesn't waste 2 more attempts (and 2 more EnrichLayer credits) on the same error.
+    if (error instanceof EnrichLayerUnrecoverableError) {
+      throw new UnrecoverableError(errorMessage);
+    }
+    throw error;
+  }
+}
+
+/**
  * Process enrichment job (full discovery + summary)
  */
 async function processLangGraphEnrichmentJob(
@@ -899,7 +1242,10 @@ async function processEnrichmentJob(
     return processSummaryOnlyJob(job);
   }
 
-  const provider = getEnrichmentProvider();
+  const provider = job.data.providerOverride ?? getEnrichmentProvider();
+  if (provider === 'enrichlayer') {
+    return processEnrichLayerEnrichmentJob(job);
+  }
   if (provider === 'pdl') {
     return processPdlEnrichmentJob(job);
   }

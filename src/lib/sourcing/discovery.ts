@@ -1,7 +1,12 @@
 import { generateText } from 'ai';
 import { z } from 'zod';
 import { createGroqModel } from '@/lib/ai/groq';
-import { searchLinkedInProfilesWithMeta, type SearchGeoContext } from '@/lib/search/providers';
+import {
+  searchLinkedInProfilesWithMeta,
+  searchByJobSpecWithMeta,
+  getPrimaryProvider,
+  type SearchGeoContext,
+} from '@/lib/search/providers';
 import type { ProfileSummary } from '@/types/linkedin';
 import { upsertDiscoveredCandidates } from './upsert-candidates';
 import type { JobRequirements } from './jd-digest';
@@ -732,6 +737,96 @@ async function buildHybridQueries(
   return { plan: deterministic, groq: groqMeta };
 }
 
+/**
+ * Try a single structured-spec call against the primary provider.
+ *
+ * Returns null if the provider does not support structured search (e.g. Serper).
+ * Returns the result (possibly empty) if it does. Caller decides whether to
+ * fall through to SERP-style multi-query path on empty/error.
+ */
+async function tryStructuredDiscovery(
+  tenantId: string,
+  requirements: JobRequirements,
+  targetCount: number,
+  existingLinkedinIds: Set<string>,
+  geo: SearchGeoContext | undefined,
+): Promise<{
+  candidates: DiscoveredCandidate[];
+  telemetry: DiscoveryQueryRunTelemetry;
+  providerUsed: string;
+} | null> {
+  // Filter out tokens that look like hex digests (jdDigest hash bleeds into topSkills
+  // when the digest isn't valid JSON — see parseJdDigest fallback path).
+  const HEX_DIGEST_RE = /^[a-f0-9]{16,}$/i;
+  const skills = (requirements.topSkills ?? [])
+    .map((s) => s?.trim())
+    .filter((s): s is string => Boolean(s) && !HEX_DIGEST_RE.test(s))
+    .slice(0, 8);
+  const locationText = requirements.location?.trim() || null;
+  const cityHint = locationText?.split(',')[0]?.trim() || null;
+
+  const spec = {
+    title: requirements.title ?? null,
+    city: cityHint,
+    country: geo?.countryCode ?? null,
+    skills,
+    seniorityLevel: requirements.seniorityLevel ?? null,
+  };
+
+  const startedAt = Date.now();
+  const result = await searchByJobSpecWithMeta(spec, Math.min(Math.max(targetCount, 1), 100), geo);
+  if (result === null) {
+    // Primary provider doesn't support structured search — caller falls through to SERP path.
+    return null;
+  }
+
+  const profiles = result.results.filter((p) => isLikelyPersonProfile(p));
+  const seenLinkedinIds = new Set(existingLinkedinIds);
+  const newProfiles = profiles.filter((p) => {
+    const id = extractLinkedInIdFromUrl(p.linkedinUrl);
+    if (!id) return false;
+    if (seenLinkedinIds.has(id)) return false;
+    seenLinkedinIds.add(id);
+    return true;
+  });
+
+  const candidates: DiscoveredCandidate[] = [];
+  if (newProfiles.length > 0) {
+    const candidateMap = await upsertDiscoveredCandidates(
+      tenantId,
+      newProfiles,
+      `[structured] title=${spec.title ?? ''} city=${spec.city ?? ''} skills=${skills.join('|')}`,
+      result.providerUsed,
+    );
+    for (const profile of newProfiles) {
+      const linkedinId = extractLinkedInIdFromUrl(profile.linkedinUrl);
+      if (!linkedinId) continue;
+      const candidateId = candidateMap.get(linkedinId);
+      if (!candidateId) continue;
+      candidates.push({ candidateId, linkedinId, queryIndex: 0 });
+      if (candidates.length >= targetCount) break;
+    }
+  }
+
+  const telemetry: DiscoveryQueryRunTelemetry = {
+    queryIndex: 0,
+    phase: 'strict',
+    query: `[structured] title=${spec.title ?? ''} city=${spec.city ?? ''} skills=${skills.join('|')}`,
+    providerUsed: result.providerUsed,
+    usedFallbackProvider: false,
+    resultCount: profiles.length,
+    acceptedCount: candidates.length,
+    cumulativeDiscovered: candidates.length,
+    latencyMs: Date.now() - startedAt,
+  };
+
+  return {
+    candidates,
+    telemetry,
+    providerUsed: result.providerUsed,
+  };
+}
+
 export async function discoverCandidates(
   tenantId: string,
   requirements: JobRequirements,
@@ -785,6 +880,82 @@ export async function discoverCandidates(
   const queryRuns: DiscoveryQueryRunTelemetry[] = [];
   const providerUsage: Record<string, number> = {};
   let stoppedReason: DiscoveryTelemetry['stoppedReason'] = 'completed_queries';
+
+  // Phase 1.1 + 1.2: Structured short-circuit for providers that support it (Crustdata).
+  // One structured call returns up to 100 candidates. If it hits target, we skip the SERP
+  // multi-query loop entirely. If it returns 0 or the provider doesn't support structured
+  // search, we fall through to the legacy SERP path (which Serper needs anyway).
+  const primaryProviderName = getPrimaryProvider();
+  if (primaryProviderName === 'crustdata') {
+    log.info(
+      { targetCount, primary: primaryProviderName },
+      'Attempting structured discovery short-circuit',
+    );
+    const structured = await tryStructuredDiscovery(
+      tenantId,
+      requirements,
+      targetCount,
+      seenLinkedinIds,
+      strictGeo,
+    );
+    if (structured) {
+      queriesExecuted++;
+      queryIndex++;
+      strictQueriesExecuted++;
+      strictAccepted += structured.candidates.length;
+      providerUsage[structured.providerUsed] =
+        (providerUsage[structured.providerUsed] || 0) + 1;
+      queryRuns.push(structured.telemetry);
+      for (const c of structured.candidates) {
+        if (seenLinkedinIds.has(c.linkedinId)) continue;
+        seenLinkedinIds.add(c.linkedinId);
+        discovered.push(c);
+        if (discovered.length >= targetCount) break;
+      }
+      log.info(
+        {
+          structuredAccepted: structured.candidates.length,
+          totalDiscovered: discovered.length,
+          targetCount,
+        },
+        'Structured discovery complete',
+      );
+      // Phase 1.2: hard stop. If structured call hit target, return immediately —
+      // don't run the SERP multi-query loop, don't invoke fallback provider.
+      if (discovered.length >= targetCount) {
+        return {
+          candidates: discovered,
+          queriesExecuted,
+          queriesBuilt: 1,
+          telemetry: {
+            mode: hybridPlan ? 'hybrid' : 'deterministic',
+            strictQueriesBuilt: 1,
+            fallbackQueriesBuilt: 0,
+            strictQueriesExecuted,
+            fallbackQueriesExecuted: 0,
+            strictYield: strictQueriesExecuted > 0 ? strictAccepted / strictQueriesExecuted : 0,
+            fallbackYield: 0,
+            providerUsage,
+            stoppedReason: 'target_reached',
+            groq: hybridPlan?.groq ?? {
+              enabled: false,
+              used: false,
+              retries: 0,
+              modelName: null,
+              latencyMs: null,
+              error: null,
+              parseStage: null,
+              rawPreview: null,
+              repaired: false,
+            },
+            queryRuns,
+          },
+        };
+      }
+    }
+    // Structured call returned < targetCount or failed silently — fall through to SERP loop
+    // (which will use the Serper fallback if Crustdata can't fulfil the SERP query either).
+  }
 
   const runQuery = async (
     query: string,

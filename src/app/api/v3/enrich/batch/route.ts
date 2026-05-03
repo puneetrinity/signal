@@ -50,12 +50,20 @@ export async function POST(request: NextRequest) {
   // Dedupe
   const uniqueIds = [...new Set(body.candidateIds)];
 
-  // Validate candidates exist and belong to tenant
+  // Validate candidates exist and belong to tenant.
   const validCandidates = await prisma.candidate.findMany({
     where: { id: { in: uniqueIds }, tenantId },
-    select: { id: true },
+    select: { id: true, enrichmentStatus: true },
   });
   const validIdSet = new Set(validCandidates.map((c) => c.id));
+
+  // Skip already-completed candidates. Stale refresh is handled by the
+  // snapshot-expiry mechanism in the sourcing orchestrator (default 30 days,
+  // see SNAPSHOT_STALE_DAYS in src/lib/sourcing/config.ts) — keep this endpoint
+  // consistent with that policy rather than introducing a separate TTL.
+  const completedIds = new Set(
+    validCandidates.filter((c) => c.enrichmentStatus === 'completed').map((c) => c.id),
+  );
 
   // Cross-run dedupe: skip candidates with already queued/running sessions
   const validIds = uniqueIds.filter((id) => validIdSet.has(id));
@@ -83,6 +91,14 @@ export async function POST(request: NextRequest) {
 
     if (alreadyActiveIds.has(candidateId)) {
       skipped.push({ candidateId, reason: 'Session already queued or running' });
+      continue;
+    }
+
+    if (completedIds.has(candidateId)) {
+      skipped.push({
+        candidateId,
+        reason: 'Candidate already enriched (stale refresh handled by snapshot expiry)',
+      });
       continue;
     }
 

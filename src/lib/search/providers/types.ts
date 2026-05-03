@@ -1,7 +1,8 @@
 /**
  * Search Provider Abstraction Types
  *
- * Common interfaces for all search providers (Serper, Brave; legacy: BrightData, SearXNG).
+ * Common interfaces for all search providers (Crustdata, Serper, Brave;
+ * legacy: BrightData, SearXNG).
  * This abstraction allows switching providers via environment variables
  * while maintaining identical return types.
  *
@@ -13,7 +14,7 @@ import type { ProfileSummary } from '@/types/linkedin';
 /**
  * Supported search providers
  */
-export type SearchProviderType = 'serper' | 'brave' | 'brightdata' | 'searxng'; // legacy: brightdata, searxng
+export type SearchProviderType = 'crustdata' | 'serper' | 'brave' | 'brightdata' | 'searxng'; // legacy: brightdata, searxng
 
 /**
  * Raw search result from any provider (normalized)
@@ -94,6 +95,26 @@ export interface SearchProvider {
   searchRaw(query: string, maxResults?: number): Promise<RawSearchResult[]>;
 
   /**
+   * Optional: structured search by job spec.
+   *
+   * Providers that natively support structured queries (e.g. Crustdata) can
+   * implement this to return matching candidates in a single call without the
+   * SERP-style multi-query expansion. Discovery short-circuits to this path
+   * when available, falling back to searchLinkedInProfiles if it returns 0
+   * or throws.
+   *
+   * @param spec - Job requirements (title, location, skills)
+   * @param maxResults - Maximum number of results (typically 100)
+   * @param geo - Optional geo context (country code, location text)
+   * @returns Array of profile summaries
+   */
+  searchByJobSpec?(
+    spec: StructuredJobSearchSpec,
+    maxResults?: number,
+    geo?: SearchGeoContext,
+  ): Promise<ProfileSummary[]>;
+
+  /**
    * Check if the provider is healthy/available
    */
   healthCheck(): Promise<{
@@ -101,6 +122,25 @@ export interface SearchProvider {
     latency?: number;
     error?: string;
   }>;
+}
+
+/**
+ * Structured job search input for providers that support native structured queries.
+ *
+ * Translated from JobRequirements at the discovery layer so the provider
+ * adapter doesn't need to know about Signal-internal types.
+ */
+export interface StructuredJobSearchSpec {
+  /** Job title (e.g. "Senior Hadoop Developer") — provider matches via contains */
+  title?: string | null;
+  /** City name (e.g. "Bengaluru") */
+  city?: string | null;
+  /** Country name or 2-letter ISO code (used as fallback when no city) */
+  country?: string | null;
+  /** Required skills — provider OR-groups these, candidate matches if any one is in their skills */
+  skills?: string[];
+  /** Optional seniority hint (e.g. "senior", "lead") — providers may use to narrow */
+  seniorityLevel?: string | null;
 }
 
 /**

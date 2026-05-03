@@ -49,10 +49,28 @@ export async function upsertDiscoveredCandidates(
         : extractedLocScore > 0
           ? extractedLocation
           : undefined;
-    let companyHint = normalizeHint(extractedHints.companyHint ?? undefined) ?? undefined;
+
+    // Phase 1.4: Crustdata provides structured current_title/current_company/current_city
+    // in providerMeta. Prefer those over text-parsed values from headline/snippet — the
+    // text parser confuses "Ex-IBM" for current company, etc.
+    const meta = (result.providerMeta ?? {}) as Record<string, unknown>;
+    const structuredCompany = typeof meta.currentCompany === 'string'
+      ? normalizeHint(meta.currentCompany)
+      : undefined;
+    const structuredTitle = typeof meta.currentTitle === 'string'
+      ? normalizeHint(meta.currentTitle)
+      : undefined;
+
+    let companyHint = structuredCompany
+      ?? normalizeHint(extractedHints.companyHint ?? undefined)
+      ?? undefined;
     if (!companyHint && headlineHint) {
       companyHint = normalizeHint(extractCompanyFromHeadline(headlineHint) ?? undefined) ?? undefined;
     }
+
+    // If structured title is available, surface it via headlineHint so downstream
+    // ranking/verification has the canonical role label, not a marketing-style headline.
+    const effectiveHeadlineHint = structuredTitle ?? headlineHint;
     const seniorityHint = extractedHints.seniorityHint ?? undefined;
 
     try {
@@ -77,7 +95,7 @@ export async function upsertDiscoveredCandidates(
         updatedAt: new Date(),
       };
       if (shouldReplaceHint(existing?.nameHint ?? null, nameHint)) updateData.nameHint = nameHint;
-      if (shouldReplaceHint(existing?.headlineHint ?? null, headlineHint)) updateData.headlineHint = headlineHint;
+      if (shouldReplaceHint(existing?.headlineHint ?? null, effectiveHeadlineHint)) updateData.headlineHint = effectiveHeadlineHint;
       if (shouldReplaceLocationHint(existing?.locationHint ?? null, locationHint)) updateData.locationHint = locationHint;
       if (shouldReplaceCompanyHint(existing?.companyHint ?? null, companyHint)) updateData.companyHint = companyHint;
       if (shouldReplaceHint(existing?.seniorityHint ?? null, seniorityHint)) updateData.seniorityHint = seniorityHint;
@@ -93,7 +111,7 @@ export async function upsertDiscoveredCandidates(
           searchSnippet: result.snippet,
           searchMeta: (result.providerMeta ?? undefined) as Prisma.InputJsonValue | undefined,
           nameHint,
-          headlineHint,
+          headlineHint: effectiveHeadlineHint,
           locationHint,
           companyHint,
           seniorityHint,

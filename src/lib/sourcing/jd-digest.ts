@@ -319,8 +319,31 @@ function normalizeSkills(skills: string[]): string[] {
   return [...deduped.values()];
 }
 
+/**
+ * Hash-like string detector: hex string of common digest lengths (MD5=32, SHA1=40,
+ * SHA256=64) or any sufficiently long hex run that's clearly an opaque hash.
+ *
+ * When jdDigest is just a hash (e.g. SHA-256 of the JD text used as an
+ * idempotency key), it carries no skill/role/seniority signal. The
+ * comma/semicolon fallback would otherwise treat the whole hash as a single
+ * keyword token and pollute downstream skill matching.
+ */
+const HASH_LIKE_DIGEST_RE = /^[a-f0-9]{32,}$/i;
+
 export function parseJdDigest(jdDigest: string): JdDigestParsed {
-  if (!jdDigest.trim()) {
+  const trimmed = jdDigest.trim();
+  if (!trimmed) {
+    return {
+      topSkills: [],
+      seniorityLevel: null,
+      domain: null,
+      roleFamily: null,
+    };
+  }
+
+  // Hash-like opaque digests carry no semantic signal. Return empty rather than
+  // treating the hash as a single keyword token in the fallback path.
+  if (HASH_LIKE_DIGEST_RE.test(trimmed)) {
     return {
       topSkills: [],
       seniorityLevel: null,
@@ -331,7 +354,7 @@ export function parseJdDigest(jdDigest: string): JdDigestParsed {
 
   // Try JSON first (VantaHire generates JSON via AI)
   try {
-    const parsed = JSON.parse(jdDigest);
+    const parsed = JSON.parse(trimmed);
     return {
       topSkills: Array.isArray(parsed?.topSkills)
         ? parsed.topSkills.map((s: unknown) => String(s).trim()).filter(Boolean)
@@ -341,11 +364,13 @@ export function parseJdDigest(jdDigest: string): JdDigestParsed {
       roleFamily: parsed.roleFamily ? String(parsed.roleFamily) : null,
     };
   } catch {
-    // Fallback: semicolon/comma-delimited keywords
-    const tokens = jdDigest
+    // Fallback: semicolon/comma-delimited keywords (defensive — also drop any
+    // individual token that looks like a hash, in case the digest is a list
+    // that happens to include hashes alongside real keywords).
+    const tokens = trimmed
       .split(/[;,]/)
       .map((t) => t.trim())
-      .filter(Boolean);
+      .filter((t) => Boolean(t) && !HASH_LIKE_DIGEST_RE.test(t));
     return {
       topSkills: tokens,
       seniorityLevel: null,

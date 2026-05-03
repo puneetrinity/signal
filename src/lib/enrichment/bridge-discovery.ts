@@ -150,6 +150,11 @@ export interface BridgeDiscoveryResult {
   tier1Gap?: Tier1GapDiagnostics;
 }
 
+export interface DirectGitHubVerificationResult {
+  identity: DiscoveredIdentity | null;
+  reason: string;
+}
+
 /**
  * Bridge discovery options
  */
@@ -1412,6 +1417,171 @@ export async function discoverGitHubIdentities(
     tier1Shadow,
     tier1Gap,
   };
+}
+
+/**
+ * Verify a direct GitHub URL from a third-party provider against LinkedIn-based hints.
+ * This reuses the same GitHub profile fetch + bridge scoring/tiering rules as normal
+ * bridge discovery, but skips the search phase entirely.
+ */
+export async function verifyDirectGitHubIdentity(
+  hints: CandidateHints,
+  githubUrl: string,
+  options: BridgeDiscoveryOptions = {}
+): Promise<DirectGitHubVerificationResult> {
+  const opts = { ...DEFAULT_OPTIONS, ...options };
+  const detected = detectPlatformFromUrl(githubUrl);
+
+  if (detected.platform !== 'github' || !detected.platformId) {
+    return {
+      identity: null,
+      reason: 'invalid_github_profile_url',
+    };
+  }
+
+  const github = getGitHubClient();
+
+  try {
+    const profile = await github.getUser(detected.platformId);
+
+    const linkedInResult = extractLinkedInFromProfile(profile);
+    const candidateLinkedInId = hints.linkedinId ? canonicalizeLinkedInSlug(hints.linkedinId) : null;
+    const blogLinkedInId = linkedInResult.blogId
+      ? canonicalizeLinkedInSlug(linkedInResult.blogId)
+      : null;
+    const bioLinkedInId = linkedInResult.bioId
+      ? canonicalizeLinkedInSlug(linkedInResult.bioId)
+      : null;
+    const matchedBlog = !!candidateLinkedInId && blogLinkedInId === candidateLinkedInId;
+    const matchedBio = !!candidateLinkedInId && bioLinkedInId === candidateLinkedInId;
+    const hasProfileLink = matchedBlog || matchedBio;
+    const profileLinkSource: 'blog' | 'bio' | undefined = matchedBlog
+      ? 'blog'
+      : matchedBio
+        ? 'bio'
+        : undefined;
+    const linkedInId = hasProfileLink
+      ? (matchedBlog ? linkedInResult.blogId : linkedInResult.bioId)
+      : (linkedInResult.bioId || linkedInResult.blogId || null);
+
+    let commitEvidence: CommitEmailEvidence[] = [];
+    if (opts.includeCommitEvidence) {
+      commitEvidence = await github.getCommitEvidence(
+        detected.platformId,
+        opts.maxCommitRepos
+      );
+    }
+
+    const scoreInput = {
+      hasCommitEvidence: commitEvidence.length > 0,
+      commitCount: commitEvidence.length,
+      hasProfileLink,
+      profileLinkSource,
+      candidateName: hints.nameHint,
+      platformName: profile.name,
+      candidateHeadline: hints.headlineHint,
+      platformCompany: profile.company,
+      candidateLocation: hints.locationHint,
+      platformLocation: profile.location,
+      platformFollowers: profile.followers,
+      platformRepos: profile.public_repos,
+      platformBio: profile.bio,
+    };
+
+    const { hasContradiction, note: contradictionNote } = detectContradictions(scoreInput);
+    const bridge = createBridgeFromScoring(scoreInput, profile.html_url);
+    const baseScore = calculateConfidenceScore(scoreInput);
+    const isStrictTier1 = bridge.tier === 1 &&
+      !bridge.signals.includes('linkedin_url_in_team_page') &&
+      !hasContradiction;
+    const boostedTotal = isStrictTier1
+      ? Math.min(1.0, baseScore.total + 0.08)
+      : baseScore.total;
+    const scoreBreakdown: ScoreBreakdown = {
+      ...baseScore,
+      total: boostedTotal,
+    };
+    const confidence = boostedTotal;
+    const confidenceBucket = classifyConfidence(confidence);
+
+    const nameMismatch =
+      !!scoreInput.candidateName &&
+      !!scoreInput.platformName &&
+      baseScore.nameMatch < 0.1;
+    const hasTeamPageSignal = bridge.signals.includes('linkedin_url_in_team_page');
+    const hasIdMismatch =
+      !!candidateLinkedInId &&
+      !!linkedInId &&
+      canonicalizeLinkedInSlug(linkedInId) !== candidateLinkedInId;
+    const hasStrictTier1Signal =
+      bridge.signals.some((s) => TIER_1_ENFORCE_SIGNALS.includes(s as Tier1SignalSource));
+    const isTier1Candidate = bridge.tier === 1;
+    const meetsEnforceThreshold = confidence >= TIER1_ENFORCE_MIN_CONFIDENCE;
+    const wouldAutoMerge = isTier1Candidate &&
+      hasStrictTier1Signal &&
+      meetsEnforceThreshold &&
+      !hasContradiction &&
+      !nameMismatch &&
+      !hasTeamPageSignal &&
+      !hasIdMismatch;
+    const tier1Enforced = TIER1_ENFORCE && wouldAutoMerge;
+    const effectiveBridge = TIER1_ENFORCE && isTier1Candidate && !tier1Enforced
+      ? {
+          ...bridge,
+          tier: 2 as const,
+          confidenceFloor: 0.5,
+          autoMergeEligible: false,
+        }
+      : bridge;
+
+    const persistResult = shouldPersistWithBridge(
+      scoreBreakdown,
+      effectiveBridge,
+      0,
+      TIER1_ENFORCE ? TIER1_ENFORCE_MIN_CONFIDENCE : 0.90
+    );
+
+    if (!persistResult.shouldPersist) {
+      return {
+        identity: null,
+        reason: persistResult.reason,
+      };
+    }
+
+    return {
+      identity: {
+        platform: 'github',
+        platformId: detected.platformId,
+        profileUrl: profile.html_url,
+        confidence,
+        confidenceBucket,
+        scoreBreakdown,
+        evidence: commitEvidence.length > 0 ? commitEvidence : null,
+        hasContradiction,
+        contradictionNote: contradictionNote || null,
+        platformProfile: {
+          name: profile.name,
+          company: profile.company,
+          location: profile.location,
+          bio: profile.bio,
+          followers: profile.followers,
+          publicRepos: profile.public_repos,
+        },
+        bridge: effectiveBridge,
+        bridgeTier: effectiveBridge.tier,
+        persistReason: tier1Enforced
+          ? `Tier-1 enforced auto-merge (${confidence.toFixed(2)} >= ${TIER1_ENFORCE_MIN_CONFIDENCE.toFixed(2)}): ${persistResult.reason}`
+          : persistResult.reason,
+        tier1AutoConfirmed: tier1Enforced,
+      },
+      reason: persistResult.reason,
+    };
+  } catch (error) {
+    return {
+      identity: null,
+      reason: error instanceof Error ? error.message : 'github_verification_failed',
+    };
+  }
 }
 
 /**

@@ -93,6 +93,17 @@ export interface EnrichmentRunTrace {
     tier1Shadow?: Tier1ShadowDiagnostics;
     /** Tier-1 near-pass diagnostics */
     tier1Gap?: Tier1GapDiagnostics;
+    /** EnrichLayer verification diagnostics (when source = enrichlayer) */
+    verification?: {
+      score: number;
+      reasons: string[];
+      extracted: {
+        linkedinUrl: string | null;
+        name: string | null;
+        headline: string | null;
+        company: string | null;
+      };
+    };
   }>;
   /** Final aggregated results */
   final: {

@@ -13,6 +13,7 @@ import { requireScope } from '@/lib/auth/service-scopes';
 import { getEnrichmentProviderStatus } from '@/lib/enrichment/provider';
 import { prisma } from '@/lib/prisma';
 import { toJsonValue } from '@/lib/prisma/json';
+import { checkProvidersHealth, getProviderConfig } from '@/lib/search/providers';
 import { getSourcingQueue } from '@/lib/sourcing/queue';
 import { buildJobRequirements, type SourcingJobContextInput } from '@/lib/sourcing/jd-digest';
 import { resolveTrack } from '@/lib/sourcing/track-resolver';
@@ -61,12 +62,27 @@ export async function POST(
   const scopeCheck = requireScope(auth.context, 'jobs:source');
   if (!scopeCheck.authorized) return scopeCheck.response;
 
-  const providerStatus = getEnrichmentProviderStatus();
-  if (providerStatus.provider !== 'langgraph' || !providerStatus.enabled) {
+  const [enrichmentProviderStatus, searchProviderHealth] = await Promise.all([
+    Promise.resolve(getEnrichmentProviderStatus()),
+    checkProvidersHealth(),
+  ]);
+  const searchProviderConfig = getProviderConfig();
+  const searchAvailable = searchProviderHealth.primary.healthy || Boolean(searchProviderHealth.fallback?.healthy);
+
+  if (!searchAvailable || !enrichmentProviderStatus.enabled) {
     return NextResponse.json(
       {
         success: false,
-        error: `Enrichment provider not available: ${providerStatus.reason ?? 'provider is not langgraph'}`,
+        error: !searchAvailable
+          ? `Search providers unavailable: primary=${searchProviderConfig.primary}${searchProviderConfig.fallback ? `, fallback=${searchProviderConfig.fallback}` : ''}`
+          : `Enrichment provider not available: ${enrichmentProviderStatus.reason ?? 'provider is not enabled'}`,
+        providers: {
+          search: {
+            config: searchProviderConfig,
+            health: searchProviderHealth,
+          },
+          enrichment: enrichmentProviderStatus,
+        },
       },
       { status: 400 },
     );
