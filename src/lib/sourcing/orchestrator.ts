@@ -7,6 +7,7 @@ import { buildJobRequirements, type SourcingJobContextInput } from './jd-digest'
 import { rankCandidates } from './ranking';
 import { discoverCandidates, type DiscoveredCandidate, type DiscoveryTelemetry } from './discovery';
 import { getLocationBoostWeight, getSourcingConfig } from './config';
+import { buildV1RetrievalRequest } from './retrieval-plan';
 import { createEnrichmentSession } from '@/lib/enrichment/queue';
 import { isMeaningfulLocation, isNoisyLocationHint, canonicalizeLocation, extractPrimaryCity, compareFitWithConfidence, STRONG_LOCATION_TYPES } from './ranking';
 import { getRecentlyExposedCandidateIds } from './novelty';
@@ -225,6 +226,7 @@ export async function runSourcingOrchestrator(
 ): Promise<OrchestratorResult> {
   const config = getSourcingConfig();
   const requirements = buildJobRequirements(jobContext);
+  const retrievalPlan = buildV1RetrievalRequest(tenantId, requirements);
 
   log.info(
     {
@@ -640,8 +642,15 @@ export async function runSourcingOrchestrator(
   const qualityDrivenTarget = (qualityGateTriggered || roleMismatchTriggered)
     ? Math.ceil(config.targetCount * config.minDiscoveryShareLowQuality)
     : 0;
-  const maxDiscoveryTarget = Math.ceil(config.targetCount * config.maxDiscoveryShare);
+  const maxDiscoveryTarget = Math.max(
+    Math.ceil(config.targetCount * config.maxDiscoveryShare),
+    retrievalPlan.discoveryLimit,
+  );
   const minDiscoveryFloor = Math.min(config.minDiscoveryPerRun, maxDiscoveryTarget);
+  const minDiscoveredInOutputTarget = Math.max(
+    config.minDiscoveredInOutput,
+    retrievalPlan.minDiscoveredInOutput,
+  );
 
   let desiredDiscoveryTarget: number;
   if (effectiveStrategy === 'discovery_first') {
@@ -651,7 +660,13 @@ export async function runSourcingOrchestrator(
   } else {
     // Pool-first: discovery driven by quality gates and deficits
     desiredDiscoveryTarget = Math.min(
-      Math.max(poolDeficit, qualityDrivenTarget, strictCoverageDeficit, minDiscoveryFloor),
+      Math.max(
+        poolDeficit,
+        qualityDrivenTarget,
+        strictCoverageDeficit,
+        minDiscoveryFloor,
+        minDiscoveredInOutputTarget,
+      ),
       maxDiscoveryTarget,
     );
     if (poolDeficit > 0 && qualityGateTriggered) discoveryReason = 'deficit_and_low_quality';
@@ -669,7 +684,9 @@ export async function runSourcingOrchestrator(
 
   if (desiredDiscoveryTarget > 0) {
     const aggressive = enrichedCount < config.minGoodEnough;
-    discoveryTarget = aggressive ? Math.min(desiredDiscoveryTarget, config.jobMaxEnrich) : desiredDiscoveryTarget;
+    discoveryTarget = aggressive && effectiveStrategy !== 'discovery_first'
+      ? Math.min(desiredDiscoveryTarget, Math.max(config.jobMaxEnrich, minDiscoveredInOutputTarget))
+      : desiredDiscoveryTarget;
     dynamicQueryBudgetUsed =
       (qualityGateTriggered || effectiveStrategy === 'discovery_first') &&
       config.dynamicQueryMultiplier > 1;
@@ -705,6 +722,7 @@ export async function runSourcingOrchestrator(
           minCountAboveRequired,
           discoveryReason,
           discoveryTarget,
+          retrievalPlan,
           maxQueries: budget.maxQueries,
           aggressive,
         },
@@ -745,7 +763,7 @@ export async function runSourcingOrchestrator(
         const fallbackProvisionalFitFloor = trackDecision?.track === 'tech' ? 0.35 : 0.30;
         const fallbackProvisionalMinFitScore = Math.min(config.discoveredPromotionMinFitScore, fallbackProvisionalFitFloor);
         const fallbackProvisionalCap = Math.max(
-          config.minDiscoveredInOutput,
+          minDiscoveredInOutputTarget,
           Math.ceil(config.targetCount * 0.2),
         );
         let fallbackProvisionalPromotedCount = 0;
@@ -1136,7 +1154,7 @@ export async function runSourcingOrchestrator(
   const promotedDiscoveredIdsOrdered = Array.from(promotedDiscoveredById.values()).map((sc) => sc.candidateId);
   const discoveryFirstReserve = Math.ceil(config.targetCount * 0.5);
   discoveredReservedInOutput = Math.min(
-    effectiveStrategy === 'discovery_first' ? discoveryFirstReserve : config.minDiscoveredInOutput,
+    effectiveStrategy === 'discovery_first' ? discoveryFirstReserve : minDiscoveredInOutputTarget,
     discoveredCandidateIds.length,
     config.targetCount,
   );
@@ -1176,7 +1194,7 @@ export async function runSourcingOrchestrator(
   discoveredPromotedInTopCount = frontLoadIds.length;
   // Tech with delta: reserve minDiscoveredInOutput (not 50%) to let pool fill more slots.
   const techAdjustedReserve = trackDecision?.track === 'tech' && deferredDiscoveredIds.length > 0
-    ? Math.min(config.minDiscoveredInOutput, discoveredCandidateIds.length)
+    ? Math.min(minDiscoveredInOutputTarget, discoveredCandidateIds.length)
     : discoveredReservedInOutput;
   const discoveredReserveRemaining = Math.max(0, techAdjustedReserve - discoveredPromotedInTopCount);
   const poolFillLimit = Math.max(0, config.targetCount - discoveredReserveRemaining);

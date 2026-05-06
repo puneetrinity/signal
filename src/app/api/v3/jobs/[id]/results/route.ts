@@ -9,6 +9,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { verifyServiceJWT } from '@/lib/auth/service-jwt';
 import { requireScope } from '@/lib/auth/service-scopes';
 import { prisma } from '@/lib/prisma';
+import { hasActiveSeeker, hasEmailAvailability, hasOutreachReady, shortenSummary, toRecruiterCard, topSkills } from '@/lib/sourcing/recruiter-cards';
 import { summarizeIdentitySignals } from '@/lib/sourcing/identity-summary';
 import { isNonTechShadow } from '@/lib/enrichment/config';
 import { resolveLocationDeterministic } from '@/lib/taxonomy/location-service';
@@ -50,6 +51,7 @@ export async function GET(
   const { id: externalJobId } = await params;
   const tenantId = auth.context.tenantId;
   const requestId = request.nextUrl.searchParams.get('requestId');
+  const view = request.nextUrl.searchParams.get('view');
 
   const where = requestId
     ? { id: requestId, tenantId, externalJobId }
@@ -138,6 +140,33 @@ export async function GET(
       ])
     : [[], []];
 
+  const latestSessions = candidateIds.length > 0
+    ? await prisma.enrichmentSession.findMany({
+        where: {
+          tenantId,
+          candidateId: { in: candidateIds },
+        },
+        orderBy: [
+          { candidateId: 'asc' },
+          { createdAt: 'desc' },
+        ],
+        select: {
+          candidateId: true,
+          status: true,
+          summary: true,
+          summaryStructured: true,
+          summaryGeneratedAt: true,
+          summaryModel: true,
+          queriesExecuted: true,
+          identitiesFound: true,
+          identitiesConfirmed: true,
+          finalConfidence: true,
+          completedAt: true,
+          createdAt: true,
+        },
+      })
+    : [];
+
   const identityByCandidateId = new Map<string, typeof identitySignals>();
   for (const signal of identitySignals) {
     const existing = identityByCandidateId.get(signal.candidateId);
@@ -150,6 +179,13 @@ export async function GET(
     const existing = confirmedByCandidateId.get(signal.candidateId);
     if (existing) existing.push(signal);
     else confirmedByCandidateId.set(signal.candidateId, [signal]);
+  }
+
+  const latestSessionByCandidateId = new Map<string, (typeof latestSessions)[number]>();
+  for (const session of latestSessions) {
+    if (!latestSessionByCandidateId.has(session.candidateId)) {
+      latestSessionByCandidateId.set(session.candidateId, session);
+    }
   }
 
   const now = new Date();
@@ -174,6 +210,7 @@ export async function GET(
   const candidateResults = sourcingRequest.candidates.map((sc) => {
     const techSnap = sc.candidate.intelligenceSnapshots.find((s) => s.track === 'tech') ?? null;
     const nonTechSnap = sc.candidate.intelligenceSnapshots.find((s) => s.track === 'non-tech') ?? null;
+    const latestSession = latestSessionByCandidateId.get(sc.candidateId) ?? null;
     const identitySummary = summarizeIdentitySignals(
       identityByCandidateId.get(sc.candidateId) ?? [],
       confirmedByCandidateId.get(sc.candidateId) ?? [],
@@ -327,6 +364,21 @@ export async function GET(
         lastEnrichedAt: sc.candidate.lastEnrichedAt,
       },
       identitySummary,
+      latestSession: latestSession
+        ? {
+            status: latestSession.status,
+            summary: latestSession.summary,
+            summaryStructured: latestSession.summaryStructured,
+            summaryGeneratedAt: latestSession.summaryGeneratedAt?.toISOString() ?? null,
+            summaryModel: latestSession.summaryModel,
+            queriesExecuted: latestSession.queriesExecuted,
+            identitiesFound: latestSession.identitiesFound,
+            identitiesConfirmed: latestSession.identitiesConfirmed,
+            finalConfidence: latestSession.finalConfidence,
+            completedAt: latestSession.completedAt?.toISOString() ?? null,
+            createdAt: latestSession.createdAt.toISOString(),
+          }
+        : null,
       snapshot,
       freshness: {
         snapshotAgeDays,
@@ -376,23 +428,56 @@ export async function GET(
     selectedSnapshotTrack: (diag.selectedSnapshotTrack as string) ?? 'tech',
   };
 
+  const recruiterCards = candidateResults.map((result) => {
+    const snapshotSkills = result.snapshot?.skillsNormalized ?? [];
+    const summaryStructured = result.latestSession?.summaryStructured ?? null;
+    return toRecruiterCard({
+      id: result.candidate.id,
+      name: result.candidate.nameHint,
+      linkedinUrl: result.candidate.linkedinUrl,
+      headline: result.candidate.headlineHint,
+      location: result.snapshot?.location ?? result.candidate.locationHint,
+      company: result.candidate.companyHint,
+      rank: result.rank,
+      fitScore: result.fitScore,
+      locationLabel: result.locationLabel,
+      enrichmentStatus: result.enrichmentStatus,
+      skillsTopN: topSkills(snapshotSkills, summaryStructured),
+      summaryShort: shortenSummary(result.latestSession?.summary),
+      emailAvailable: hasEmailAvailability(summaryStructured),
+      activeSeeker: hasActiveSeeker(summaryStructured),
+      outreachReady: hasOutreachReady(summaryStructured, result.enrichmentStatus),
+      sourceType: result.sourceType,
+    });
+  });
+
+  if (view === 'legacy') {
+    return NextResponse.json({
+      success: true,
+      requestId: sourcingRequest.id,
+      externalJobId: sourcingRequest.externalJobId,
+      status: sourcingRequest.status,
+      callbackStatus: sourcingRequest.callbackStatus ?? null,
+      callbackSentAt: sourcingRequest.callbackSentAt?.toISOString() ?? null,
+      requestedAt: sourcingRequest.requestedAt.toISOString(),
+      completedAt: sourcingRequest.completedAt?.toISOString() ?? null,
+      lastRerankedAt: sourcingRequest.lastRerankedAt?.toISOString() ?? null,
+      resultCount: sourcingRequest.resultCount,
+      qualityGateTriggered: sourcingRequest.qualityGateTriggered,
+      queriesExecuted: sourcingRequest.queriesExecuted,
+      diagnostics: sourcingRequest.diagnostics,
+      trackDecision,
+      groupCounts,
+      snapshotStats,
+      candidates: candidateResults,
+    });
+  }
+
   return NextResponse.json({
     success: true,
     requestId: sourcingRequest.id,
     externalJobId: sourcingRequest.externalJobId,
-    status: sourcingRequest.status,
-    callbackStatus: sourcingRequest.callbackStatus ?? null,
-    callbackSentAt: sourcingRequest.callbackSentAt?.toISOString() ?? null,
-    requestedAt: sourcingRequest.requestedAt.toISOString(),
-    completedAt: sourcingRequest.completedAt?.toISOString() ?? null,
-    lastRerankedAt: sourcingRequest.lastRerankedAt?.toISOString() ?? null,
     resultCount: sourcingRequest.resultCount,
-    qualityGateTriggered: sourcingRequest.qualityGateTriggered,
-    queriesExecuted: sourcingRequest.queriesExecuted,
-    diagnostics: sourcingRequest.diagnostics,
-    trackDecision,
-    groupCounts,
-    snapshotStats,
-    candidates: candidateResults,
+    data: recruiterCards,
   });
 }

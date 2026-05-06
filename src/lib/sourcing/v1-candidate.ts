@@ -36,6 +36,7 @@ export interface V1Candidate {
   identitySignals: IdentitySignal[];
   memory?: V1CandidateMemory;
   emailAvailable?: boolean;
+  activeSeeker?: boolean;
   outreachReady?: boolean;
   providerMeta?: Record<string, unknown>;
 }

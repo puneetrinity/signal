@@ -26,6 +26,7 @@ import {
   verifyEnrichLayerMatch,
   EnrichLayerUnrecoverableError,
 } from '../enrichlayer';
+import { fetchReverseContactSignals, getReverseContactStatus } from '../reversecontact';
 import { getEnrichmentProvider, type EnrichmentProvider } from '../provider';
 import { verifyDirectGitHubIdentity, type CandidateHints } from '../bridge-discovery';
 import { getTenantSettings } from '@/lib/tenant/settings';
@@ -991,6 +992,17 @@ async function processEnrichLayerEnrichmentJob(
 
     const contactInfo = allowContactStorage ? enrichLayerResult.contactInfo : null;
     const contactRestricted = !allowContactStorage && enrichLayerResult.contactInfo;
+    let reverseContactSignals: Awaited<ReturnType<typeof fetchReverseContactSignals>> | null = null;
+    if (getReverseContactStatus().enabled) {
+      try {
+        reverseContactSignals = await fetchReverseContactSignals(candidate.linkedinUrl);
+      } catch (error) {
+        log.warn(
+          { error, candidateId, tenantId, sessionId },
+          'ReverseContact overlay lookup failed during EnrichLayer enrichment',
+        );
+      }
+    }
 
     const { summary, evidence, model, tokens, meta } = await generateCandidateSummary({
       candidate: {
@@ -1015,6 +1027,15 @@ async function processEnrichLayerEnrichmentJob(
       ...summary.structured,
       ...(contactInfo ? { contact: contactInfo } : {}),
       ...(contactRestricted ? { contactRestricted: true } : {}),
+      cardSignals: {
+        emailAvailable: Boolean(contactInfo?.emails?.length || contactRestricted),
+        phoneAvailable: Boolean(contactInfo?.phones?.length || contactRestricted),
+        contactRestricted: Boolean(contactRestricted),
+        outreachReady: Boolean(contactInfo?.emails?.length || contactRestricted),
+        ...(typeof reverseContactSignals?.activeSeeker === 'boolean'
+          ? { activeSeeker: reverseContactSignals.activeSeeker }
+          : {}),
+      },
       source: 'enrichlayer',
       matchedBy: enrichLayerResult.matchedBy,
       verification: {
@@ -1022,6 +1043,13 @@ async function processEnrichLayerEnrichmentJob(
         reasons: verification.reasons,
         extracted: verification.extracted,
       },
+      ...(reverseContactSignals
+        ? { reverseContact: {
+            activeSeeker: reverseContactSignals.activeSeeker,
+            openToWork: reverseContactSignals.openToWork,
+            freshness: reverseContactSignals.freshness,
+          } }
+        : {}),
       ...(githubVerification ? { githubVerification } : {}),
     };
 
@@ -1046,6 +1074,7 @@ async function processEnrichLayerEnrichmentJob(
           bestConfidence: null,
           durationMs: Date.now() - startTime,
           verification,
+          ...(reverseContactSignals ? { reverseContact: reverseContactSignals } : {}),
           ...(githubVerification ? { githubVerification } : {}),
         },
       },

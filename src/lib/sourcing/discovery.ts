@@ -774,7 +774,7 @@ async function tryStructuredDiscovery(
   };
 
   const startedAt = Date.now();
-  const result = await searchByJobSpecWithMeta(spec, Math.min(Math.max(targetCount, 1), 100), geo);
+  const result = await searchByJobSpecWithMeta(spec, Math.max(targetCount, 1), geo);
   if (result === null) {
     // Primary provider doesn't support structured search — caller falls through to SERP path.
     return null;
@@ -882,7 +882,7 @@ export async function discoverCandidates(
   let stoppedReason: DiscoveryTelemetry['stoppedReason'] = 'completed_queries';
 
   // Phase 1.1 + 1.2: Structured short-circuit for providers that support it (Crustdata).
-  // One structured call returns up to 100 candidates. If it hits target, we skip the SERP
+  // One structured discovery run can page beyond 100 candidates. If it hits target, we skip the SERP
   // multi-query loop entirely. If it returns 0 or the provider doesn't support structured
   // search, we fall through to the legacy SERP path (which Serper needs anyway).
   const primaryProviderName = getPrimaryProvider();

@@ -121,6 +121,18 @@ async function fetchCrustdata(body: unknown): Promise<unknown> {
   throw lastError ?? new Error('Crustdata request failed');
 }
 
+async function fetchCrustdataSearchPage(
+  filters: CrustdataCondition,
+  limit: number,
+  cursor?: string | null,
+): Promise<CrustdataSearchResponse> {
+  return (await fetchCrustdata({
+    filters,
+    limit: Math.min(Math.max(limit, 1), 100),
+    ...(cursor ? { cursor } : {}),
+  })) as CrustdataSearchResponse;
+}
+
 interface CrustdataExperienceCurrent {
   title?: string | null;
   name?: string | null;
@@ -281,12 +293,7 @@ async function searchPeople(
   geo?: SearchGeoContext
 ): Promise<CrustdataPerson[]> {
   const { filters } = buildFilters(query, geo);
-
-  const json = (await fetchCrustdata({
-    filters,
-    limit: Math.min(Math.max(maxResults, 1), 100),
-  })) as CrustdataSearchResponse;
-  return json.profiles ?? [];
+  return searchByFilters(filters, maxResults);
 }
 
 function normalizeLinkedInId(url: string, fallback?: string | null): string {
@@ -412,11 +419,25 @@ async function searchByFilters(
   filters: CrustdataCondition,
   maxResults: number,
 ): Promise<CrustdataPerson[]> {
-  const json = (await fetchCrustdata({
-    filters,
-    limit: Math.min(Math.max(maxResults, 1), 100),
-  })) as CrustdataSearchResponse;
-  return json.profiles ?? [];
+  const cappedTarget = Math.max(1, maxResults);
+  const allProfiles: CrustdataPerson[] = [];
+  let cursor: string | null = null;
+  let pages = 0;
+
+  while (allProfiles.length < cappedTarget && pages < 10) {
+    const pageSize = Math.min(100, cappedTarget - allProfiles.length);
+    const json = await fetchCrustdataSearchPage(filters, pageSize, cursor);
+    const pageProfiles = json.profiles ?? [];
+    allProfiles.push(...pageProfiles);
+    cursor = json.next_cursor ?? null;
+    pages += 1;
+
+    if (!cursor || pageProfiles.length === 0) {
+      break;
+    }
+  }
+
+  return allProfiles.slice(0, cappedTarget);
 }
 
 function personToProfileSummary(person: CrustdataPerson): ProfileSummary | null {

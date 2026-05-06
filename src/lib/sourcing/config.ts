@@ -134,7 +134,7 @@ export function getSourcingConfig(): SourcingConfig {
       0,
       1,
     ),
-    initialEnrichCount: parseIntSafe(process.env.INITIAL_ENRICH_COUNT, 20),
+    initialEnrichCount: parseIntSafe(process.env.INITIAL_ENRICH_COUNT, 30),
     snapshotStaleDays: parseIntSafe(process.env.SNAPSHOT_STALE_DAYS, 30),
     staleRefreshMaxPerRun: parseIntSafe(process.env.STALE_REFRESH_MAX_PER_RUN, 10),
     qualityTopK: parseIntSafe(process.env.SOURCE_QUALITY_TOP_K, 20),
