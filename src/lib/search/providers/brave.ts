@@ -18,7 +18,7 @@ import type {
   SearchProviderType,
 } from './types';
 import { getProviderLimiter } from './limit';
-import { extractLocationFromSnippet } from '@/lib/enrichment/hint-extraction';
+import { extractLocationFromSnippet } from '@/lib/search/hint-extraction';
 
 interface BraveWebResult {
   url: string;
@@ -429,3 +429,4 @@ export const braveProvider: SearchProvider = {
 };
 
 export default braveProvider;
+

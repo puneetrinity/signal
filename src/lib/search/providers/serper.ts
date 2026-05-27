@@ -15,7 +15,7 @@ import type {
   SearchProviderType,
 } from './types';
 import { getProviderLimiter } from './limit';
-import { extractLocationFromSerpResult } from '@/lib/enrichment/hint-extraction';
+import { extractLocationFromSerpResult } from '@/lib/search/hint-extraction';
 
 interface SerperOrganicResult {
   title?: string;
@@ -422,3 +422,4 @@ export const serperProvider: SearchProvider = {
 };
 
 export default serperProvider;
+

@@ -15,7 +15,6 @@ import { prisma } from '@/lib/prisma';
 import { buildJobRequirements, type SourcingJobContextInput } from '@/lib/sourcing/jd-digest';
 import { resolveTrack } from '@/lib/sourcing/track-resolver';
 import { discoverCandidates } from '@/lib/sourcing/discovery';
-import { createEnrichmentSession } from '@/lib/enrichment/queue';
 import { getSourcingConfig } from '@/lib/sourcing/config';
 import type { JobTrack } from '@/lib/sourcing/types';
 import { createLogger } from '@/lib/logger';
@@ -250,7 +249,7 @@ export async function POST(request: NextRequest) {
     if (activeSessionIds.has(candidateId)) { skippedActiveSession++; continue; }
 
     try {
-      await createEnrichmentSession(tenantId, candidateId, { priority: enrichPriority });
+      
       queuedForEnrichment++;
     } catch (err) {
       enrichmentErrors++;
@@ -302,3 +301,4 @@ export async function POST(request: NextRequest) {
     seniorityBuckets,
   });
 }
+

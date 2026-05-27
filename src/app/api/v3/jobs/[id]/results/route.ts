@@ -11,7 +11,6 @@ import { verifyServiceJWT } from '@/lib/auth/service-jwt';
 import { requireScope } from '@/lib/auth/service-scopes';
 import { prisma } from '@/lib/prisma';
 import { summarizeIdentitySignals } from '@/lib/sourcing/identity-summary';
-import { isNonTechShadow } from '@/lib/enrichment/config';
 
 function safeObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object'
@@ -59,7 +58,7 @@ export async function GET(
     ? { id: requestId, tenantId, externalJobId }
     : { tenantId, externalJobId };
 
-  const sourcingRequest = await prisma.jobSourcingRequest.findFirst({
+  const sourcingRequest = (await prisma.jobSourcingRequest.findFirst({
     where,
     orderBy: { requestedAt: 'desc' },
     include: {
@@ -82,6 +81,7 @@ export async function GET(
               enrichmentStatus: true,
               confidenceScore: true,
               lastEnrichedAt: true,
+              profilePictureUrl: true,
               enrichmentSessions: {
                 orderBy: { createdAt: 'desc' },
                 take: 1,
@@ -112,7 +112,7 @@ export async function GET(
         },
       },
     },
-  });
+  })) as any;
 
   if (!sourcingRequest) {
     return NextResponse.json(
@@ -121,7 +121,8 @@ export async function GET(
     );
   }
 
-  const candidateIds = sourcingRequest.candidates.map((c) => c.candidateId);
+  const candidates = (sourcingRequest as any).candidates || [];
+  const candidateIds = candidates.map((c: any) => c.candidateId);
   const [identitySignals, confirmedSignals] = candidateIds.length > 0
     ? await Promise.all([
       prisma.identityCandidate.findMany({
@@ -133,6 +134,7 @@ export async function GET(
           id: true,
           candidateId: true,
           platform: true,
+          platformId: true,
           profileUrl: true,
           status: true,
           confidence: true,
@@ -174,14 +176,14 @@ export async function GET(
   const now = new Date();
 
   // Compute per-candidate results
-  const nonTechShadow = isNonTechShadow();
+  const nonTechShadow = false;
   const diagnosticsObj = sourcingRequest.diagnostics as Record<string, unknown> | null;
   const diag = diagnosticsObj ?? {};
   const discoveredPromotedInTopCount = (diag.discoveredPromotedInTopCount as number) ?? 0;
 
-  const candidateResults = sourcingRequest.candidates.map((sc) => {
-    const techSnap = sc.candidate.intelligenceSnapshots.find((s) => s.track === 'tech') ?? null;
-    const nonTechSnap = sc.candidate.intelligenceSnapshots.find((s) => s.track === 'non-tech') ?? null;
+  const candidateResults = candidates.map((sc: any) => {
+    const techSnap = sc.candidate.intelligenceSnapshots.find((s: any) => s.track === 'tech') ?? null;
+    const nonTechSnap = sc.candidate.intelligenceSnapshots.find((s: any) => s.track === 'non-tech') ?? null;
     const identitySummary = summarizeIdentitySignals(
       identityByCandidateId.get(sc.candidateId) ?? [],
       confirmedByCandidateId.get(sc.candidateId) ?? [],
@@ -224,6 +226,7 @@ export async function GET(
         location: techSnap.location,
         computedAt: techSnap.computedAt,
         staleAfter: techSnap.staleAfter,
+        signalsJson: techSnap.signalsJson,
       }
       : null;
 
@@ -251,6 +254,7 @@ export async function GET(
       ? {
         skillScore: fbRaw.skillScore ?? null,
         skillScoreMethod: fbRaw.skillScoreMethod ?? null,
+        matchedSkills: Array.isArray(fbRaw.matchedSkills) ? fbRaw.matchedSkills : [],
         roleScore: fbRaw.roleScore ?? null,
         seniorityScore: fbRaw.seniorityScore ?? null,
         activityFreshnessScore: fbRaw.activityFreshnessScore ?? null,
@@ -283,14 +287,6 @@ export async function GET(
             : 'location_unknown';
 
     const session = sc.candidate.enrichmentSessions?.[0];
-
-    const identities = (identityByCandidateId.get(sc.candidateId) ?? []).map(ident => ({
-      platform: ident.platform,
-      profileUrl: ident.profileUrl,
-      confidence: ident.confidence,
-      ...(includeScoreBreakdown && ident.scoreBreakdown ? { scoreBreakdown: ident.scoreBreakdown } : {})
-    }));
-
     let aiSummary: { text: string; skills: string[] } | null = null;
     if (includeSummary && session?.summary) {
       const structured = (session.summaryStructured as { skills?: string[] }) || {};
@@ -300,15 +296,120 @@ export async function GET(
       };
     }
 
+    const fitScore = sc.fitScore ?? 0;
+    const matchStrength = fitScore >= 0.8 ? 'strong' : fitScore >= 0.6 ? 'good' : 'possible';
+    
+    let locationStatus: 'verified' | 'partial' | 'unverified' | 'mismatch' | 'unknown' = 'unknown';
+    if (locationLabel === 'location_verified') locationStatus = 'verified';
+    else if (locationLabel === 'location_unverified' || locationLabel === 'location_unverified_promoted') locationStatus = 'unverified';
+    else if (locationLabel === 'location_mismatch') locationStatus = 'mismatch';
+
+    // Crustdata provides rich data directly — use as fallback before enrichment
+    const searchMetaObj = sc.candidate.searchMeta as Record<string, unknown> | null;
+    const crustdata = searchMetaObj?.crustdata as any | undefined;
+    
+    const crustdataEmails = crustdata?.emails as string[] | undefined;
+    const crustdataEmail = crustdataEmails?.[0] ?? null;
+    const crustdataSummary = crustdata?.basic_profile?.summary as string | undefined;
+    
+    // New rich fields
+    const crustdataTwitter = crustdata?.social_handles?.twitter_identifier?.slug as string | undefined;
+    
+    const crustdataSkills = crustdata?.skills?.professional_network_skills as string[] | undefined;
+
+    let skillsTopN: string[] = [];
+    if (techSnap?.skillsNormalized && Array.isArray(techSnap.skillsNormalized)) {
+      skillsTopN = (techSnap.skillsNormalized as string[]).slice(0, 5);
+    } else if (nonTechSnap?.skillsNormalized && Array.isArray(nonTechSnap.skillsNormalized)) {
+      skillsTopN = (nonTechSnap.skillsNormalized as string[]).slice(0, 5);
+    } else if (aiSummary?.skills && Array.isArray(aiSummary.skills)) {
+      skillsTopN = aiSummary.skills.slice(0, 5);
+    } else {
+      // Fallback: raw LinkedIn skills stored from Crustdata at sourcing time.
+      if (Array.isArray(crustdataSkills)) {
+        skillsTopN = crustdataSkills.slice(0, 5);
+      }
+    }
+
+    const summaryText = aiSummary?.text ?? (crustdataSummary || null);
+    const summaryShort = summaryText && summaryText.length > 200 ? summaryText.substring(0, 200) + '...' : summaryText;
+
+    const location = techSnap?.location || nonTechSnap?.location || sc.candidate.locationHint;
+
+    const identities = (identityByCandidateId.get(sc.candidateId) ?? []).map(ident => ({
+      platform: ident.platform,
+      platformId: ident.platformId,   // actual value: email address, phone number, github username etc.
+      profileUrl: ident.profileUrl,
+      confidence: ident.confidence,
+      ...(includeScoreBreakdown && ident.scoreBreakdown ? { scoreBreakdown: ident.scoreBreakdown } : {})
+    }));
+
+    const emailIdentity = identities.find(i => i.platform === 'email');
+    const phoneIdentity = identities.find(i => i.platform === 'phone');
+    const githubIdentity = identities.find(i => i.platform === 'github');
+    let twitterIdentity = identities.find(i => i.platform === 'twitter');
+
+    if (!twitterIdentity && crustdataTwitter) {
+      const cleanTwitter = crustdataTwitter.replace(/^@/, '');
+      twitterIdentity = {
+        platform: 'twitter',
+        platformId: cleanTwitter,
+        profileUrl: `https://twitter.com/${cleanTwitter}`,
+        confidence: 0.9,
+      };
+      identities.push(twitterIdentity);
+    }
+
+    const emailAvailable = !!emailIdentity || !!crustdataEmail;
+    const phoneAvailable = !!phoneIdentity;
+
     return {
+      // --- NEW UNIFIED CARD SCHEMA ---
       candidate: {
         id: sc.candidate.id,
+        name: sc.candidate.nameHint,
         linkedinUrl: sc.candidate.linkedinUrl,
+        headline: sc.candidate.headlineHint,
+        location,
+        company: sc.candidate.companyHint,
+        // Include legacy hints just in case
         nameHint: sc.candidate.nameHint,
+        locationHint: sc.candidate.locationHint,
+        headlineHint: sc.candidate.headlineHint,
+        companyHint: sc.candidate.companyHint,
+        enrichmentStatus: sc.candidate.enrichmentStatus,
+        confidenceScore: sc.candidate.confidenceScore,
+        lastEnrichedAt: sc.candidate.lastEnrichedAt,
+        profilePictureUrl: sc.candidate.profilePictureUrl,
+        searchMeta: sc.candidate.searchMeta,
       },
       sourcingContext: {
         rank: sc.rank,
+        matchStrength,
+        locationStatus,
       },
+      cardSignals: {
+        skillsTopN,
+        summaryShort,
+        emailAvailable,
+        phoneAvailable,
+        // Actual contact values — enrichment layer OR direct from Crustdata screener
+        email: emailIdentity?.platformId ?? crustdataEmail,
+        phone: phoneIdentity?.platformId ?? null,
+        github: githubIdentity?.profileUrl ?? (githubIdentity?.platformId ? `https://github.com/${githubIdentity.platformId}` : null),
+        twitter: twitterIdentity?.profileUrl ?? (twitterIdentity?.platformId ? `https://twitter.com/${twitterIdentity.platformId}` : null),
+        activeSeeker: false,
+      },
+      crustdata, // EXPOSE THE RAW CRUSTDATA TO THE UI
+      // --- DETAILED FIELDS FOR DETAIL VIEW ---
+      snapshot,
+      professionalValidation,
+      fitScore: sc.fitScore,
+      fitBreakdown,
+      matchTier,
+      locationMatchType,
+      dataConfidence,
+      locationLabel,
       ...(identities.length > 0 ? {
         identitySummary: {
           topConfidence: Math.max(...identities.map(i => i.confidence)),
@@ -327,3 +428,4 @@ export async function GET(
     data: candidateResults,
   });
 }
+

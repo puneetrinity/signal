@@ -1,0 +1,360 @@
+import { createLogger } from '@/lib/logger';
+import { type JobRequirements } from './jd-digest';
+
+const log = createLogger('CrustdataClient');
+
+const CRUSTDATA_API_KEY = process.env.CRUSTDATA_API_KEY;
+const API_URL = 'https://api.crustdata.com/person/search';
+
+// ─── Response Types (matching actual Crustdata API response) ─────────────────
+
+export interface CrustdataProfileResponse {
+  // ── Nested schema (official /person/search endpoint) ────────────────────────
+  crustdata_person_id?: number;
+  metadata?: {
+    updated_at?: string;
+  };
+  basic_profile?: {
+    name?: string;
+    first_name?: string;
+    last_name?: string;
+    headline?: string;
+    summary?: string;
+    languages?: string[];
+    location?: {
+      city?: string;
+      state?: string;
+      country?: string;
+      continent?: string;
+      full_location?: string;
+      raw?: string;
+    };
+  };
+  professional_network?: {
+    connections?: number;
+    followers?: number;
+    open_to_cards?: string[];
+    profile_picture_permalink?: string;
+    location?: {
+      raw?: string;
+    };
+    metadata?: {
+      last_scraped_source?: string;
+    };
+  };
+  skills?: {
+    professional_network_skills?: string[];
+  };
+  recently_changed_jobs?: boolean;
+  years_of_experience_raw?: number;
+  experience?: {
+    employment_details?: {
+      current?: {
+        company_name?: string;
+        title?: string;
+        seniority_level?: string;
+        function_category?: string;
+        start_date?: string;
+        end_date?: string;
+        description?: string;
+        name?: string;
+        years_at_company_raw?: number;
+        company_headquarters_country?: string;
+        business_email_verified?: boolean;
+        company_industries?: string[];
+        company_professional_network_industry?: string;
+        company_type?: string;
+        company_headcount_range?: string;
+      }[];
+      past?: {
+        company_name?: string;
+        title?: string;
+        seniority_level?: string;
+        function_category?: string;
+        start_date?: string;
+        end_date?: string;
+        description?: string;
+        name?: string;
+        years_at_company_raw?: number;
+        company_headquarters_country?: string;
+        business_email_verified?: boolean;
+        company_industries?: string[];
+        company_professional_network_industry?: string;
+        company_type?: string;
+        company_headcount_range?: string;
+      }[];
+    };
+  };
+  education?: {
+    schools?: {
+      school?: string;
+      degree?: string;
+      field_of_study?: string;
+      start_year?: number;
+      end_year?: number;
+    }[];
+  };
+  certifications?: {
+    name?: string;
+    issuing_organization?: string;
+    issue_date?: string;
+    expiration_date?: string;
+  }[];
+  honors?: {
+    title?: string;
+    issuer?: string; // undocumented
+    description?: string; // undocumented
+  }[];
+  contact?: {
+    has_business_email?: boolean;
+    has_personal_email?: boolean;
+    has_phone_number?: boolean;
+  };
+  social_handles?: {
+    professional_network_identifier?: { profile_url?: string };
+    twitter_identifier?: { slug?: string };
+    dev_platform_identifier?: { profile_url?: string | null };
+    [key: string]: any;
+  };
+}
+
+// ─── Filter Types (matching actual Crustdata API schema) ─────────────────────
+
+// Leaf condition: bare object, NO op/conditions fields
+interface CrustdataCondition {
+  field: string;
+  type: '=' | '!=' | '<' | '=<' | '>' | '=>' | 'in' | 'not_in' | '(.)' | '(!)' | '[.]' | 'geo_distance';
+  value: string | number | string[] | object;
+}
+
+// Group: op + conditions array of leaf objects
+interface CrustdataGroup {
+  op: 'and' | 'or';
+  conditions: (CrustdataCondition | CrustdataGroup)[];
+}
+
+// ─── Role-family → headline regex map ───────────────────────────────────────
+//
+// Crustdata `type: "(.)"` is a regex-contains match.
+// Using role titles instead of skills prevents matching sales directors,
+// VCs, or CEOs who merely mention a skill like "aws" in their headline.
+// These patterns are OR-joined with pipes, which Crustdata handles natively.
+//
+const ROLE_FAMILY_HEADLINE_FILTERS: Record<string, string> = {
+  devops: '(?i)(devops|sre|site reliability|platform engineer|infrastructure engineer|cloud engineer|devsecops)',
+  sre: '(?i)(sre|site reliability|platform engineer|devops|infrastructure engineer)',
+  backend: '(?i)(backend|software engineer|software developer|full.?stack|api engineer)',
+  frontend: '(?i)(frontend|front.end|ui engineer|react developer|angular developer)',
+  fullstack: '(?i)(full.?stack|software engineer|software developer|backend|frontend)',
+  data: '(?i)(data engineer|data scientist|analytics engineer|bi engineer|data platform)',
+  ml: '(?i)(machine learning|ml engineer|data scientist|ai engineer|deep learning)',
+  mobile: '(?i)(ios developer|android developer|mobile engineer|react native|flutter)',
+  security: '(?i)(security engineer|appsec|infosec|devsecops|cloud security|penetration)',
+  qa: '(?i)(qa engineer|sdet|test engineer|quality engineer|automation engineer)',
+  product: '(?i)(product manager|product lead|head of product|vp product|cpo|product owner)',
+  design: '(?i)(ux designer|ui designer|product designer|ux lead|design lead)',
+  sales: '(?i)(account executive|sales manager|sales director|business development|vp sales|revenue)',
+  marketing: '(?i)(marketing manager|growth marketer|demand generation|content marketer|seo)',
+  finance: '(?i)(finance manager|cfo|financial analyst|controller|fp&a|accounting)',
+  hr: '(?i)(hr manager|recruiter|talent acquisition|people ops|hrbp|chief people)',
+};
+
+// ─── Search Function ──────────────────────────────────────────────────────────
+
+/**
+ * Search Crustdata for candidates.
+ *
+ * INTENTIONALLY RELAXED QUERY STRATEGY:
+ * We fetch 300 candidates with a broad query (location + top 1-2 skills only).
+ * Strict ranking against the full JD happens locally after retrieval.
+ * This maximises Crustdata hit rate and avoids over-filtering at the API level.
+ */
+export async function searchPeople(
+  requirements: JobRequirements,
+  limit: number = 300,
+): Promise<CrustdataProfileResponse[]> {
+  if (!CRUSTDATA_API_KEY) {
+    throw new Error('CRUSTDATA_API_KEY is not configured');
+  }
+
+  const conditions: CrustdataCondition[] = [];
+
+  // 1. Region filter — use full_location (can match country, city, state)
+  if (requirements.location) {
+    const location = requirements.location.split(',')[0].trim();
+    conditions.push({
+      field: 'basic_profile.location.full_location',
+      type: '(.)',
+      value: location,
+    });
+  }
+
+  // 2. Title filter — prefer role-family terms over raw skill.
+  const roleFamilyKey = (requirements.roleFamily ?? '').toLowerCase();
+  const roleFamilyPattern = ROLE_FAMILY_HEADLINE_FILTERS[roleFamilyKey];
+  const primarySkill = requirements.topSkills?.[0];
+
+  if (roleFamilyPattern) {
+    conditions.push({
+      field: 'experience.employment_details.current.title',
+      type: '(.)',
+      value: roleFamilyPattern,
+    });
+  } else if (primarySkill) {
+    // Fallback: no role family mapping — use top skill as title keyword
+    conditions.push({
+      field: 'experience.employment_details.current.title',
+      type: '(.)',
+      value: primarySkill,
+    });
+  }
+
+  const titleFilterUsed = roleFamilyPattern
+    ? `role_family:${roleFamilyKey}`
+    : primarySkill
+      ? `skill:${primarySkill}`
+      : 'none';
+
+  const requestBody: {
+    limit: number;
+    fields?: string[];
+    filters?: CrustdataCondition | CrustdataGroup;
+  } = {
+    limit,
+    fields: [
+      'crustdata_person_id', 'basic_profile', 'professional_network',
+      'skills', 'experience', 'education', 'social_handles'
+    ]
+  };
+
+  if (conditions.length === 1) {
+    requestBody.filters = conditions[0];
+  } else if (conditions.length > 1) {
+    requestBody.filters = { op: 'and', conditions };
+  }
+
+  console.log('\n' + '='.repeat(60));
+  console.log('📡 [CRUSTDATA] CONNECTED — OFFICIAL NESTED SCHEMA API');
+  console.log(`🎯 [CRUSTDATA] TITLE FILTER: ${titleFilterUsed}`);
+  console.log('📦 [CRUSTDATA] SENDING PAYLOAD:');
+  console.log(JSON.stringify(requestBody, null, 2));
+  console.log('⏳ [CRUSTDATA] WAITING FOR RESPONSE...');
+  console.log('='.repeat(60) + '\n');
+
+  log.info({ filters: requestBody.filters, limit }, 'Searching Crustdata (official person/search)');
+
+  const response = await fetch(API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${CRUSTDATA_API_KEY}`,
+      'x-api-version': '2025-11-01',
+    },
+    body: JSON.stringify(requestBody),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    log.error({ status: response.status, errText }, 'Crustdata API error');
+    console.error('\n' + '!'.repeat(60));
+    console.error(`❌ [CRUSTDATA] API ERROR! Status: ${response.status}`);
+    console.error(`📝 [CRUSTDATA] DETAILS: ${errText}`);
+    console.error('!'.repeat(60) + '\n');
+    throw new Error(`Crustdata API error: ${response.status} - ${errText}`);
+  }
+
+  const data = await response.json();
+
+  // Deduplicate by profile URL
+  const allProfiles = (data.profiles || []) as CrustdataProfileResponse[];
+  const seen = new Set<string>();
+  const deduped = allProfiles.filter((p) => {
+    const key = p.social_handles?.professional_network_identifier?.profile_url;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  console.log('\n' + '*'.repeat(60));
+  console.log(`✅ [CRUSTDATA] SUCCESS!`);
+  console.log(`📊 [CRUSTDATA] TOTAL IN DB: ${data.total_count}`);
+  console.log(`🧑‍💻 [CRUSTDATA] RETRIEVED: ${deduped.length} unique candidates`);
+  console.log(`🔄 [CRUSTDATA] NEXT STEP: local re-ranking against full JD...`);
+  console.log('*'.repeat(60) + '\n');
+
+  log.info({ count: deduped.length, total: data.total_count, requested: limit }, 'Crustdata results');
+  return deduped;
+}
+
+
+
+
+
+/**
+ * Enrich Crustdata for candidates by URL.
+ * Takes up to 25 URLs per request as per Crustdata API limits.
+ * Returns a Map from linkedinUrl -> person_data.
+ */
+export async function batchEnrichPeople(
+  linkedinUrls: string[],
+): Promise<Map<string, any>> {
+  if (!CRUSTDATA_API_KEY) {
+    throw new Error('CRUSTDATA_API_KEY is not configured');
+  }
+
+  const results = new Map<string, any>();
+  const ENRICH_API_URL = 'https://api.crustdata.com/person/enrich';
+
+  // Chunk array into max 25 items each
+  const chunkSize = 25;
+  for (let i = 0; i < linkedinUrls.length; i += chunkSize) {
+    const chunk = linkedinUrls.slice(i, i + chunkSize);
+
+    console.log('\n' + '='.repeat(60));
+    console.log(`📡 [CRUSTDATA ENRICH] BATCH ${Math.floor(i / chunkSize) + 1} (${chunk.length} URLs)`);
+    console.log('='.repeat(60) + '\n');
+
+    const requestBody = {
+      professional_network_profile_urls: chunk,
+      fields: [
+        'crustdata_person_id', 'metadata', 'basic_profile', 'professional_network',
+        'skills', 'experience', 'education', 'certifications', 'honors',
+        'contact', 'social_handles', 'recently_changed_jobs', 'years_of_experience_raw'
+      ]
+    };
+
+    try {
+      const response = await fetch(ENRICH_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${CRUSTDATA_API_KEY}`,
+          'x-api-version': '2025-11-01',
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error(`❌ [CRUSTDATA ENRICH] API ERROR! Status: ${response.status} - ${errText}`);
+        continue;
+      }
+
+      const data: any[] = await response.json();
+
+      for (const item of data) {
+        const url = item.matched_on;
+        const matches = item.matches || [];
+        if (matches.length > 0 && matches[0].person_data) {
+          results.set(url, matches[0].person_data);
+        } else {
+          results.set(url, null); // No match found
+        }
+      }
+    } catch (err) {
+      console.error('❌ [CRUSTDATA ENRICH] FETCH FAILED:', err instanceof Error ? err.message : err);
+    }
+  }
+
+  return results;
+}

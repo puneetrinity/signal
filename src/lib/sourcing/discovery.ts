@@ -1025,7 +1025,7 @@ export function isLikelyPersonProfile(profile: ProfileSummary): boolean {
   return true;
 }
 
-function extractLinkedInIdFromUrl(url: string): string | null {
+export function extractLinkedInIdFromUrl(url: string): string | null {
   try {
     const parsed = new URL(url);
     const match = parsed.pathname.match(/\/in\/([^/]+)/);

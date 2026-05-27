@@ -20,6 +20,10 @@ function makeCandidate(
     fitBreakdown: {
       skillScore: fitScore,
       skillScoreMethod: method,
+      experienceScore: 0,
+      domainIndustryScore: 0,
+      educationScore: 0,
+      dataConfidence: 0,
       roleScore: 0.5,
       seniorityScore: 0.5,
       activityFreshnessScore: 0.5,

@@ -4,8 +4,7 @@
  * Dedicated queue for v3 sourcing jobs. Mirrors enrichment queue pattern.
  */
 
-import { Queue, Worker, Job } from 'bullmq';
-import IORedis from 'ioredis';
+import { Worker, Job } from 'bullmq';
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/prisma';
 import { createLogger } from '@/lib/logger';
@@ -17,55 +16,8 @@ import type { SourcingJobContextInput } from '../jd-digest';
 
 const log = createLogger('SourcingQueue');
 
-export const SOURCING_QUEUE_NAME = 'sourcing';
-
-// ---------------------------------------------------------------------------
-// Redis connection singleton (separate process from enrichment)
-// ---------------------------------------------------------------------------
-
-let redisConnection: IORedis | null = null;
-
-function getRedisConnection(): IORedis {
-  if (!redisConnection) {
-    const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
-    redisConnection = new IORedis(redisUrl, {
-      maxRetriesPerRequest: null, // Required by BullMQ
-      enableReadyCheck: false,
-      lazyConnect: true,
-    });
-  }
-  return redisConnection;
-}
-
-// ---------------------------------------------------------------------------
-// Queue singleton
-// ---------------------------------------------------------------------------
-
-let sourcingQueue: Queue<SourcingJobData, SourcingJobResult> | null = null;
-
-export function getSourcingQueue(): Queue<SourcingJobData, SourcingJobResult> {
-  if (!sourcingQueue) {
-    sourcingQueue = new Queue(SOURCING_QUEUE_NAME, {
-      connection: getRedisConnection(),
-      defaultJobOptions: {
-        attempts: 2,
-        backoff: {
-          type: 'exponential',
-          delay: 10_000,
-        },
-        removeOnComplete: {
-          count: 500,
-          age: 24 * 3600,
-        },
-        removeOnFail: {
-          count: 2000,
-          age: 7 * 24 * 3600,
-        },
-      },
-    });
-  }
-  return sourcingQueue;
-}
+export * from './producer';
+import { getRedisConnection, getSourcingQueue, SOURCING_QUEUE_NAME } from './producer';
 
 // ---------------------------------------------------------------------------
 // Job processor
@@ -92,7 +44,6 @@ async function processSourcingJob(
     const jobContext = jobRequest.jobContext as unknown as SourcingJobContextInput;
     const orchestratorResult = await runSourcingOrchestrator(requestId, tenantId, jobContext, job.data.resolvedTrack);
     const candidateCount = orchestratorResult.candidateCount;
-    const enrichedCount = orchestratorResult.enrichedCount;
 
     // Transition processing → complete
     const durationMs = Date.now() - startTime;
@@ -121,7 +72,6 @@ async function processSourcingJob(
           poolCount: orchestratorResult.poolCount,
           snapshotReuseCount: orchestratorResult.snapshotReuseCount,
           snapshotStaleServedCount: orchestratorResult.snapshotStaleServedCount,
-          snapshotRefreshQueuedCount: orchestratorResult.snapshotRefreshQueuedCount,
           strictMatchedCount: orchestratorResult.strictMatchedCount,
           expandedCount: orchestratorResult.expandedCount,
           expansionReason: orchestratorResult.expansionReason,
@@ -143,9 +93,7 @@ async function processSourcingJob(
           noveltyWindowDays: orchestratorResult.noveltyWindowDays,
           noveltyKey: orchestratorResult.noveltyKey,
           noveltyHint: orchestratorResult.noveltyHint,
-          discoveredEnrichedCount: orchestratorResult.discoveredEnrichedCount,
           discoveredOrphanCount: orchestratorResult.discoveredOrphanCount,
-          discoveredOrphanQueued: orchestratorResult.discoveredOrphanQueued,
           effectiveStrategy: orchestratorResult.effectiveStrategy,
           dynamicQueryBudgetUsed: orchestratorResult.dynamicQueryBudgetUsed,
           minDiscoveryPerRunApplied: orchestratorResult.minDiscoveryPerRunApplied,
@@ -190,7 +138,6 @@ async function processSourcingJob(
       externalJobId,
       status: 'complete',
       candidateCount,
-      enrichedCount,
     };
     await deliverCallback(requestId, tenantId, callbackUrl, payload);
 
@@ -198,7 +145,6 @@ async function processSourcingJob(
       requestId,
       status: 'complete',
       candidateCount,
-      enrichedCount,
       durationMs,
     };
 
@@ -228,7 +174,6 @@ async function processSourcingJob(
       externalJobId,
       status: 'failed',
       candidateCount: 0,
-      enrichedCount: 0,
       error: errorMsg,
     };
     await deliverCallback(requestId, tenantId, callbackUrl, failPayload, false).catch((cbErr) => {
@@ -241,7 +186,6 @@ async function processSourcingJob(
       requestId,
       status: 'failed',
       candidateCount: 0,
-      enrichedCount: 0,
       durationMs,
       error: errorMsg,
     };
@@ -317,15 +261,16 @@ export async function getSourcingQueueStats(): Promise<{
 export async function cleanupSourcingQueue(): Promise<void> {
   await stopSourcingWorker();
 
-  if (sourcingQueue) {
-    await sourcingQueue.close();
-    sourcingQueue = null;
+  const queueClient = getSourcingQueue();
+  if (queueClient) {
+    await queueClient.close();
   }
 
-  if (redisConnection) {
-    await redisConnection.quit();
-    redisConnection = null;
+  const redis = getRedisConnection();
+  if (redis) {
+    await redis.quit();
   }
 
   log.info('Sourcing queue cleaned up');
 }
+

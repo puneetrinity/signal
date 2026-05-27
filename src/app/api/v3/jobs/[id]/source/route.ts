@@ -10,10 +10,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { verifyServiceJWT } from '@/lib/auth/service-jwt';
 import { requireScope } from '@/lib/auth/service-scopes';
-import { getEnrichmentProviderStatus } from '@/lib/enrichment/provider';
 import { prisma } from '@/lib/prisma';
 import { toJsonValue } from '@/lib/prisma/json';
-import { getSourcingQueue } from '@/lib/sourcing/queue';
+import { getSourcingQueue } from '@/lib/sourcing/queue/producer';
 import { buildJobRequirements, type SourcingJobContextInput } from '@/lib/sourcing/jd-digest';
 import { resolveTrack } from '@/lib/sourcing/track-resolver';
 import type { SourcingJobData } from '@/lib/sourcing/types';
@@ -31,6 +30,8 @@ const bodySchema = z.object({
     jobTrackHint: z.enum(['auto', 'tech', 'non_tech']).optional(),
     jobTrackHintSource: z.enum(['system', 'user']).optional(),
     jobTrackHintReason: z.string().optional(),
+    refresh: z.boolean().optional(),
+    forceSourcing: z.boolean().optional(),
   }),
   callbackUrl: z.string().url(),
 });
@@ -40,7 +41,7 @@ const bodySchema = z.object({
 // - Same job context with different hints = same request (idempotent).
 // - If the classifier version changes, existing requests are reused — the trackDecision
 //   reflects the version at first resolution, not the current version.
-const HASH_EXCLUDED_FIELDS = new Set(['jobTrackHint', 'jobTrackHintSource', 'jobTrackHintReason']);
+const HASH_EXCLUDED_FIELDS = new Set(['jobTrackHint', 'jobTrackHintSource', 'jobTrackHintReason', 'refresh', 'forceSourcing']);
 
 function computeJobContextHash(jobContext: Record<string, unknown>): string {
   const filtered: Record<string, unknown> = {};
@@ -61,16 +62,7 @@ export async function POST(
   const scopeCheck = requireScope(auth.context, 'jobs:source');
   if (!scopeCheck.authorized) return scopeCheck.response;
 
-  const providerStatus = getEnrichmentProviderStatus();
-  if (providerStatus.provider !== 'langgraph' || !providerStatus.enabled) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: `Enrichment provider not available: ${providerStatus.reason ?? 'provider is not langgraph'}`,
-      },
-      { status: 400 },
-    );
-  }
+
 
   // Parse body
   let body: z.infer<typeof bodySchema>;
@@ -111,8 +103,8 @@ export async function POST(
   });
 
   if (existing) {
-    // Allow re-queue for terminal failure states
-    const retryable = existing.status === 'failed';
+    // Allow re-queue for terminal failure states, or if refresh is explicitly requested
+    const retryable = existing.status === 'failed' || body.jobContext.refresh === true || body.jobContext.forceSourcing === true;
     if (!retryable) {
       // Return persisted trackDecision, not freshly computed one, for consistency with GET /results
       const existingDiag = existing.diagnostics as Record<string, unknown> | null;
@@ -140,6 +132,7 @@ export async function POST(
         qualityGateTriggered: false,
         queriesExecuted: 0,
         diagnostics: toJsonValue({ trackDecision }),
+        jobContext: body.jobContext,
       },
     });
 
@@ -204,3 +197,4 @@ export async function POST(
     { status: 202 },
   );
 }
+
