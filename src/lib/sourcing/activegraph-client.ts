@@ -1,8 +1,47 @@
+import { SignJWT, importPKCS8 } from 'jose';
 import { JobRequirements } from './jd-digest';
 import type { CandidateForRanking } from './ranking-new';
 import type { CrustdataProfileResponse } from './crustdata-client';
 
-const ACTIVEGRAPH_URL = process.env.ACTIVEGRAPH_URL || 'http://localhost:8000';
+const ACTIVEGRAPH_URL = process.env.ACTIVEGRAPH_URL || process.env.ACTIVEKG_BASE_URL || 'http://localhost:8000';
+
+let cachedKey: CryptoKey | null = null;
+
+async function getPrivateKey(): Promise<CryptoKey> {
+  if (cachedKey) return cachedKey;
+
+  const pem = process.env.SIGNAL_JWT_PRIVATE_KEY;
+  if (!pem) throw new Error('SIGNAL_JWT_PRIVATE_KEY not configured');
+
+  cachedKey = await importPKCS8(pem, 'RS256');
+  return cachedKey;
+}
+
+async function signActiveGraphJwt(tenantId: string): Promise<string> {
+  const privateKey = await getPrivateKey();
+
+  return new SignJWT({
+    tenant_id: tenantId,
+    scopes: 'kg:write kg:read',
+    actor_type: 'service',
+  })
+    .setProtectedHeader({ alg: 'RS256' })
+    .setIssuedAt()
+    .setIssuer('signal')
+    .setAudience('activekg')
+    .setSubject('signal-service')
+    .setExpirationTime('5m')
+    .setJti(crypto.randomUUID())
+    .sign(privateKey);
+}
+
+async function authHeaders(tenantId: string): Promise<Record<string, string>> {
+  const token = await signActiveGraphJwt(tenantId);
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${token}`,
+  };
+}
 
 export interface ActiveGraphSearchResult {
   candidate_id: string;
@@ -98,9 +137,7 @@ export async function searchHomePool(
 
   const response = await fetch(`${ACTIVEGRAPH_URL}/candidates/search/by-tags`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: await authHeaders(tenantId),
     body: JSON.stringify({
       tags,
       tenant_id: tenantId,
@@ -146,9 +183,7 @@ export async function ingestCandidate(
 
   const response = await fetch(`${ACTIVEGRAPH_URL}/candidates/resolve/signal/candidate`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: await authHeaders(tenantId),
     body: JSON.stringify(payload),
   });
 
