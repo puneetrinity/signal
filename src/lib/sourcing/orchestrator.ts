@@ -349,7 +349,8 @@ export async function runSourcingOrchestrator(
   let homeCandidates: any[] = [];
   try {
     // Search ActiveGraph for candidates matching the JD tags
-    homeCandidates = await searchHomePool(homeTags, tenantId, 300);
+    // (ActiveGraph's by-tags endpoint validates limit with le=100 — 422 above that)
+    homeCandidates = await searchHomePool(homeTags, tenantId, 100);
     log.info({ requestId, tags: homeTags, found: homeCandidates.length }, 'ActiveGraph home pool searched');
   } catch (err) {
     log.error({ err }, 'Failed to search ActiveGraph home pool');
