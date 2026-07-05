@@ -141,22 +141,22 @@ interface CrustdataGroup {
 // These patterns are OR-joined with pipes, which Crustdata handles natively.
 //
 const ROLE_FAMILY_HEADLINE_FILTERS: Record<string, string> = {
-  devops: '(?i)(devops|sre|site reliability|platform engineer|infrastructure engineer|cloud engineer|devsecops)',
-  sre: '(?i)(sre|site reliability|platform engineer|devops|infrastructure engineer)',
-  backend: '(?i)(backend|software engineer|software developer|full.?stack|api engineer)',
-  frontend: '(?i)(frontend|front.end|ui engineer|react developer|angular developer)',
-  fullstack: '(?i)(full.?stack|software engineer|software developer|backend|frontend)',
-  data: '(?i)(data engineer|data scientist|analytics engineer|bi engineer|data platform)',
-  ml: '(?i)(machine learning|ml engineer|data scientist|ai engineer|deep learning)',
-  mobile: '(?i)(ios developer|android developer|mobile engineer|react native|flutter)',
-  security: '(?i)(security engineer|appsec|infosec|devsecops|cloud security|penetration)',
-  qa: '(?i)(qa engineer|sdet|test engineer|quality engineer|automation engineer)',
-  product: '(?i)(product manager|product lead|head of product|vp product|cpo|product owner)',
-  design: '(?i)(ux designer|ui designer|product designer|ux lead|design lead)',
-  sales: '(?i)(account executive|sales manager|sales director|business development|vp sales|revenue)',
-  marketing: '(?i)(marketing manager|growth marketer|demand generation|content marketer|seo)',
-  finance: '(?i)(finance manager|cfo|financial analyst|controller|fp&a|accounting)',
-  hr: '(?i)(hr manager|recruiter|talent acquisition|people ops|hrbp|chief people)',
+  devops: '(devops|sre|site reliability|platform engineer|infrastructure engineer|cloud engineer|devsecops)',
+  sre: '(sre|site reliability|platform engineer|devops|infrastructure engineer)',
+  backend: '(backend|software engineer|software developer|full.?stack|api engineer)',
+  frontend: '(frontend|front.end|ui engineer|react developer|angular developer)',
+  fullstack: '(full.?stack|software engineer|software developer|backend|frontend)',
+  data: '(data engineer|data scientist|analytics engineer|bi engineer|data platform)',
+  ml: '(machine learning|ml engineer|data scientist|ai engineer|deep learning)',
+  mobile: '(ios developer|android developer|mobile engineer|react native|flutter)',
+  security: '(security engineer|appsec|infosec|devsecops|cloud security|penetration)',
+  qa: '(qa engineer|sdet|test engineer|quality engineer|automation engineer)',
+  product: '(product manager|product lead|head of product|vp product|cpo|product owner)',
+  design: '(ux designer|ui designer|product designer|ux lead|design lead)',
+  sales: '(account executive|sales manager|sales director|business development|vp sales|revenue)',
+  marketing: '(marketing manager|growth marketer|demand generation|content marketer|seo)',
+  finance: '(finance manager|cfo|financial analyst|controller|fp&a|accounting)',
+  hr: '(hr manager|recruiter|talent acquisition|people ops|hrbp|chief people)',
 };
 
 // ─── Search Function ──────────────────────────────────────────────────────────
@@ -177,7 +177,7 @@ export async function searchPeople(
     throw new Error('CRUSTDATA_API_KEY is not configured');
   }
 
-  const conditions: CrustdataCondition[] = [];
+  const conditions: (CrustdataCondition | CrustdataGroup)[] = [];
 
   // 1. Region filter — use full_location (can match country, city, state)
   if (requirements.location) {
@@ -195,10 +195,15 @@ export async function searchPeople(
   const primarySkill = requirements.topSkills?.[0];
 
   if (roleFamilyPattern) {
-    conditions.push({
+    const terms = roleFamilyPattern.replace(/[()]/g, '').split('|');
+    const orConditions = terms.map(term => ({
       field: 'experience.employment_details.current.title',
-      type: '(.)',
-      value: roleFamilyPattern,
+      type: '(.)' as const,
+      value: term,
+    }));
+    conditions.push({
+      op: 'or',
+      conditions: orConditions,
     });
   } else if (primarySkill) {
     // Fallback: no role family mapping — use top skill as title keyword
@@ -222,8 +227,8 @@ export async function searchPeople(
   } = {
     limit,
     fields: [
-      'crustdata_person_id', 'basic_profile', 'professional_network',
-      'skills', 'experience', 'education', 'social_handles'
+      'crustdata_person_id', 'basic_profile', 'contact',
+      'education', 'experience', 'fit', 'social_handles'
     ]
   };
 
@@ -295,66 +300,66 @@ export async function searchPeople(
  * Takes up to 25 URLs per request as per Crustdata API limits.
  * Returns a Map from linkedinUrl -> person_data.
  */
-export async function batchEnrichPeople(
-  linkedinUrls: string[],
-): Promise<Map<string, any>> {
-  if (!CRUSTDATA_API_KEY) {
-    throw new Error('CRUSTDATA_API_KEY is not configured');
-  }
+// export async function batchEnrichPeople(
+//   linkedinUrls: string[],
+// ): Promise<Map<string, any>> {
+//   if (!CRUSTDATA_API_KEY) {
+//     throw new Error('CRUSTDATA_API_KEY is not configured');
+//   }
 
-  const results = new Map<string, any>();
-  const ENRICH_API_URL = 'https://api.crustdata.com/person/enrich';
+//   const results = new Map<string, any>();
+//   const ENRICH_API_URL = 'https://api.crustdata.com/person/enrich';
 
-  // Chunk array into max 25 items each
-  const chunkSize = 25;
-  for (let i = 0; i < linkedinUrls.length; i += chunkSize) {
-    const chunk = linkedinUrls.slice(i, i + chunkSize);
+//   // Chunk array into max 25 items each
+//   const chunkSize = 25;
+//   for (let i = 0; i < linkedinUrls.length; i += chunkSize) {
+//     const chunk = linkedinUrls.slice(i, i + chunkSize);
 
-    console.log('\n' + '='.repeat(60));
-    console.log(`📡 [CRUSTDATA ENRICH] BATCH ${Math.floor(i / chunkSize) + 1} (${chunk.length} URLs)`);
-    console.log('='.repeat(60) + '\n');
+//     console.log('\n' + '='.repeat(60));
+//     console.log(`📡 [CRUSTDATA ENRICH] BATCH ${Math.floor(i / chunkSize) + 1} (${chunk.length} URLs)`);
+//     console.log('='.repeat(60) + '\n');
 
-    const requestBody = {
-      professional_network_profile_urls: chunk,
-      fields: [
-        'crustdata_person_id', 'metadata', 'basic_profile', 'professional_network',
-        'skills', 'experience', 'education', 'certifications', 'honors',
-        'contact', 'social_handles', 'recently_changed_jobs', 'years_of_experience_raw'
-      ]
-    };
+//     const requestBody = {
+//       professional_network_profile_urls: chunk,
+//       fields: [
+//         'crustdata_person_id', 'metadata', 'basic_profile', 'professional_network',
+//         'skills', 'experience', 'education', 'certifications', 'honors',
+//         'contact', 'social_handles', 'recently_changed_jobs', 'years_of_experience_raw', 'fit'
+//       ]
+//     };
 
-    try {
-      const response = await fetch(ENRICH_API_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${CRUSTDATA_API_KEY}`,
-          'x-api-version': '2025-11-01',
-        },
-        body: JSON.stringify(requestBody),
-      });
+//     try {
+//       const response = await fetch(ENRICH_API_URL, {
+//         method: 'POST',
+//         headers: {
+//           'Content-Type': 'application/json',
+//           'Authorization': `Bearer ${CRUSTDATA_API_KEY}`,
+//           'x-api-version': '2025-11-01',
+//         },
+//         body: JSON.stringify(requestBody),
+//       });
 
-      if (!response.ok) {
-        const errText = await response.text();
-        console.error(`❌ [CRUSTDATA ENRICH] API ERROR! Status: ${response.status} - ${errText}`);
-        continue;
-      }
+//       if (!response.ok) {
+//         const errText = await response.text();
+//         console.error(`❌ [CRUSTDATA ENRICH] API ERROR! Status: ${response.status} - ${errText}`);
+//         continue;
+//       }
 
-      const data: any[] = await response.json();
+//       const data: any[] = await response.json();
 
-      for (const item of data) {
-        const url = item.matched_on;
-        const matches = item.matches || [];
-        if (matches.length > 0 && matches[0].person_data) {
-          results.set(url, matches[0].person_data);
-        } else {
-          results.set(url, null); // No match found
-        }
-      }
-    } catch (err) {
-      console.error('❌ [CRUSTDATA ENRICH] FETCH FAILED:', err instanceof Error ? err.message : err);
-    }
-  }
+//       for (const item of data) {
+//         const url = item.matched_on;
+//         const matches = item.matches || [];
+//         if (matches.length > 0 && matches[0].person_data) {
+//           results.set(url, matches[0].person_data);
+//         } else {
+//           results.set(url, null); // No match found
+//         }
+//       }
+//     } catch (err) {
+//       console.error('❌ [CRUSTDATA ENRICH] FETCH FAILED:', err instanceof Error ? err.message : err);
+//     }
+//   }
 
-  return results;
-}
+//   return results;
+// }

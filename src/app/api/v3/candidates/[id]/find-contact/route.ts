@@ -19,6 +19,11 @@ async function performFullEnrich(candidate: any, fullEnrichKey: string): Promise
     }]
   };
 
+  console.log('\n' + '='.repeat(60));
+  console.log('📡 [FULLENRICH] INITIATING BULK ENRICHMENT');
+  console.log(`🎯 [FULLENRICH] TARGET: ${candidate.linkedinUrl}`);
+  console.log('⏳ [FULLENRICH] SENDING POST REQUEST...');
+
   const startRes = await fetch('https://app.fullenrich.com/api/v2/contact/enrich/bulk', {
     method: 'POST',
     headers: {
@@ -35,8 +40,12 @@ async function performFullEnrich(candidate: any, fullEnrichKey: string): Promise
   const startData = await startRes.json();
   const enrichmentId = startData.enrichment_id;
   if (!enrichmentId) {
+    console.error('❌ [FULLENRICH] FAILED: No enrichment_id returned');
     throw new Error('FullEnrich did not return an enrichment_id');
   }
+
+  console.log(`✅ [FULLENRICH] STARTED! Enrichment ID: ${enrichmentId}`);
+  console.log('🔄 [FULLENRICH] POLLING FOR RESULTS...');
 
   // Polling loop
   const maxRetries = 20; // approx 40s
@@ -54,7 +63,10 @@ async function performFullEnrich(candidate: any, fullEnrichKey: string): Promise
     const pollData = await pollRes.json();
     if (pollData.status === 'FINISHED') {
       const contactInfo = pollData.data?.[0]?.contact_info;
-      if (!contactInfo) return [];
+      if (!contactInfo) {
+        console.log('⚠️ [FULLENRICH] FINISHED BUT NO CONTACT INFO FOUND');
+        return [];
+      }
 
       const emails: string[] = [];
       if (contactInfo.work_emails) {
@@ -63,9 +75,16 @@ async function performFullEnrich(candidate: any, fullEnrichKey: string): Promise
       if (contactInfo.personal_emails) {
         emails.push(...contactInfo.personal_emails.map((e: any) => e.email));
       }
-      return [...new Set(emails)].filter(Boolean); // Deduplicate
+      
+      const uniqueEmails = [...new Set(emails)].filter(Boolean); // Deduplicate
+      console.log(`🎉 [FULLENRICH] SUCCESS! Found ${uniqueEmails.length} emails:`, uniqueEmails.join(', '));
+      console.log('='.repeat(60) + '\n');
+      return uniqueEmails;
     }
   }
+
+  console.error('⏰ [FULLENRICH] TIMEOUT: Polling took too long');
+  console.log('='.repeat(60) + '\n');
 
   throw new Error('FullEnrich polling timed out');
 }
@@ -121,6 +140,11 @@ export async function POST(
       apiUrl.searchParams.append('email_validation', 'fast');
       apiUrl.searchParams.append('page_size', '0');
 
+      console.log('\n' + '='.repeat(60));
+      console.log('📡 [ENRICHLAYER] INITIATING FALLBACK ENRICHMENT');
+      console.log(`🎯 [ENRICHLAYER] TARGET: ${candidate.linkedinUrl}`);
+      console.log('⏳ [ENRICHLAYER] SENDING GET REQUEST...');
+
       const res = await fetch(apiUrl.toString(), {
         headers: {
           'Authorization': `Bearer ${enrichlayerKey}`,
@@ -138,12 +162,15 @@ export async function POST(
         } catch (e) {
           // Not JSON
         }
-        console.error('Enrichlayer error:', res.status, text);
+        console.error(`❌ [ENRICHLAYER] ERROR ${res.status}:`, text);
+        console.log('='.repeat(60) + '\n');
         return NextResponse.json({ error: errorMsg, details: text, status: res.status }, { status: 502 });
       }
 
       const data = await res.json();
       emails = data.emails || [];
+      console.log(`🎉 [ENRICHLAYER] SUCCESS! Found ${emails.length} emails:`, emails.join(', '));
+      console.log('='.repeat(60) + '\n');
     }
 
     if (emails.length > 0) {

@@ -795,8 +795,8 @@ export async function runSourcingOrchestrator(
                 || '';
 
               // ── Profile picture ──────────────────────────────────────────
-              // Nested: basic_profile.profile_picture_permalink
-              // Flat:   profile_picture_url
+              // Live API returns it at basic_profile.profile_picture_permalink
+              // Legacy flat schema fallback: profile_picture_url
               const profilePictureUrl: string | null =
                 p.basic_profile?.profile_picture_permalink
                 ?? p.profile_picture_url
@@ -873,9 +873,9 @@ export async function runSourcingOrchestrator(
               }
 
               // ── Skills ──────────────────────────────────────────────────
-              // Screener endpoint: skills[] array is directly available (up to 50).
-              // Nested endpoint fallback: keyword-match topSkills against snippet.
-              const rawSkillsFlat: string[] = Array.isArray(p.skills) ? p.skills : (p.skills?.professional_network_skills || []);
+              // Person Search does NOT return skills (requires Person Enrich).
+              // We extract skills by keyword-matching JD topSkills against job descriptions.
+              const rawSkillsFlat: string[] = [];
               const searchSnippetText = snippetParts.filter(Boolean).join(' | ');
 
               const extractedFromDescriptions: string[] = rawSkillsFlat.length === 0

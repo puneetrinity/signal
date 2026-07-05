@@ -298,7 +298,7 @@ export async function GET(
 
     const fitScore = sc.fitScore ?? 0;
     const matchStrength = fitScore >= 0.8 ? 'strong' : fitScore >= 0.6 ? 'good' : 'possible';
-    
+
     let locationStatus: 'verified' | 'partial' | 'unverified' | 'mismatch' | 'unknown' = 'unknown';
     if (locationLabel === 'location_verified') locationStatus = 'verified';
     else if (locationLabel === 'location_unverified' || locationLabel === 'location_unverified_promoted') locationStatus = 'unverified';
@@ -307,16 +307,18 @@ export async function GET(
     // Crustdata provides rich data directly — use as fallback before enrichment
     const searchMetaObj = sc.candidate.searchMeta as Record<string, unknown> | null;
     const crustdata = searchMetaObj?.crustdata as any | undefined;
-    
-    const crustdataEmails = crustdata?.emails as string[] | undefined;
-    const crustdataEmail = crustdataEmails?.[0] ?? null;
-    const crustdataSummary = crustdata?.basic_profile?.summary as string | undefined;
-    
-    // New rich fields
-    const crustdataTwitter = crustdata?.social_handles?.twitter_identifier?.slug as string | undefined;
-    
-    const crustdataSkills = crustdata?.skills?.professional_network_skills as string[] | undefined;
 
+    const crustdataEmail: string | null = null; // Person Search doesn't return emails
+    const crustdataSummary = crustdata?.basic_profile?.summary as string | undefined;
+
+    // Free contact availability flags from Person Search
+    const crustdataContact = crustdata?.contact as { has_business_email?: boolean; has_personal_email?: boolean; has_phone_number?: boolean } | undefined;
+
+    // Social handles from Person Search
+    const crustdataTwitter = crustdata?.social_handles?.twitter_identifier?.slug as string | undefined;
+    const crustdataGithub = crustdata?.social_handles?.dev_platform_identifier?.profile_url as string | undefined;
+
+    // Skills waterfall: AI snapshot > AI summary > (Person Search doesn't return skills)
     let skillsTopN: string[] = [];
     if (techSnap?.skillsNormalized && Array.isArray(techSnap.skillsNormalized)) {
       skillsTopN = (techSnap.skillsNormalized as string[]).slice(0, 5);
@@ -324,11 +326,6 @@ export async function GET(
       skillsTopN = (nonTechSnap.skillsNormalized as string[]).slice(0, 5);
     } else if (aiSummary?.skills && Array.isArray(aiSummary.skills)) {
       skillsTopN = aiSummary.skills.slice(0, 5);
-    } else {
-      // Fallback: raw LinkedIn skills stored from Crustdata at sourcing time.
-      if (Array.isArray(crustdataSkills)) {
-        skillsTopN = crustdataSkills.slice(0, 5);
-      }
     }
 
     const summaryText = aiSummary?.text ?? (crustdataSummary || null);
@@ -346,8 +343,18 @@ export async function GET(
 
     const emailIdentity = identities.find(i => i.platform === 'email');
     const phoneIdentity = identities.find(i => i.platform === 'phone');
-    const githubIdentity = identities.find(i => i.platform === 'github');
+    let githubIdentity = identities.find(i => i.platform === 'github');
     let twitterIdentity = identities.find(i => i.platform === 'twitter');
+
+    if (!githubIdentity && crustdataGithub) {
+      githubIdentity = {
+        platform: 'github',
+        platformId: crustdataGithub.split('/').pop() || '',
+        profileUrl: crustdataGithub,
+        confidence: 0.9,
+      };
+      identities.push(githubIdentity);
+    }
 
     if (!twitterIdentity && crustdataTwitter) {
       const cleanTwitter = crustdataTwitter.replace(/^@/, '');
@@ -360,8 +367,8 @@ export async function GET(
       identities.push(twitterIdentity);
     }
 
-    const emailAvailable = !!emailIdentity || !!crustdataEmail;
-    const phoneAvailable = !!phoneIdentity;
+    const emailAvailable = !!emailIdentity || !!crustdataEmail || !!(crustdataContact?.has_business_email || crustdataContact?.has_personal_email);
+    const phoneAvailable = !!phoneIdentity || !!crustdataContact?.has_phone_number;
 
     return {
       // --- NEW UNIFIED CARD SCHEMA ---
