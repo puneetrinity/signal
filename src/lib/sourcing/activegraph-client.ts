@@ -12,6 +12,22 @@ const ACTIVEGRAPH_URL = process.env.ACTIVEGRAPH_URL || 'http://localhost:8000';
  * clamps to its own ceiling and reports truncation via total_matched. */
 export const HOME_POOL_LIMIT = parseInt(process.env.SOURCE_HOME_POOL_LIMIT || '300', 10);
 
+/** Home-pool results are merged into ranking only when explicitly enabled:
+ * Memory returns signal_candidate_id values (LinkedIn URLs) that Discover's
+ * persistence layer cannot yet reconcile with its local candidate CUIDs.
+ * Ingest (write path) is always on; the read path stays dark until the ID
+ * reconciliation ships. */
+export const HOME_POOL_ENABLED =
+  (process.env.SOURCE_HOME_POOL_ENABLED || 'false').toLowerCase() === 'true';
+
+const REQUEST_TIMEOUT_MS = parseInt(process.env.ACTIVEGRAPH_TIMEOUT_MS || '15000', 10);
+
+function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  return fetch(url, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
+}
+
 export interface ActiveGraphSearchResult {
   candidate_id: string;
   display_name: string | null;
@@ -97,16 +113,19 @@ export function generateTagsFromCandidate(c: CandidateForRanking): string[] {
 /**
  * Search the internal candidate library (ActiveGraph) using tags.
  */
+/** Returns the matched candidates, or null when the home pool was UNAVAILABLE
+ * (auth/network/server failure) — callers must distinguish "Memory had nothing"
+ * from "we could not ask Memory". */
 export async function searchHomePool(
   tags: string[],
   tenantId: string,
   limit: number = HOME_POOL_LIMIT,
   requestId?: string
-): Promise<ActiveGraphSearchResult[]> {
+): Promise<ActiveGraphSearchResult[] | null> {
   if (!tags.length) return [];
 
   const token = await signActiveGraphJWT(tenantId, 'kg:read', requestId);
-  const response = await fetch(`${ACTIVEGRAPH_URL}/candidates/search/by-tags`, {
+  const response = await fetchWithTimeout(`${ACTIVEGRAPH_URL}/candidates/search/by-tags`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -127,7 +146,7 @@ export async function searchHomePool(
       { requestId, tenantId, status: response.status, body: body.slice(0, 300) },
       'ActiveGraph home-pool search failed — continuing without home pool'
     );
-    return [];
+    return null;
   }
 
   const data = await response.json();
@@ -174,7 +193,7 @@ export async function ingestCandidate(
   };
 
   const token = await signActiveGraphJWT(tenantId, 'kg:write', requestId);
-  const response = await fetch(`${ACTIVEGRAPH_URL}/candidates/resolve/signal/candidate`, {
+  const response = await fetchWithTimeout(`${ACTIVEGRAPH_URL}/candidates/resolve/signal/candidate`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -193,4 +212,33 @@ export async function ingestCandidate(
   }
 
   return true;
+}
+
+/**
+ * Ingest a batch of candidates with bounded concurrency (chunks of 10).
+ * Individual failures are logged by ingestCandidate; returns the success count.
+ */
+export async function ingestCandidateBatch(
+  tenantId: string,
+  candidates: (CandidateForRanking & { linkedinUrl?: string; name?: string })[],
+  requestId?: string,
+  chunkSize = 10
+): Promise<number> {
+  let success = 0;
+  for (let i = 0; i < candidates.length; i += chunkSize) {
+    const chunk = candidates.slice(i, i + chunkSize);
+    const results = await Promise.all(
+      chunk.map(async (candidate) => {
+        try {
+          const tags = generateTagsFromCandidate(candidate);
+          return await ingestCandidate(tenantId, candidate, tags, requestId);
+        } catch (err) {
+          log.error({ requestId, candidateId: candidate.id, err: String(err) }, 'ingest threw');
+          return false;
+        }
+      })
+    );
+    success += results.filter(Boolean).length;
+  }
+  return success;
 }

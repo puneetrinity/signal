@@ -347,18 +347,27 @@ export async function runSourcingOrchestrator(
   const poolForRanking: CandidateForRanking[] = poolRows.map((r) => toRankingCandidate(r));
   const poolForRankingById = new Map(poolForRanking.map((r) => [r.id, r]));
 
-  // 2.5 ActiveGraph Home Pool Search
-  const { generateTagsFromJD, searchHomePool, HOME_POOL_LIMIT } = await import(
+  // 2.5 ActiveGraph Home Pool Search — read path is gated until Discover can
+  // reconcile Memory's signal_candidate_id values with local candidate CUIDs.
+  const { generateTagsFromJD, searchHomePool, HOME_POOL_LIMIT, HOME_POOL_ENABLED } = await import(
     './activegraph-client'
   );
-  const homeTags = generateTagsFromJD(requirements);
   let homeCandidates: any[] = [];
-  try {
-    // Search ActiveGraph for candidates matching the JD tags
-    homeCandidates = await searchHomePool(homeTags, tenantId, HOME_POOL_LIMIT, requestId);
-    log.info({ requestId, tags: homeTags, found: homeCandidates.length }, 'ActiveGraph home pool searched');
-  } catch (err) {
-    log.error({ err }, 'Failed to search ActiveGraph home pool');
+  if (HOME_POOL_ENABLED) {
+    const homeTags = generateTagsFromJD(requirements);
+    try {
+      const homeResult = await searchHomePool(homeTags, tenantId, HOME_POOL_LIMIT, requestId);
+      if (homeResult === null) {
+        log.warn({ requestId, tags: homeTags }, 'ActiveGraph home pool UNAVAILABLE — proceeding without it');
+      } else {
+        homeCandidates = homeResult;
+        log.info({ requestId, tags: homeTags, found: homeCandidates.length }, 'ActiveGraph home pool searched');
+      }
+    } catch (err) {
+      log.error({ err, requestId }, 'Failed to search ActiveGraph home pool');
+    }
+  } else {
+    log.info({ requestId }, 'ActiveGraph home pool disabled (SOURCE_HOME_POOL_ENABLED=false)');
   }
 
   // Merge ActiveGraph candidates into the pool for ranking if they aren't already there
@@ -977,12 +986,10 @@ export async function runSourcingOrchestrator(
             const profileByUrl = new Map(mappedForRanking.map((p) => [p.id, p]));
 
             // ── Ingest all Crustdata profiles to ActiveGraph (Background) ──────────
-            const { ingestCandidate, generateTagsFromCandidate } = await import('./activegraph-client');
-            Promise.all(mappedForRanking.map(async (candidate) => {
-              const tags = generateTagsFromCandidate(candidate);
-              return ingestCandidate(tenantId, candidate, tags, requestId);
-            })).then(results => {
-              const successCount = results.filter(Boolean).length;
+            // Bounded concurrency: 300 simultaneous requests would hammer the
+            // service; chunks of 10 keep it civil while staying off the hot path.
+            const { ingestCandidateBatch } = await import('./activegraph-client');
+            ingestCandidateBatch(tenantId, mappedForRanking, requestId).then(successCount => {
               console.log(`📡 [ORCHESTRATOR] INGESTED ${successCount}/${mappedForRanking.length} TO ACTIVEGRAPH (Async)`);
             }).catch(err => {
               console.error(`[activegraph-client] Batch ingest failed:`, err);
