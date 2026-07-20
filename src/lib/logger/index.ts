@@ -1,12 +1,20 @@
 import pino from 'pino';
 
-const rootLogger = pino({
+const isProd = process.env.NODE_ENV === 'production';
+
+const rootLogger = isProd ? pino({
   level: process.env.LOG_LEVEL || 'info',
-  ...(process.env.NODE_ENV !== 'production' && {
-    transport: {
-      target: 'pino-pretty',
-    },
-  }),
+}) : pino({
+  level: process.env.LOG_LEVEL || 'info',
+  transport: {
+    targets: [
+      { target: 'pino-pretty', options: {} },
+      {
+        target: 'pino/file',
+        options: { destination: './worker.log', mkdir: true }
+      }
+    ]
+  }
 });
 
 export function createLogger(module: string) {

@@ -4,13 +4,12 @@ import { redis } from '@/lib/redis/client';
 import { toJsonValue } from '@/lib/prisma/json';
 import { createLogger } from '@/lib/logger';
 import { buildJobRequirements, type SourcingJobContextInput } from './jd-digest';
-import { rankCandidates } from './ranking';
+import { rankCandidates } from './ranking-new';
 import { discoverCandidates, type DiscoveredCandidate, type DiscoveryTelemetry } from './discovery';
 import { getLocationBoostWeight, getSourcingConfig } from './config';
-import { createEnrichmentSession } from '@/lib/enrichment/queue';
-import { isMeaningfulLocation, isNoisyLocationHint, canonicalizeLocation, extractPrimaryCity, compareFitWithConfidence, STRONG_LOCATION_TYPES } from './ranking';
+import { isMeaningfulLocation, isNoisyLocationHint, canonicalizeLocation, extractPrimaryCity, compareFitWithConfidence, STRONG_LOCATION_TYPES } from './ranking-new';
 import { getRecentlyExposedCandidateIds } from './novelty';
-import type { CandidateForRanking, FitBreakdown, MatchTier, LocationMatchType, ScoredCandidate } from './ranking';
+import type { CandidateForRanking, FitBreakdown, MatchTier, LocationMatchType, ScoredCandidate } from './ranking-new';
 import type { TrackDecision } from './types';
 import { jobTrackToDbFilter } from './types';
 import { guardedTopKSwap } from './top20-guards';
@@ -34,16 +33,19 @@ import {
   extractSerpSignals,
 } from '@/lib/search/serp-signals';
 
+import {
+  logSourcingRaw,
+  logRankingResult,
+  resetPipelineLogTimers,
+} from './debug-pipeline-logs';
+
 const log = createLogger('SourcingOrchestrator');
 
 export interface OrchestratorResult {
   candidateCount: number;
-  enrichedCount: number;
   poolCount: number;
   discoveredCount: number;
   discoveryShortfallRate: number; // 0.0 = no shortfall, 1.0 = total miss (0 when no discovery needed)
-  autoEnrichQueued: number;
-  staleRefreshQueued: number;
   queriesExecuted: number;
   qualityGateTriggered: boolean;
   avgFitTopK: number;
@@ -56,7 +58,7 @@ export interface OrchestratorResult {
   discoveryTelemetry: DiscoveryTelemetry | null;
   snapshotReuseCount: number;
   snapshotStaleServedCount: number;
-  snapshotRefreshQueuedCount: number;
+
   strictMatchedCount: number;
   expandedCount: number;
   expansionReason: 'insufficient_strict_location_matches' | 'strict_low_quality' | null;
@@ -83,9 +85,7 @@ export interface OrchestratorResult {
   noveltyWindowDays: number;
   noveltyKey: string | null;
   noveltyHint: string | null;
-  discoveredEnrichedCount: number;
   discoveredOrphanCount: number;
-  discoveredOrphanQueued: number;
   dynamicQueryBudgetUsed: boolean;
   minDiscoveryPerRunApplied: number;
   minDiscoveredInOutputApplied: number;
@@ -139,7 +139,6 @@ interface AssembledCandidate {
   matchTier: MatchTier | null;
   locationMatchType: LocationMatchType | null;
   sourceType: string;
-  enrichmentStatus: string;
   dataConfidence: 'high' | 'medium' | 'low';
   rank: number;
 }
@@ -219,6 +218,32 @@ export async function runSourcingOrchestrator(
   const config = getSourcingConfig();
   const requirements = buildJobRequirements(jobContext);
 
+  const sendProgressCallback = async (event: string, eventData: any = {}) => {
+    try {
+      const r = await prisma.jobSourcingRequest.findUnique({
+        where: { id: requestId },
+        select: { callbackUrl: true, externalJobId: true }
+      });
+      if (r?.callbackUrl) {
+        const { deliverCallback } = await import('./callback');
+        await deliverCallback(requestId, tenantId, r.callbackUrl, {
+          version: 1,
+          requestId,
+          externalJobId: r.externalJobId,
+          status: 'partial',
+          candidateCount: 0,
+          event: event as any,
+          candidateData: eventData
+        }, false);
+      }
+    } catch (err) {
+      log.error({ err, event }, 'Failed to send progress callback');
+    }
+  };
+
+  await sendProgressCallback('phase_started');
+
+
   log.info(
     {
       requestId,
@@ -230,6 +255,9 @@ export async function runSourcingOrchestrator(
     },
     'Starting orchestrator',
   );
+
+  // Reset per-run debug log timers
+  resetPipelineLogTimers();
 
   // 1. Query tenant pool (capped at 5000 most recent)
   const snapshotTrackFilter = jobTrackToDbFilter(trackDecision?.track);
@@ -282,6 +310,7 @@ export async function runSourcingOrchestrator(
         computedAt: Date;
         staleAfter: Date;
       }>;
+      searchMeta: Prisma.JsonValue | null;
     },
   ): CandidateForRanking => {
     const latestTechSnap = row.intelligenceSnapshots.find((s) => s.track === 'tech') ?? null;
@@ -299,24 +328,60 @@ export async function runSourcingOrchestrator(
       searchSnippet: row.searchSnippet,
       enrichmentStatus: row.enrichmentStatus,
       lastEnrichedAt: row.lastEnrichedAt,
+      crustdata: (row.searchMeta as any)?.crustdata ?? null,
       snapshot: selectedSnapshot
         ? {
-            skillsNormalized: selectedSnapshot.skillsNormalized,
-            roleType: selectedSnapshot.roleType,
-            seniorityBand: selectedSnapshot.seniorityBand,
-            location: selectedSnapshot.location,
-            activityRecencyDays: selectedSnapshot.activityRecencyDays ?? null,
-            computedAt: selectedSnapshot.computedAt,
-            staleAfter: selectedSnapshot.staleAfter,
-          }
+          skillsNormalized: selectedSnapshot.skillsNormalized,
+          roleType: selectedSnapshot.roleType,
+          seniorityBand: selectedSnapshot.seniorityBand,
+          location: selectedSnapshot.location,
+          activityRecencyDays: selectedSnapshot.activityRecencyDays ?? null,
+          computedAt: selectedSnapshot.computedAt,
+          staleAfter: selectedSnapshot.staleAfter,
+        }
         : null,
     };
   };
 
   // 2. Rank pool candidates
   const poolForRanking: CandidateForRanking[] = poolRows.map((r) => toRankingCandidate(r));
-  const hasLocationConstraint = Boolean(requirements.location?.trim());
   const poolForRankingById = new Map(poolForRanking.map((r) => [r.id, r]));
+
+  // 2.5 ActiveGraph Home Pool Search
+  const { generateTagsFromJD, searchHomePool } = await import('./activegraph-client');
+  const homeTags = generateTagsFromJD(requirements);
+  let homeCandidates: any[] = [];
+  try {
+    // Search ActiveGraph for candidates matching the JD tags
+    homeCandidates = await searchHomePool(homeTags, tenantId, 300);
+    log.info({ requestId, tags: homeTags, found: homeCandidates.length }, 'ActiveGraph home pool searched');
+  } catch (err) {
+    log.error({ err }, 'Failed to search ActiveGraph home pool');
+  }
+
+  // Merge ActiveGraph candidates into the pool for ranking if they aren't already there
+  let addedFromHome = 0;
+  for (const hc of homeCandidates) {
+    if (!poolForRankingById.has(hc.signal_candidate_id)) {
+      const mappedCandidate: CandidateForRanking = {
+        id: hc.signal_candidate_id,
+        headlineHint: hc.profile?.basic_profile?.headline ?? null,
+        locationHint: hc.profile?.basic_profile?.location?.full_location ?? null,
+        searchTitle: null,
+        searchSnippet: null,
+        enrichmentStatus: 'completed',
+        lastEnrichedAt: new Date(),
+        crustdata: hc.profile, // Map the full Crustdata blob for the ranker
+        snapshot: null,
+      };
+      poolForRanking.push(mappedCandidate);
+      poolForRankingById.set(mappedCandidate.id, mappedCandidate);
+      addedFromHome++;
+    }
+  }
+  log.info({ requestId, addedFromHome, totalPool: poolForRanking.length }, 'Merged ActiveGraph candidates into ranking pool');
+
+  const hasLocationConstraint = Boolean(requirements.location?.trim());
   const requestedCountryCode = config.countryGuardEnabled && hasLocationConstraint
     ? deriveCountryCodeFromLocationText(requirements.location)
     : null;
@@ -459,10 +524,7 @@ export async function runSourcingOrchestrator(
 
   const scoredPoolRaw = rankCandidates(poolForRanking, requirements, {
     fitScoreEpsilon: config.fitScoreEpsilon,
-    locationBoostWeight: getLocationBoostWeight(config, trackDecision?.track),
     track: trackDecision?.track,
-    preResolvedRoles: poolPreResolvedRoles,
-    preResolvedLocations: poolPreResolvedLocations,
   });
   const countryGuardFilteredCandidateIds = new Set<string>();
   let countryGuardSerpLocaleSkippedCount = 0;
@@ -552,7 +614,7 @@ export async function runSourcingOrchestrator(
   const poolWithLocation = scoredPool.filter((sc) => {
     const poolCandidate = poolForRankingById.get(sc.candidateId);
     return hasMeaningfulLocation(poolCandidate?.snapshot?.location) ||
-           hasMeaningfulLocation(poolCandidate?.locationHint);
+      hasMeaningfulLocation(poolCandidate?.locationHint);
   }).length;
   const poolLocationCoverage = scoredPool.length > 0
     ? poolWithLocation / scoredPool.length
@@ -579,8 +641,6 @@ export async function runSourcingOrchestrator(
     locationCoverageTriggered;
 
   // 3. Discovery decision (deficit and/or low quality)
-  const enrichedCandidates = scoredPool.filter((sc) => poolById.get(sc.candidateId)?.enrichmentStatus === 'completed');
-  const enrichedCount = enrichedCandidates.length;
 
   // Compute pool role-match quality for non-tech/blended track
   let poolRoleMismatchRate = 0;
@@ -661,8 +721,7 @@ export async function runSourcingOrchestrator(
   let dynamicQueryBudgetUsed = false;
 
   if (desiredDiscoveryTarget > 0) {
-    const aggressive = enrichedCount < config.minGoodEnough;
-    discoveryTarget = aggressive ? Math.min(desiredDiscoveryTarget, config.jobMaxEnrich) : desiredDiscoveryTarget;
+    discoveryTarget = desiredDiscoveryTarget;
     dynamicQueryBudgetUsed =
       (qualityGateTriggered || effectiveStrategy === 'discovery_first') &&
       config.dynamicQueryMultiplier > 1;
@@ -690,7 +749,6 @@ export async function runSourcingOrchestrator(
         {
           requestId,
           poolSize,
-          enrichedCount,
           poolDeficit,
           qualityGateTriggered,
           avgFitTopK: Number(avgFitTopK.toFixed(3)),
@@ -699,41 +757,468 @@ export async function runSourcingOrchestrator(
           discoveryReason,
           discoveryTarget,
           maxQueries: budget.maxQueries,
-          aggressive,
         },
         'Starting discovery',
       );
 
       let usedQueries = 0;
       try {
-        const discovery = await discoverCandidates(
-          tenantId,
-          requirements,
-          discoveryTarget,
-          existingLinkedinIds,
-          budget.maxQueries,
-          { config, track: trackDecision?.track },
-        );
+        let discovery: any = null;
+        let crustDataSucceeded = false;
+        // Enrichment candidates: primary top 100 + ordered reserve list
+        let crustdataPrimaryList: any[] = [];
+        let crustdataReserveList: any[] = [];
+
+        try {
+          console.log('\n' + '🔍'.repeat(20));
+          console.log('🚀 [ORCHESTRATOR] INITIATING PRIMARY DISCOVERY (CRUSTDATA SCREENER)');
+          console.log('📋 [ORCHESTRATOR] STRATEGY: Screener flat schema → 240 profiles with skills/emails → rank locally → top 100');
+          await sendProgressCallback('crustdata_fetching');
+          const { searchPeople } = await import('./crustdata-client');
+          const crustProfiles = await searchPeople(requirements, 300);
+          crustDataSucceeded = true;
+
+          if (crustProfiles.length > 0) {
+            logSourcingRaw(requestId, crustProfiles);
+            await sendProgressCallback('ranking_started');
+            console.log(`✨ [ORCHESTRATOR] CRUSTDATA FOUND ${crustProfiles.length} CANDIDATES! RANKING LOCALLY...`);
+
+            const { extractLinkedInIdFromUrl } = await import('./discovery');
+
+            // Map to rankable shape — URL as temp ID.
+            // Actual Crustdata /person/search uses NESTED schema (basic_profile, social_handles,
+            // experience.employment_details). Flat schema fields are checked first as a fallback
+            // so this code works even if the endpoint changes.
+            const mappedForRanking = crustProfiles.map((p: any) => {
+              // ── URL ──────────────────────────────────────────────────────────
+              // Prefer the clean slug; flat schema has flagship_profile_url, nested uses social_handles.
+              const url = p.flagship_profile_url
+                || p.social_handles?.professional_network_identifier?.profile_url
+                || p.linkedin_profile_url
+                || '';
+
+              // ── Core fields: flat first, nested fallback ──────────────────
+              const name = p.name || p.basic_profile?.name || '';
+              const headline = p.headline || p.basic_profile?.headline || '';
+              const location = typeof p.location === 'string'
+                ? p.location
+                : [
+                  p.basic_profile?.location?.city,
+                  p.basic_profile?.location?.state,
+                  p.basic_profile?.location?.country,
+                ].filter(Boolean).join(', ')
+                || p.basic_profile?.location?.raw
+                || '';
+
+              // ── Profile picture ──────────────────────────────────────────
+              // Live API returns it at basic_profile.profile_picture_permalink
+              // Legacy flat schema fallback: profile_picture_url
+              const profilePictureUrl: string | null =
+                p.basic_profile?.profile_picture_permalink
+                ?? p.profile_picture_url
+                ?? null;
+
+              // ── Employment ───────────────────────────────────────────────
+              // Nested: experience.employment_details.{current, past}[]
+              //   company name is in .name (NOT .company_name)
+              //   rich description is in .description
+              // Flat: employer[]
+              let employerFlat: any[] = Array.isArray(p.employer) ? p.employer : [];
+              const currentJobNested = p.experience?.employment_details?.current?.[0];
+              const pastJobsNested: any[] = p.experience?.employment_details?.past ?? [];
+
+              if (employerFlat.length === 0) {
+                const currentJobs = p.experience?.employment_details?.current || [];
+                employerFlat = [
+                  ...currentJobs.map((j: any) => ({ ...j, company_name: j.name, is_current: true })),
+                  ...pastJobsNested.map((j: any) => ({ ...j, company_name: j.name, is_current: false }))
+                ];
+              }
+
+              const currentJob = employerFlat.find((j: any) => j.is_current)
+                || employerFlat[0]
+                || currentJobNested;
+
+              // ── Education ────────────────────────────────────────────────
+              let educationBg: any[] = Array.isArray(p.education_background) ? p.education_background : [];
+              const schools: any[] = p.education?.schools ?? [];
+
+              if (educationBg.length === 0 && schools.length > 0) {
+                educationBg = schools.map((s: any) => ({
+                  institute_name: s.school,
+                  degree_name: s.degree,
+                  field_of_study: s.field_of_study
+                }));
+              }
+
+              // ── Rich text snippet ────────────────────────────────────────
+              // Includes full job descriptions — the #1 signal for tech skill matching.
+              // These descriptions contain the complete tech stack (e.g. "AWS · Kubernetes · Terraform")
+              // which dramatically improves skill scoring vs. headline-only extraction.
+              const snippetParts: string[] = [headline];
+
+              if (employerFlat.length > 0) {
+                // Flat schema
+                for (const job of employerFlat.slice(0, 5)) {
+                  if (job.title) snippetParts.push(job.title);
+                  if (job.company_name) snippetParts.push(job.company_name);
+                  if (job.description) snippetParts.push(job.description.substring(0, 400));
+                }
+              } else {
+                // Nested schema (actual Crustdata API)
+                if (currentJobNested) {
+                  snippetParts.push(currentJobNested.title || '');
+                  snippetParts.push(currentJobNested.name || ''); // company name
+                  if (currentJobNested.description)
+                    snippetParts.push(currentJobNested.description.substring(0, 400));
+                }
+                for (const job of pastJobsNested.slice(0, 4)) {
+                  if (job.title) snippetParts.push(job.title);
+                  if (job.name) snippetParts.push(job.name); // company name
+                  if (job.description) snippetParts.push(job.description.substring(0, 300));
+                }
+              }
+
+              for (const edu of educationBg.slice(0, 2)) {
+                if (edu.institute_name) snippetParts.push(edu.institute_name);
+                if (edu.degree_name) snippetParts.push(edu.degree_name);
+              }
+              for (const s of schools.slice(0, 2)) {
+                if (s.school) snippetParts.push(s.school);
+                if (s.degree) snippetParts.push(s.degree);
+              }
+
+              // ── Skills ──────────────────────────────────────────────────
+              // Person Search does NOT return skills (requires Person Enrich).
+              // We extract skills by keyword-matching JD topSkills against job descriptions.
+              const rawSkillsFlat: string[] = [];
+              const searchSnippetText = snippetParts.filter(Boolean).join(' | ');
+
+              const extractedFromDescriptions: string[] = rawSkillsFlat.length === 0
+                ? (requirements.topSkills ?? []).filter((skill: string) => {
+                  const escaped = skill.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                  return new RegExp(escaped, 'i').test(searchSnippetText);
+                })
+                : [];
+
+              const crustdataSkills: string[] = rawSkillsFlat.length > 0
+                ? rawSkillsFlat
+                : extractedFromDescriptions;
+
+              const skillsNormalized: string[] = crustdataSkills.map((s: string) => s.toLowerCase().trim()).filter(Boolean);
+              const uniqueSkillsNormalized = [...new Set(skillsNormalized)];
+
+              // ── Emails (screener provides these directly) ─────────────────
+              const emails: string[] = Array.isArray(p.emails) ? (p.emails as string[]).filter(Boolean) : [];
+
+              // ── LinkedIn summary (about section) ─────────────────────────
+              const crustdataSummary: string = typeof (p as any).summary === 'string'
+                ? (p as any).summary
+                : (p.basic_profile?.summary || '');
+
+              // ── Company name ────────────────────────────────────────────
+              const companyHint: string | null =
+                employerFlat[0]?.company_name
+                ?? currentJobNested?.name
+                ?? null;
+
+              return {
+                // ── CandidateForRanking fields ──────────────────────────
+                id: url,
+                headlineHint: headline,
+                locationHint: location,
+                searchTitle: (currentJob?.title || currentJob?.name) || headline,
+                searchSnippet: searchSnippetText,
+                enrichmentStatus: 'pending',
+                lastEnrichedAt: null as Date | null,
+                // Populate snapshot when skills are available → ranker uses "snapshot" path.
+                snapshot: uniqueSkillsNormalized.length > 0 ? {
+                  skillsNormalized: uniqueSkillsNormalized,
+                  roleType: null,
+                  seniorityBand: null,
+                  location,
+                  activityRecencyDays: null as number | null,
+                  computedAt: new Date(),
+                  staleAfter: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+                } : null,
+                // ── Extra fields for DB write (not used by ranker) ─────
+                linkedinUrl: url,
+                name,
+                companyHint,
+                profilePictureUrl,
+                crustdata: p,
+              };
+            }).filter((p: any) => p.linkedinUrl);
+
+
+            // Combine ActiveGraph/Pool candidates with fresh Crustdata candidates
+            // Filter out pool candidates that we just fetched from Crustdata to avoid duplicates
+            const fetchedCrustdataIds = new Set(mappedForRanking.map(c => c.id));
+            const activeGraphAndPool = poolForRanking.filter(c => !fetchedCrustdataIds.has(c.id));
+            const combinedForRanking = [...activeGraphAndPool, ...mappedForRanking];
+
+            // Local ranking against full JD
+            const locationBoostWeight = getLocationBoostWeight(config, trackDecision?.track);
+            const scored = rankCandidates(combinedForRanking, requirements, {
+              fitScoreEpsilon: config.fitScoreEpsilon,
+              track: trackDecision?.track,
+            });
+
+            console.log(`📊 [ORCHESTRATOR] LOCAL RANKING DONE — ${scored.length} candidates scored`);
+            console.log(`🥇 [ORCHESTRATOR] TOP fit score: ${scored[0]?.fitScore?.toFixed(3) ?? 'N/A'}`);
+            console.log(`📉 [ORCHESTRATOR] #100 fit score: ${scored[99]?.fitScore?.toFixed(3) ?? 'N/A'}`);
+
+            // ── Rank first (CPU-only, ~1s), then upsert only top 100 ──────────
+            // Previously all 300 were upserted BEFORE ranking: 20 sequential
+            // batches × ~2s Railway RTT = ~40s wasted. Now we rank in-memory
+            // first and only write the 100 we actually serve (7 batches ≈ 14s).
+            const profileByUrl = new Map(mappedForRanking.map((p) => [p.id, p]));
+
+            // ── Ingest all Crustdata profiles to ActiveGraph (Background) ──────────
+            const { ingestCandidate, generateTagsFromCandidate } = await import('./activegraph-client');
+            Promise.all(mappedForRanking.map(async (candidate) => {
+              const tags = generateTagsFromCandidate(candidate);
+              return ingestCandidate(tenantId, candidate, tags, requestId);
+            })).then(results => {
+              const successCount = results.filter(Boolean).length;
+              console.log(`📡 [ORCHESTRATOR] INGESTED ${successCount}/${mappedForRanking.length} TO ACTIVEGRAPH (Async)`);
+            }).catch(err => {
+              console.error(`[activegraph-client] Batch ingest failed:`, err);
+            });
+
+            // Build top-100 profiles for DB write (ranked order already in `scored`)
+            const top100Profiles = scored.slice(0, 100).map((sc) => {
+              const p = profileByUrl.get(sc.candidateId);
+              if (!p) return null; // Was from pool/ActiveGraph, already in DB
+              return {
+                title: p.searchTitle || '',
+                snippet: p.searchSnippet || '',
+                linkedinUrl: p.linkedinUrl,
+                linkedinId: extractLinkedInIdFromUrl(p.linkedinUrl) || '',
+                name: p.name,
+                headline: p.headlineHint,
+                location: p.locationHint || '',
+                companyHint: (p as any).companyHint ?? undefined,
+                profilePictureUrl: (p as any).profilePictureUrl ?? undefined,
+                crustdata: (p as any).crustdata,
+              };
+            }).filter((p): p is NonNullable<typeof p> => p !== null && !!p.linkedinId);
+
+            const { upsertDiscoveredCandidates } = await import('./upsert-candidates');
+            const candidateMap = await upsertDiscoveredCandidates(tenantId, top100Profiles, 'crustdata_query', 'crustdata');
+
+            console.log(`💾 [ORCHESTRATOR] UPSERTED ${candidateMap.size} CANDIDATES TO DB`);
+
+            const allRankedWithIds = scored.slice(0, 100).map((sc) => {
+              const profile = profileByUrl.get(sc.candidateId);
+              const poolCandidate = poolForRankingById.get(sc.candidateId);
+              
+              const linkedinUrl = profile?.linkedinUrl || poolCandidate?.id || '';
+              const linkedinId = extractLinkedInIdFromUrl(linkedinUrl);
+              const dbId = profile && linkedinId ? candidateMap.get(linkedinId) : poolCandidate?.id;
+
+              return {
+                candidateId: dbId || '',
+                linkedinUrl: linkedinUrl,
+                name: profile?.name || '',
+                headlineHint: profile?.headlineHint || poolCandidate?.headlineHint || '',
+                locationHint: profile?.locationHint || poolCandidate?.locationHint || '',
+                fitScore: sc.fitScore,
+                matchTier: sc.matchTier,
+                locationMatchType: sc.locationMatchType,
+                fitBreakdown: sc.fitBreakdown,
+              };
+            }).filter((c) => c.candidateId);
+
+            crustdataPrimaryList = allRankedWithIds;
+            crustdataReserveList = []; // reserve never served — skip DB write
+
+            logRankingResult(requestId, crustdataPrimaryList, crustdataReserveList);
+
+            console.log(`✅ [ORCHESTRATOR] PRIMARY LIST: ${crustdataPrimaryList.length} candidates`);
+            console.log(`📦 [ORCHESTRATOR] RESERVE LIST: ${crustdataReserveList.length} candidates`);
+
+            // Enrichment + reranking removed: the initial ranking already uses the full
+            // sourcing signal bag (headline + current/past roles + companies + education).
+            // This saves Crustdata enrichment credits and eliminates the loading time hit.
+
+            const discovered = allRankedWithIds.map((c) => ({
+              candidateId: c.candidateId,
+              linkedinId: extractLinkedInIdFromUrl(c.linkedinUrl) || '',
+              queryIndex: 0,
+            }));
+
+            discovery = {
+              candidates: discovered,
+              queriesExecuted: 1,
+              queriesBuilt: 1,
+              telemetry: { queryRuns: [] },
+            };
+            console.log(`✅ [ORCHESTRATOR] MAPPED ${discovered.length} CANDIDATES FROM CRUSTDATA`);
+          } else {
+            console.log('⚠️ [ORCHESTRATOR] CRUSTDATA RETURNED 0 RESULTS');
+            discovery = { candidates: [], queriesExecuted: 1, queriesBuilt: 1, telemetry: { queryRuns: [] } };
+          }
+        } catch (err) {
+          log.error({ err }, 'Crustdata discovery failed, falling back to Serper');
+          console.error('❌ [ORCHESTRATOR] CRUSTDATA FAILED:', err instanceof Error ? err.message : err);
+        }
+
+        // Fallback to Serper ONLY if Crustdata threw (connection failure)
+        if (!crustDataSucceeded) {
+          console.log('🔄 [ORCHESTRATOR] FALLING BACK TO SERPER (CRUSTDATA FAILED TO CONNECT)');
+          discovery = await discoverCandidates(
+            tenantId,
+            requirements,
+            discoveryTarget,
+            existingLinkedinIds,
+            budget.maxQueries,
+            { config, track: trackDecision?.track },
+          );
+        } else {
+          console.log('🛑 [ORCHESTRATOR] CRUSTDATA RESPONDED — SKIPPING SERPER FALLBACK');
+          const finalAssembled: AssembledCandidate[] = crustdataPrimaryList.map((sc, index) => {
+            return {
+              candidateId: sc.candidateId,
+              name: sc.name || '',
+              headlineHint: sc.headlineHint || '',
+              locationHint: sc.locationHint || '',
+              sourceType: 'crustdata_query',
+              matchTier: sc.matchTier,
+              locationMatchType: sc.locationMatchType,
+              fitScore: sc.fitScore,
+              fitBreakdown: sc.fitBreakdown,
+              rank: index + 1,
+              enrichmentStatus: 'pending',
+              dataConfidence: 'medium',
+            };
+          });
+
+          await sendProgressCallback('pipeline_complete');
+
+          // Delete any existing JobSourcingCandidate records for retry idempotency
+          await prisma.$transaction([
+            prisma.jobSourcingCandidate.deleteMany({
+              where: { sourcingRequestId: requestId },
+            }),
+            prisma.jobSourcingCandidate.createMany({
+              data: finalAssembled.map((a) => ({
+                tenantId,
+                sourcingRequestId: requestId,
+                candidateId: a.candidateId,
+                fitScore: a.fitScore,
+                fitBreakdown: a.fitBreakdown
+                  ? toJsonValue({ ...a.fitBreakdown, matchTier: a.matchTier, locationMatchType: a.locationMatchType, dataConfidence: a.dataConfidence })
+                  : toJsonValue({ matchTier: a.matchTier, locationMatchType: a.locationMatchType, dataConfidence: a.dataConfidence }),
+                sourceType: a.sourceType, enrichmentStatus: 'pending', rank: a.rank,
+              })),
+            }),
+          ]);
+
+          console.log(`💾 [ORCHESTRATOR] PERSISTED ${finalAssembled.length} ENRICHED CANDIDATES TO JOBSOURCINGCANDIDATES!`);
+
+          const avgFitTopK = finalAssembled.length > 0
+            ? finalAssembled.reduce((sum, c) => sum + (c.fitScore ?? 0), 0) / finalAssembled.length
+            : 0;
+
+          const result: OrchestratorResult = {
+            discoveredCount: finalAssembled.length,
+            discoveryShortfallRate: 0,
+            candidateCount: finalAssembled.length,
+            poolCount: 0,
+            queriesExecuted: 1,
+            qualityGateTriggered: false,
+            avgFitTopK: Number(avgFitTopK.toFixed(4)),
+            countAboveThreshold: finalAssembled.length,
+            strictTopKCount: finalAssembled.length,
+            strictCoverageRate: 1.0,
+            effectiveStrategy: 'discovery_first',
+            discoveryReason: 'strategy_discovery_first',
+            discoverySkippedReason: null,
+            discoveryTelemetry: { queryRuns: [] } as any,
+            snapshotReuseCount: 0,
+            snapshotStaleServedCount: 0,
+            strictMatchedCount: finalAssembled.length,
+            expandedCount: 0,
+            expansionReason: null,
+            requestedLocation: requirements.location,
+            skillScoreDiagnostics: { withSnapshotSkills: 1.0, usingTextFallback: 0, avgSkillScoreBySourceType: {} },
+            locationHintCoverage: 1.0,
+            strictDemotedCount: 0,
+            strictRescuedCount: 0,
+            strictRescueApplied: false,
+            strictRescueMinFitScoreUsed: null,
+            locationMatchCounts: { city_exact: 0, city_alias: 0, country_only: 0, unknown_location: 0, none: 0 },
+            demotedStrictWithCityMatch: 0,
+            strictBeforeDemotion: 0,
+            countryGuardFilteredCount: 0,
+            countryGuardSerpLocaleSkippedCount: 0,
+            countryGuardEscapeCounts: { totalEscaped: 0, cityAliasEscaped: 0, serpLocaleEscaped: 0 } as any,
+            selectedSnapshotTrack,
+            locationCoverageTriggered: false,
+            noveltySuppressedCount: 0,
+            noveltyWindowDays: config.noveltyWindowDays,
+            noveltyKey: null,
+            noveltyHint: null,
+            discoveredOrphanCount: 0,
+
+            dynamicQueryBudgetUsed: false,
+            minDiscoveryPerRunApplied: 0,
+            minDiscoveredInOutputApplied: 0,
+            discoveredPromotedCount: finalAssembled.length,
+            discoveredPromotedInTopCount: finalAssembled.length,
+            unknownLocationPromotedCount: 0,
+            discoveredPromotionRejections: { total: 0, locationGate: 0, fitGate: 0, roleGate: 0, confidence: 0, phase: 0, unknownCap: 0 },
+            discoveredDeferredFromFrontLoad: 0,
+            unknownLocationAssemblyCapRejected: 0,
+            unknownLocationPoolCapRejected: 0,
+            unknownLocationPoolAssembledCount: 0,
+            unknownLocationDiscoveredAssembledCount: 0,
+            unknownLocationPenaltyApplied: 0,
+            unknownLocationPoolPenaltyApplied: 0,
+            unknownLocationTop20DemotedInitial: 0,
+            unknownLocationTop20DemotedFinal: 0,
+            roleGuardTop20Demoted: 0,
+            roleGuardNoReplacementCount: 0,
+            roleGuardEpsilonBlockedCount: 0,
+            skillFloorTop20Demoted: 0,
+            skillFloorBypassCount: 0,
+            skillFloorNoReplacementCount: 0,
+            skillFloorEpsilonBlockedCount: 0,
+            eligibleTechRoleCount: finalAssembled.length,
+            eligibleTechSkillCount: finalAssembled.length,
+            preGuardLowRoleTop20: 0,
+            preGuardLowSkillTop20: 0,
+            postGuardLowRoleTop20: 0,
+            postGuardLowSkillTop20: 0,
+            techTop20Thresholds: null,
+            roleResolutionMetrics: { totalInputs: 0, cacheHits: 0, groqCalls: 0, groqTokensUsed: 0, durationMs: 0 } as any,
+            locationResolutionMetrics: { totalInputs: 0, cacheHits: 0, groqCalls: 0, groqTokensUsed: 0, durationMs: 0 } as any,
+          };
+
+          log.info({ requestId, resolvedTrack: trackDecision?.track ?? null, ...result }, 'Orchestrator complete via Crustdata direct sync pathway');
+          return result;
+        }
 
         discoveredCount = discovery.candidates.length;
-        discoveredCandidateIds = discovery.candidates.map((d) => d.candidateId);
+        discoveredCandidateIds = discovery.candidates.map((d: any) => d.candidateId);
         queriesExecuted = discovery.queriesExecuted;
         discoveryTelemetry = discovery.telemetry;
         usedQueries = queriesExecuted;
 
         // Build strict/fallback phase query index lookup from discovery telemetry
-        const strictQueryIndices = new Set(
+        const strictQueryIndices = new Set<number>(
           discovery.telemetry.queryRuns
-            .filter(qr => qr.phase === 'strict')
-            .map(qr => qr.queryIndex)
+            .filter((qr: any) => qr.phase === 'strict')
+            .map((qr: any) => qr.queryIndex)
         );
-        const fallbackQueryIndices = new Set(
+        const fallbackQueryIndices = new Set<number>(
           discovery.telemetry.queryRuns
-            .filter(qr => qr.phase === 'fallback')
-            .map(qr => qr.queryIndex)
+            .filter((qr: any) => qr.phase === 'fallback')
+            .map((qr: any) => qr.queryIndex)
         );
         const discoveredCandidateByIdMap = new Map<string, DiscoveredCandidate>(
-          discovery.candidates.map(dc => [dc.candidateId, dc])
+          discovery.candidates.map((dc: any) => [dc.candidateId, dc])
         );
         const fallbackProvisionalFitFloor = trackDecision?.track === 'tech' ? 0.35 : 0.30;
         const fallbackProvisionalMinFitScore = Math.min(config.discoveredPromotionMinFitScore, fallbackProvisionalFitFloor);
@@ -746,6 +1231,7 @@ export async function runSourcingOrchestrator(
         if (discoveredCandidateIds.length > 0) {
           const discoveredRows = await prisma.candidate.findMany({
             where: { id: { in: discoveredCandidateIds } },
+
             select: {
               id: true,
               headlineHint: true,
@@ -850,10 +1336,7 @@ export async function runSourcingOrchestrator(
 
           const scoredDiscovered = rankCandidates(discoveredForRanking, requirements, {
             fitScoreEpsilon: config.fitScoreEpsilon,
-            locationBoostWeight: getLocationBoostWeight(config, trackDecision?.track),
             track: trackDecision?.track,
-            preResolvedRoles: discoveredPreResolvedRoles,
-            preResolvedLocations: discoveredPreResolvedLocations,
           });
 
           // Penalize discovered unknown_location candidates that don't clear quality thresholds
@@ -953,7 +1436,7 @@ export async function runSourcingOrchestrator(
               if (provisionalConfidenceRejected) discoveredPromotionRejections.confidence++;
               if (provisionalPhaseRejected) discoveredPromotionRejections.phase++;
               if (isUnknownLocation && roleGate && sc.fitScore >= unknownLaneFitFloor &&
-                  unknownLocationPromotedCount >= maxUnknownPromoted) {
+                unknownLocationPromotedCount >= maxUnknownPromoted) {
                 discoveredPromotionRejections.unknownCap++;
               }
             }
@@ -981,14 +1464,13 @@ export async function runSourcingOrchestrator(
   // 4. Two-tier assembly: strict location first, expanded second (never interleaved)
   const assembled: AssembledCandidate[] = [];
   const assembledIds = new Set<string>();
-  const enrichedIds = new Set(enrichedCandidates.map((row) => row.candidateId));
   let rank = 1;
 
   const computeDataConfidence = (candidate: Omit<AssembledCandidate, 'rank' | 'dataConfidence'>): 'high' | 'medium' | 'low' => {
-    if (candidate.enrichmentStatus === 'completed' && candidate.fitBreakdown?.skillScoreMethod === 'snapshot') {
+    if (candidate.fitScore !== null && candidate.fitBreakdown?.skillScoreMethod === 'snapshot') {
       return 'high';
     }
-    if (candidate.fitScore !== null && (candidate.fitBreakdown?.skillScoreMethod === 'text_fallback' || (candidate.enrichmentStatus === 'completed' && candidate.fitBreakdown?.skillScoreMethod !== 'snapshot'))) {
+    if (candidate.fitScore !== null && candidate.fitBreakdown?.skillScoreMethod === 'text_fallback') {
       return 'medium';
     }
     return 'low';
@@ -1113,15 +1595,13 @@ export async function runSourcingOrchestrator(
   const pushPoolTier = (tier: typeof scoredPool, limit: number): void => {
     for (const sc of tier) {
       if (assembled.length >= limit) return;
-      const isEnriched = enrichedIds.has(sc.candidateId);
       pushCandidate({
         candidateId: sc.candidateId,
         fitScore: sc.fitScore,
         fitBreakdown: sc.fitBreakdown,
         matchTier: sc.matchTier,
         locationMatchType: sc.locationMatchType,
-        sourceType: isEnriched ? 'pool_enriched' : 'pool',
-        enrichmentStatus: isEnriched ? 'completed' : (poolById.get(sc.candidateId)?.enrichmentStatus ?? 'pending'),
+        sourceType: 'pool',
       });
     }
   };
@@ -1136,11 +1616,11 @@ export async function runSourcingOrchestrator(
   const discoveredRoleThreshold = trackDecision?.track === 'tech' ? 0.7 : 0.6;
   const promotedDiscoveredTopIds = (effectiveStrategy === 'discovery_first'
     ? // discovery_first: front-load all promoted discovered sorted by fit (not just strict_location)
-      promotedDiscoveredIdsOrdered
-        .filter((id) => (promotedDiscoveredById.get(id)?.fitBreakdown.roleScore ?? 0) >= discoveredRoleThreshold)
+    promotedDiscoveredIdsOrdered
+      .filter((id) => (promotedDiscoveredById.get(id)?.fitBreakdown.roleScore ?? 0) >= discoveredRoleThreshold)
     : // pool_first: only strict_location promoted
-      promotedDiscoveredIdsOrdered
-        .filter((id) => promotedDiscoveredById.get(id)?.matchTier === 'strict_location')
+    promotedDiscoveredIdsOrdered
+      .filter((id) => promotedDiscoveredById.get(id)?.matchTier === 'strict_location')
   ).slice(0, discoveredReservedInOutput);
 
   // Delta-based front-load for tech: only front-load discovered candidates
@@ -1187,7 +1667,6 @@ export async function runSourcingOrchestrator(
         matchTier: promoted.matchTier,
         locationMatchType: promoted.locationMatchType,
         sourceType: 'discovered',
-        enrichmentStatus,
       });
       return;
     }
@@ -1199,7 +1678,6 @@ export async function runSourcingOrchestrator(
       matchTier: scored?.matchTier ?? 'expanded_location',
       locationMatchType: scored?.locationMatchType ?? 'unknown_location',
       sourceType: 'discovered',
-      enrichmentStatus,
     });
   };
 
@@ -1331,8 +1809,7 @@ export async function runSourcingOrchestrator(
             fitBreakdown: sc.fitBreakdown,
             matchTier: sc.matchTier,
             locationMatchType: sc.locationMatchType,
-            sourceType: enrichedIds.has(sc.candidateId) ? 'pool_enriched' : 'pool',
-            enrichmentStatus: poolById.get(sc.candidateId)?.enrichmentStatus ?? 'pending',
+            sourceType: 'pool',
           });
         }
         for (const candidateId of discoveredFillOrder) {
@@ -1476,184 +1953,27 @@ export async function runSourcingOrchestrator(
           : a.matchTier
             ? toJsonValue({ matchTier: a.matchTier, locationMatchType: a.locationMatchType, dataConfidence: a.dataConfidence })
             : Prisma.JsonNull,
-        sourceType: a.sourceType,
-        enrichmentStatus: a.enrichmentStatus,
-        rank: a.rank,
+        sourceType: a.sourceType, enrichmentStatus: 'pending', rank: a.rank,
       })),
     }),
   ]);
 
-  // 6. Auto-enrich top N unenriched candidates (cross-run dedupe)
-  const candidateIdsToEnqueue = assembled
-    .filter((a) => a.enrichmentStatus !== 'completed')
-    .slice(0, config.initialEnrichCount)
-    .map((a) => a.candidateId);
-
-  const now = new Date();
-  const staleCandidateIds = poolForRanking
-    .filter((r) => r.snapshot?.staleAfter && r.snapshot.staleAfter < now)
-    .slice(0, config.staleRefreshMaxPerRun)
-    .map((r) => r.id);
-
-  const discoveredUnenriched = assembled
-    .filter((a) => a.sourceType === 'discovered' && a.enrichmentStatus !== 'completed')
-    .slice(0, config.discoveredEnrichReserve)
-    .map((a) => a.candidateId);
-  const discoveredOrphanCandidates = discoveredCandidateIds.filter((candidateId) => !assembledIds.has(candidateId));
-  const discoveredOrphanCandidateIds = discoveredOrphanCandidates
-    .slice(0, config.discoveredOrphanEnrichReserve);
-  const allPotentialIds = [...new Set([
-    ...candidateIdsToEnqueue,
-    ...staleCandidateIds,
-    ...discoveredUnenriched,
-    ...discoveredOrphanCandidateIds,
-  ])];
-  const candidateSearchMetaById = new Map<string, unknown>(
-    poolRows.map((row) => [row.id, row.searchMeta]),
-  );
-  if (candidateIdsToEnqueue.length > 0) {
-    const missingSearchMetaIds = candidateIdsToEnqueue.filter((id) => !candidateSearchMetaById.has(id));
-    if (missingSearchMetaIds.length > 0) {
-      const missingCandidates = await prisma.candidate.findMany({
-        where: { id: { in: missingSearchMetaIds } },
-        select: { id: true, searchMeta: true },
-      });
-      for (const candidate of missingCandidates) {
-        candidateSearchMetaById.set(candidate.id, candidate.searchMeta);
-      }
-    }
-  }
-  const activeSessions = allPotentialIds.length > 0
-    ? await prisma.enrichmentSession.findMany({
-        where: {
-          candidateId: { in: allPotentialIds },
-          tenantId,
-          status: { in: ['queued', 'running'] },
-        },
-        select: { candidateId: true },
-      })
-    : [];
-  const alreadyActiveIds = new Set(activeSessions.map((s) => s.candidateId));
-
-  const computeAutoEnrichPriority = (candidate: AssembledCandidate): number => {
-    const basePriority = 10 + (candidate.rank - 1); // rank 1 → 10
-    const searchMeta = candidateSearchMetaById.get(candidate.candidateId);
-    const evidence = computeSerpEvidence(searchMeta);
-    let adjustment = 0;
-
-    // Recency adjustment — maps evidence buckets to original adjustments:
-    //   fresh (≤30d, confidence ≥ 0.7): -3
-    //   recent (≤90d, confidence ≥ 0.55): -1
-    //   stale (>365d, has date): +2
-    if (evidence.hasResultDate) {
-      if (evidence.resultDateDays !== null && evidence.resultDateDays <= 30) adjustment -= 3;
-      else if (evidence.resultDateDays !== null && evidence.resultDateDays <= 90) adjustment -= 1;
-      else if (evidence.resultDateDays !== null && evidence.resultDateDays > 365) adjustment += 2;
-    }
-
-    // Location consistency via SERP locale
-    const locationConsistency = assessLocationCountryConsistency(
-      requirements.location,
-      evidence.localeCountryCode,
-    );
-    if (locationConsistency === 'match') adjustment -= 4;
-    else if (locationConsistency === 'mismatch') adjustment += 4;
-
-    // Discovered + unknown_location: boost priority so enrichment resolves ambiguity sooner
-    if (candidate.sourceType === 'discovered' && candidate.locationMatchType === 'unknown_location') {
-      adjustment -= 5;
-    }
-    // Pool + unknown_location: medium boost to improve location coverage in the reusable pool.
-    if ((candidate.sourceType === 'pool' || candidate.sourceType === 'pool_enriched') &&
-        candidate.locationMatchType === 'unknown_location') {
-      adjustment -= 3;
-    }
-
-    return Math.max(1, Math.min(99, basePriority + adjustment));
-  };
-
-  const enqueuedIds = new Set<string>();
-  let autoEnrichQueued = 0;
-  for (const a of assembled.filter((a) => a.enrichmentStatus !== 'completed').slice(0, config.initialEnrichCount)) {
-    if (alreadyActiveIds.has(a.candidateId) || enqueuedIds.has(a.candidateId)) continue;
-    try {
-      const priority = computeAutoEnrichPriority(a);
-      await createEnrichmentSession(tenantId, a.candidateId, { priority });
-      enqueuedIds.add(a.candidateId);
-      autoEnrichQueued++;
-    } catch (error) {
-      log.warn({ error, candidateId: a.candidateId, requestId }, 'Auto-enrich enqueue failed');
-    }
-  }
-
-  // 6b. Discovered enrichment reserve (additive, separate from top-N)
-  let discoveredEnrichedCount = 0;
-  for (const a of assembled.filter((a) => a.sourceType === 'discovered' && a.enrichmentStatus !== 'completed' && !enqueuedIds.has(a.candidateId))) {
-    if (discoveredEnrichedCount >= config.discoveredEnrichReserve) break;
-    if (alreadyActiveIds.has(a.candidateId)) continue;
-    try {
-      const unknownLocBoost = a.locationMatchType === 'unknown_location' ? -5 : 0;
-      const priority = Math.max(1, 30 + discoveredEnrichedCount + unknownLocBoost); // lower priority than rank-based (10+), higher than stale (50)
-      await createEnrichmentSession(tenantId, a.candidateId, { priority });
-      enqueuedIds.add(a.candidateId);
-      discoveredEnrichedCount++;
-    } catch (error) {
-      log.warn({ error, candidateId: a.candidateId, requestId }, 'Discovered enrich enqueue failed');
-    }
-  }
-
-  // 6c. Discovered orphan reserve (discovered this run but not assembled)
-  let discoveredOrphanQueued = 0;
-  for (const candidateId of discoveredOrphanCandidateIds) {
-    if (alreadyActiveIds.has(candidateId) || enqueuedIds.has(candidateId)) continue;
-    try {
-      const priority = 40 + discoveredOrphanQueued; // lower than in-output discovered reserve, above stale refresh
-      await createEnrichmentSession(tenantId, candidateId, { priority });
-      enqueuedIds.add(candidateId);
-      discoveredOrphanQueued++;
-    } catch (error) {
-      log.warn({ error, candidateId, requestId }, 'Discovered orphan enrich enqueue failed');
-    }
-  }
-
-  // 7. Stale-refresh queueing (separate budget)
-  let staleRefreshQueued = 0;
-  const scoredPoolById = new Map(scoredPool.map((sc) => [sc.candidateId, sc]));
-  const staleFromPool = poolForRanking
-    .filter((r) => r.snapshot?.staleAfter && r.snapshot.staleAfter < now && !enqueuedIds.has(r.id) && !alreadyActiveIds.has(r.id))
-    .sort((a, b) => {
-      const aUnknown = scoredPoolById.get(a.id)?.locationMatchType === 'unknown_location' ? 1 : 0;
-      const bUnknown = scoredPoolById.get(b.id)?.locationMatchType === 'unknown_location' ? 1 : 0;
-      if (aUnknown !== bUnknown) return bUnknown - aUnknown;
-      const aFit = scoredPoolById.get(a.id)?.fitScore ?? 0;
-      const bFit = scoredPoolById.get(b.id)?.fitScore ?? 0;
-      return bFit - aFit;
-    })
-    .slice(0, config.staleRefreshMaxPerRun);
-
-  for (const r of staleFromPool) {
-    try {
-      await createEnrichmentSession(tenantId, r.id, { priority: 50 });
-      enqueuedIds.add(r.id);
-      staleRefreshQueued++;
-    } catch (error) {
-      log.warn({ error, candidateId: r.id, requestId }, 'Stale-refresh enqueue failed');
-    }
-  }
 
   const discoveryShortfallRate = discoveryTarget > 0
-    ? (discoveryTarget - discoveredCount) / discoveryTarget
+    ? Math.max(0, 1 - (discoveredCount / discoveryTarget))
     : 0;
 
   // Snapshot reuse stats: candidates in assembled list with fresh snapshots
   const snapshotReuseCount = assembled.filter((a) => {
     const row = poolById.get(a.candidateId);
     const snap = row?.intelligenceSnapshots?.[0];
+    const now = new Date();
     return snap && (!snap.staleAfter || snap.staleAfter >= now);
   }).length;
   const snapshotStaleServedCount = assembled.filter((a) => {
     const row = poolById.get(a.candidateId);
     const snap = row?.intelligenceSnapshots?.[0];
+    const now = new Date();
     return snap?.staleAfter && snap.staleAfter < now;
   }).length;
 
@@ -1694,7 +2014,7 @@ export async function runSourcingOrchestrator(
   const candidatesWithLocation = scoredAssembled.filter((a) => {
     const poolCandidate = poolForRankingById.get(a.candidateId);
     return hasMeaningfulLocation(poolCandidate?.snapshot?.location) ||
-           hasMeaningfulLocation(poolCandidate?.locationHint);
+      hasMeaningfulLocation(poolCandidate?.locationHint);
   }).length;
   const locationHintCoverage = scoredAssembled.length > 0
     ? Number((candidatesWithLocation / scoredAssembled.length).toFixed(4))
@@ -1712,12 +2032,9 @@ export async function runSourcingOrchestrator(
 
   const result: OrchestratorResult = {
     candidateCount: assembled.length,
-    enrichedCount: assembled.filter((a) => a.sourceType === 'pool_enriched').length,
-    poolCount: assembled.filter((a) => a.sourceType === 'pool' || a.sourceType === 'pool_enriched').length,
+    poolCount: assembled.filter((a) => a.sourceType === 'pool').length,
     discoveredCount,
     discoveryShortfallRate,
-    autoEnrichQueued,
-    staleRefreshQueued,
     queriesExecuted,
     qualityGateTriggered,
     avgFitTopK: Number(avgFitTopK.toFixed(4)),
@@ -1730,7 +2047,7 @@ export async function runSourcingOrchestrator(
     discoveryTelemetry,
     snapshotReuseCount,
     snapshotStaleServedCount,
-    snapshotRefreshQueuedCount: staleRefreshQueued,
+
     strictMatchedCount,
     expandedCount,
     expansionReason,
@@ -1753,9 +2070,7 @@ export async function runSourcingOrchestrator(
     noveltyWindowDays: config.noveltyWindowDays,
     noveltyKey,
     noveltyHint,
-    discoveredEnrichedCount,
-    discoveredOrphanCount: discoveredOrphanCandidates.length,
-    discoveredOrphanQueued,
+    discoveredOrphanCount: 0,
     dynamicQueryBudgetUsed,
     minDiscoveryPerRunApplied: Math.min(config.minDiscoveryPerRun, maxDiscoveryTarget),
     minDiscoveredInOutputApplied: discoveredReservedInOutput,
@@ -1798,3 +2113,5 @@ export async function runSourcingOrchestrator(
   log.info({ requestId, resolvedTrack: trackDecision?.track ?? null, ...result }, 'Orchestrator complete');
   return result;
 }
+
+

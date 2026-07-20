@@ -59,7 +59,6 @@ export interface SourcingJobResult {
   requestId: string;
   status: SourcingRequestStatus;
   candidateCount: number;
-  enrichedCount: number;
   durationMs: number;
   error?: string;
 }
@@ -70,6 +69,9 @@ export interface SourcingCallbackPayload {
   externalJobId: string;
   status: 'complete' | 'partial' | 'failed';
   candidateCount: number;
-  enrichedCount: number;
   error?: string;
+  /** Optional event type for partial updates */
+  event?: 'candidate_enriched' | 'sourcing_started' | 'discovery_completed';
+  /** Optional candidate data for 'candidate_enriched' event */
+  candidateData?: any;
 }

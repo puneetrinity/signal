@@ -130,6 +130,9 @@ export interface ProfileSummary {
   name?: string;
   headline?: string;
   location?: string;
+  companyHint?: string | null;
+  profilePictureUrl?: string | null;
+  crustdata?: any;
   providerMeta?: Record<string, unknown>;
 }
 

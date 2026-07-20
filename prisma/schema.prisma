@@ -1,6 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -9,6 +6,1231 @@ datasource db {
   provider  = "postgresql"
   url       = env("DATABASE_URL")
   directUrl = env("DIRECT_URL")
+}
+
+model ai_fit_jobs {
+  id              Int           @id @default(autoincrement())
+  bull_job_id     String        @unique(map: "ai_fit_jobs_bull_job_id_idx")
+  queue_name      String
+  user_id         Int
+  application_id  Int?
+  application_ids Int[]
+  status          String        @default("pending")
+  progress        Int?          @default(0)
+  processed_count Int?          @default(0)
+  total_count     Int?
+  result          Json?
+  error           String?
+  error_code      String?
+  created_at      DateTime      @default(now()) @db.Timestamp(6)
+  started_at      DateTime?     @db.Timestamp(6)
+  completed_at    DateTime?     @db.Timestamp(6)
+  applications    applications? @relation(fields: [application_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users           users         @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([application_id])
+  @@index([created_at])
+  @@index([user_id, status], map: "ai_fit_jobs_user_status_idx")
+}
+
+model application_feedback {
+  id             Int          @id @default(autoincrement())
+  application_id Int
+  author_id      Int
+  overall_score  Int
+  recommendation String
+  notes          String?
+  created_at     DateTime     @default(now()) @db.Timestamp(6)
+  updated_at     DateTime     @default(now()) @db.Timestamp(6)
+  applications   applications @relation(fields: [application_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users          users        @relation(fields: [author_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([application_id])
+  @@index([author_id])
+}
+
+model application_graph_sync_jobs {
+  id                      Int            @id @default(autoincrement())
+  application_id          Int            @unique
+  organization_id         Int?
+  job_id                  Int
+  effective_recruiter_id  Int
+  status                  String         @default("pending")
+  attempts                Int            @default(0)
+  next_attempt_at         DateTime       @default(now()) @db.Timestamp(6)
+  last_error              String?
+  activekg_tenant_id      String
+  activekg_parent_node_id String?
+  chunk_count             Int?
+  created_at              DateTime       @default(now()) @db.Timestamp(6)
+  updated_at              DateTime       @default(now()) @db.Timestamp(6)
+  applications            applications   @relation(fields: [application_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users                   users          @relation(fields: [effective_recruiter_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  jobs                    jobs           @relation(fields: [job_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  organizations           organizations? @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([organization_id], map: "app_graph_sync_org_idx")
+  @@index([effective_recruiter_id], map: "app_graph_sync_recruiter_idx")
+  @@index([status, next_attempt_at], map: "app_graph_sync_status_next_attempt_idx")
+}
+
+model application_stage_history {
+  id             Int          @id @default(autoincrement())
+  application_id Int
+  from_stage     Int?
+  to_stage       Int
+  changed_by     Int
+  notes          String?
+  changed_at     DateTime     @default(now()) @db.Timestamp(6)
+  applications   applications @relation(fields: [application_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.
+model applications {
+  id                                               Int                          @id @default(autoincrement())
+  job_id                                           Int
+  user_id                                          Int?
+  name                                             String
+  email                                            String
+  phone                                            String
+  resume_url                                       String
+  resume_filename                                  String?
+  cover_letter                                     String?
+  status                                           String                       @default("submitted")
+  notes                                            String?
+  last_viewed_at                                   DateTime?                    @db.Timestamp(6)
+  downloaded_at                                    DateTime?                    @db.Timestamp(6)
+  applied_at                                       DateTime                     @default(now()) @db.Timestamp(6)
+  updated_at                                       DateTime                     @default(now()) @db.Timestamp(6)
+  current_stage                                    Int?
+  interview_date                                   DateTime?                    @db.Timestamp(6)
+  interview_time                                   String?
+  interview_location                               String?
+  interview_notes                                  String?
+  recruiter_notes                                  String[]
+  rating                                           Int?
+  tags                                             String[]
+  stage_changed_at                                 DateTime?                    @db.Timestamp(6)
+  stage_changed_by                                 Int?
+  submitted_by_recruiter                           Boolean?                     @default(false)
+  created_by_user_id                               Int?
+  source                                           String?                      @default("public_apply")
+  source_metadata                                  Json?
+  ai_fit_score                                     Int?
+  ai_fit_label                                     String?
+  ai_fit_reasons                                   Json?
+  ai_model_version                                 String?
+  ai_computed_at                                   DateTime?                    @db.Timestamp(6)
+  ai_stale_reason                                  String?
+  ai_digest_version_used                           Int?
+  ai_summary                                       String?
+  ai_summary_version                               Int?                         @default(1)
+  ai_suggested_action                              String?
+  ai_suggested_action_reason                       String?
+  ai_summary_computed_at                           DateTime?                    @db.Timestamp(6)
+  resume_id                                        Int?
+  rejection_reason                                 String?
+  whatsapp_consent                                 Boolean                      @default(true)
+  organization_id                                  Int?
+  ai_summary_model_version                         String?
+  ai_strengths                                     String[]
+  ai_concerns                                      String[]
+  ai_key_highlights                                String[]
+  ai_required_skills_matched                       String[]
+  ai_required_skills_missing                       String[]
+  ai_required_skills_match_percentage              Int?
+  ai_required_skills_depth_notes                   String?
+  ai_good_to_have_skills_matched                   String[]
+  ai_good_to_have_skills_missing                   String[]
+  extracted_resume_text                            String?
+  sync_skipped_reason                              String?
+  hm_review_requested_at                           DateTime?                    @db.Timestamp(6)
+  hm_review_requested_by                           Int?
+  hm_review_note                                   String?
+  platform_discovery_consent                       Boolean?                     @default(false)
+  consent_captured_at                              DateTime?                    @db.Timestamp(6)
+  ai_fit_jobs                                      ai_fit_jobs[]
+  application_feedback                             application_feedback[]
+  application_graph_sync_jobs                      application_graph_sync_jobs?
+  application_stage_history                        application_stage_history[]
+  users_applications_created_by_user_idTousers     users?                       @relation("applications_created_by_user_idTousers", fields: [created_by_user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_applications_hm_review_requested_byTousers users?                       @relation("applications_hm_review_requested_byTousers", fields: [hm_review_requested_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  jobs                                             jobs                         @relation(fields: [job_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  organizations                                    organizations?               @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  candidate_resumes                                candidate_resumes?           @relation(fields: [resume_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_applications_user_idTousers                users?                       @relation("applications_user_idTousers", fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  client_feedback                                  client_feedback[]
+  client_shortlist_items                           client_shortlist_items[]
+  email_audit_log                                  email_audit_log[]
+  form_invitations                                 form_invitations[]
+  form_responses                                   form_responses[]
+  job_sourced_candidates                           job_sourced_candidates[]
+  resume_import_items                              resume_import_items[]
+  whatsapp_audit_log                               whatsapp_audit_log[]
+
+  @@index([hm_review_requested_at])
+  @@index([organization_id], map: "applications_org_idx")
+  @@index([rejection_reason])
+  @@index([status])
+  @@index([user_id])
+}
+
+model automation_events {
+  id              Int            @id @default(autoincrement())
+  automation_key  String
+  target_type     String
+  target_id       Int
+  outcome         String         @default("success")
+  error_message   String?
+  metadata        Json?
+  triggered_at    DateTime       @default(now()) @db.Timestamp(6)
+  triggered_by    Int?
+  organization_id Int?
+  organizations   organizations? @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users           users?         @relation(fields: [triggered_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([automation_key], map: "automation_events_key_idx")
+  @@index([outcome])
+  @@index([target_type])
+  @@index([triggered_at])
+}
+
+model automation_settings {
+  id              Int            @id @default(autoincrement())
+  setting_key     String         @unique
+  setting_value   Boolean        @default(true)
+  description     String?
+  updated_by      Int?
+  updated_at      DateTime       @default(now()) @db.Timestamp(6)
+  organization_id Int?
+  organizations   organizations? @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model candidate_resumes {
+  id             Int            @id @default(autoincrement())
+  user_id        Int
+  label          String
+  gcs_path       String
+  extracted_text String?
+  is_default     Boolean?       @default(false)
+  created_at     DateTime       @default(now()) @db.Timestamp(6)
+  updated_at     DateTime       @default(now()) @db.Timestamp(6)
+  applications   applications[]
+  users          users          @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([user_id])
+}
+
+model checkout_intents {
+  id                                       Int                @id @default(autoincrement())
+  email                                    String
+  org_name                                 String
+  user_id                                  Int?
+  organization_id                          Int?
+  plan_id                                  Int
+  seats                                    Int                @default(1)
+  billing_cycle                            String             @default("monthly")
+  gstin                                    String?
+  billing_name                             String?
+  billing_address                          String?
+  billing_city                             String?
+  billing_state                            String?
+  billing_pincode                          String?
+  status                                   String             @default("pending")
+  cashfree_order_id                        String?            @unique
+  claim_token                              String?            @unique
+  claimed_at                               DateTime?          @db.Timestamp(6)
+  claimed_by                               Int?
+  created_at                               DateTime           @default(now()) @db.Timestamp(6)
+  expires_at                               DateTime           @db.Timestamp(6)
+  paid_at                                  DateTime?          @db.Timestamp(6)
+  users_checkout_intents_claimed_byTousers users?             @relation("checkout_intents_claimed_byTousers", fields: [claimed_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  organizations                            organizations?     @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  subscription_plans                       subscription_plans @relation(fields: [plan_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_checkout_intents_user_idTousers    users?             @relation("checkout_intents_user_idTousers", fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([email])
+  @@index([expires_at])
+  @@index([status])
+}
+
+model client_feedback {
+  id                Int                @id @default(autoincrement())
+  application_id    Int
+  client_id         Int
+  shortlist_id      Int?
+  recommendation    String
+  notes             String?
+  rating            Int?
+  created_at        DateTime           @default(now()) @db.Timestamp(6)
+  organization_id   Int?
+  applications      applications       @relation(fields: [application_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  clients           clients            @relation(fields: [client_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  organizations     organizations?     @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  client_shortlists client_shortlists? @relation(fields: [shortlist_id], references: [id], onUpdate: NoAction)
+
+  @@index([application_id])
+  @@index([client_id])
+  @@index([shortlist_id])
+}
+
+model client_shortlist_items {
+  id                Int               @id @default(autoincrement())
+  shortlist_id      Int
+  application_id    Int
+  position          Int
+  notes             String?
+  created_at        DateTime          @default(now()) @db.Timestamp(6)
+  organization_id   Int?
+  applications      applications      @relation(fields: [application_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  organizations     organizations?    @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  client_shortlists client_shortlists @relation(fields: [shortlist_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([application_id])
+  @@index([shortlist_id])
+}
+
+model client_shortlists {
+  id                     Int                      @id @default(autoincrement())
+  client_id              Int
+  job_id                 Int
+  token                  String                   @unique
+  title                  String?
+  message                String?
+  created_by             Int
+  created_at             DateTime                 @default(now()) @db.Timestamp(6)
+  expires_at             DateTime?                @db.Timestamp(6)
+  status                 String                   @default("active")
+  organization_id        Int?
+  client_feedback        client_feedback[]
+  client_shortlist_items client_shortlist_items[]
+  clients                clients                  @relation(fields: [client_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users                  users                    @relation(fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  jobs                   jobs                     @relation(fields: [job_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  organizations          organizations?           @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([client_id])
+  @@index([job_id])
+  @@index([token])
+}
+
+model clients {
+  id                    Int                 @id @default(autoincrement())
+  name                  String
+  domain                String?
+  primary_contact_name  String?
+  primary_contact_email String?
+  notes                 String?
+  created_at            DateTime            @default(now()) @db.Timestamp(6)
+  created_by            Int
+  organization_id       Int?
+  client_feedback       client_feedback[]
+  client_shortlists     client_shortlists[]
+  users                 users               @relation(fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  organizations         organizations?      @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  jobs                  jobs[]
+
+  @@index([created_by])
+  @@index([organization_id], map: "clients_org_idx")
+}
+
+model co_recruiter_invitations {
+  id              Int            @id @default(autoincrement())
+  job_id          Int
+  email           String
+  token           String         @unique(map: "co_recruiter_invite_token_idx")
+  invited_by      Int
+  inviter_name    String?
+  job_title       String?
+  expires_at      DateTime       @db.Timestamp(6)
+  status          String         @default("pending")
+  accepted_at     DateTime?      @db.Timestamp(6)
+  created_at      DateTime       @default(now()) @db.Timestamp(6)
+  organization_id Int?
+  users           users          @relation(fields: [invited_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  jobs            jobs           @relation(fields: [job_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  organizations   organizations? @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([job_id, email], map: "co_recruiter_invite_job_email_idx")
+  @@index([status], map: "co_recruiter_invite_status_idx")
+}
+
+model consultants {
+  id           Int      @id @default(autoincrement())
+  name         String
+  email        String   @unique
+  experience   String
+  linkedin_url String?
+  domains      String
+  description  String?
+  photo_url    String?
+  is_active    Boolean  @default(true)
+  created_at   DateTime @default(now()) @db.Timestamp(6)
+  updated_at   DateTime @default(now()) @db.Timestamp(6)
+}
+
+model contact_submissions {
+  id           Int      @id @default(autoincrement())
+  name         String
+  email        String
+  phone        String?
+  company      String?
+  location     String?
+  message      String
+  submitted_at DateTime @default(now()) @db.Timestamp(6)
+}
+
+model domain_claim_requests {
+  id                                              Int           @id @default(autoincrement())
+  organization_id                                 Int
+  domain                                          String
+  status                                          String        @default("pending")
+  requested_by                                    Int
+  requested_at                                    DateTime      @default(now()) @db.Timestamp(6)
+  reviewed_by                                     Int?
+  reviewed_at                                     DateTime?     @db.Timestamp(6)
+  rejection_reason                                String?
+  organizations                                   organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_domain_claim_requests_requested_byTousers users         @relation("domain_claim_requests_requested_byTousers", fields: [requested_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_domain_claim_requests_reviewed_byTousers  users?        @relation("domain_claim_requests_reviewed_byTousers", fields: [reviewed_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model email_audit_log {
+  id              Int           @id @default(autoincrement())
+  application_id  Int?
+  template_id     Int?
+  template_type   String?
+  recipient_email String
+  subject         String
+  sent_at         DateTime      @default(now()) @db.Timestamp(6)
+  sent_by         Int?
+  status          String        @default("success")
+  error_message   String?
+  preview_url     String?
+  applications    applications? @relation(fields: [application_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model email_templates {
+  id              Int            @id @default(autoincrement())
+  name            String
+  subject         String
+  body            String
+  template_type   String
+  created_by      Int?
+  is_default      Boolean?       @default(false)
+  created_at      DateTime       @default(now()) @db.Timestamp(6)
+  organization_id Int?
+  organizations   organizations? @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model form_fields {
+  id                    Int                     @id @default(autoincrement())
+  form_id               Int
+  type                  String
+  label                 String
+  required              Boolean                 @default(false)
+  options               String?
+  order                 Int
+  forms                 forms                   @relation(fields: [form_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  form_response_answers form_response_answers[]
+
+  @@index([form_id, order])
+}
+
+model form_invitations {
+  id               Int             @id @default(autoincrement())
+  application_id   Int?
+  form_id          Int
+  token            String          @unique
+  expires_at       DateTime        @db.Timestamp(6)
+  status           String          @default("pending")
+  sent_by          Int
+  sent_at          DateTime?       @db.Timestamp(6)
+  viewed_at        DateTime?       @db.Timestamp(6)
+  answered_at      DateTime?       @db.Timestamp(6)
+  field_snapshot   String
+  custom_message   String?
+  reminder_sent_at DateTime?       @db.Timestamp(6)
+  error_message    String?
+  created_at       DateTime        @default(now()) @db.Timestamp(6)
+  email            String?
+  candidate_name   String?
+  job_id           Int?
+  organization_id  Int?
+  applications     applications?   @relation(fields: [application_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  forms            forms           @relation(fields: [form_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  jobs             jobs?           @relation(fields: [job_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  organizations    organizations?  @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users            users           @relation(fields: [sent_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  form_responses   form_responses?
+
+  @@index([application_id, status], map: "form_invitations_app_status_idx")
+  @@index([created_at])
+  @@index([email])
+  @@index([form_id])
+  @@index([job_id])
+  @@index([token])
+}
+
+model form_response_answers {
+  id             Int            @id @default(autoincrement())
+  response_id    Int
+  field_id       Int
+  value          String?
+  file_url       String?
+  form_fields    form_fields    @relation(fields: [field_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  form_responses form_responses @relation(fields: [response_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([response_id])
+}
+
+model form_responses {
+  id                    Int                     @id @default(autoincrement())
+  invitation_id         Int                     @unique
+  application_id        Int
+  submitted_at          DateTime                @default(now()) @db.Timestamp(6)
+  organization_id       Int?
+  form_response_answers form_response_answers[]
+  applications          applications            @relation(fields: [application_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  form_invitations      form_invitations        @relation(fields: [invitation_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  organizations         organizations?          @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  talent_pool           talent_pool[]
+
+  @@index([application_id])
+}
+
+model forms {
+  id               Int                @id @default(autoincrement())
+  name             String
+  description      String?
+  is_published     Boolean            @default(true)
+  created_by       Int
+  created_at       DateTime           @default(now()) @db.Timestamp(6)
+  updated_at       DateTime           @default(now()) @db.Timestamp(6)
+  organization_id  Int?
+  form_fields      form_fields[]
+  form_invitations form_invitations[]
+  users            users              @relation(fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  organizations    organizations?     @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([created_by])
+  @@index([is_published])
+}
+
+model hiring_manager_invitations {
+  id           Int       @id @default(autoincrement())
+  email        String
+  name         String?
+  token        String    @unique(map: "hm_invitations_token_idx")
+  invited_by   Int
+  inviter_name String?
+  expires_at   DateTime  @db.Timestamp(6)
+  status       String    @default("pending")
+  accepted_at  DateTime? @db.Timestamp(6)
+  created_at   DateTime  @default(now()) @db.Timestamp(6)
+  users        users     @relation(fields: [invited_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([email], map: "hm_invitations_email_idx")
+  @@index([invited_by], map: "hm_invitations_invited_by_idx")
+  @@index([status], map: "hm_invitations_status_idx")
+}
+
+model job_analytics {
+  id               Int            @id @default(autoincrement())
+  job_id           Int
+  views            Int            @default(0)
+  apply_clicks     Int            @default(0)
+  conversion_rate  Decimal?       @default(0.00) @db.Decimal(5, 2)
+  ai_score_cache   Int?
+  ai_model_version String?
+  created_at       DateTime       @default(now()) @db.Timestamp(6)
+  updated_at       DateTime       @default(now()) @db.Timestamp(6)
+  organization_id  Int?
+  jobs             jobs           @relation(fields: [job_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  organizations    organizations? @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model job_audit_log {
+  id              Int            @id @default(autoincrement())
+  job_id          Int
+  action          String
+  performed_by    Int
+  reason          String?
+  metadata        Json?
+  timestamp       DateTime       @default(now()) @db.Timestamp(6)
+  organization_id Int?
+  jobs            jobs           @relation(fields: [job_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  organizations   organizations? @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users           users          @relation(fields: [performed_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([action])
+  @@index([job_id])
+  @@index([timestamp])
+}
+
+model job_recruiters {
+  id                                       Int            @id @default(autoincrement())
+  job_id                                   Int
+  recruiter_id                             Int
+  added_by                                 Int?
+  added_at                                 DateTime       @default(now()) @db.Timestamp(6)
+  organization_id                          Int?
+  users_job_recruiters_added_byTousers     users?         @relation("job_recruiters_added_byTousers", fields: [added_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  jobs                                     jobs           @relation(fields: [job_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  organizations                            organizations? @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_job_recruiters_recruiter_idTousers users          @relation("job_recruiters_recruiter_idTousers", fields: [recruiter_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([job_id, recruiter_id], map: "job_recruiter_unique_idx")
+  @@index([job_id], map: "job_recruiters_job_idx")
+  @@index([recruiter_id], map: "job_recruiters_recruiter_idx")
+}
+
+model job_sourced_candidates {
+  id                       Int               @id @default(autoincrement())
+  organization_id          Int
+  job_id                   Int
+  request_id               String
+  signal_candidate_id      String
+  fit_score                Int?
+  fit_breakdown            Json?
+  source_type              String
+  state                    String            @default("new")
+  candidate_summary        Json?
+  converted_application_id Int?
+  last_synced_at           DateTime          @default(now()) @db.Timestamp(6)
+  created_at               DateTime          @default(now()) @db.Timestamp(6)
+  updated_at               DateTime          @default(now()) @db.Timestamp(6)
+  applications             applications?     @relation(fields: [converted_application_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  jobs                     jobs              @relation(fields: [job_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  organizations            organizations     @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  job_sourcing_runs        job_sourcing_runs @relation(fields: [request_id], references: [request_id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([job_id, signal_candidate_id], map: "job_sourced_candidates_job_candidate_idx")
+  @@index([fit_score])
+  @@index([organization_id, job_id], map: "job_sourced_candidates_org_job_idx")
+  @@index([request_id], map: "job_sourced_candidates_request_idx")
+  @@index([source_type])
+  @@index([state])
+}
+
+model job_sourcing_runs {
+  id                     Int                      @id @default(autoincrement())
+  organization_id        Int
+  job_id                 Int
+  request_id             String                   @unique(map: "job_sourcing_runs_request_id_idx")
+  external_job_id        String
+  status                 String                   @default("pending")
+  context_hash           String
+  callback_url           String?
+  meta                   Json?
+  error_message          String?
+  candidate_count        Int?                     @default(0)
+  expires_at             DateTime?                @db.Timestamp(6)
+  submitted_at           DateTime?                @db.Timestamp(6)
+  completed_at           DateTime?                @db.Timestamp(6)
+  created_at             DateTime                 @default(now()) @db.Timestamp(6)
+  updated_at             DateTime                 @default(now()) @db.Timestamp(6)
+  job_sourced_candidates job_sourced_candidates[]
+  jobs                   jobs                     @relation(fields: [job_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  organizations          organizations            @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([expires_at])
+  @@index([organization_id, job_id], map: "job_sourcing_runs_org_job_idx")
+  @@index([status])
+}
+
+model jobs {
+  id                                  Int                           @id @default(autoincrement())
+  title                               String
+  location                            String
+  type                                String
+  description                         String
+  skills                              String[]
+  deadline                            DateTime?                     @db.Date
+  posted_by                           Int
+  created_at                          DateTime                      @default(now()) @db.Timestamp(6)
+  is_active                           Boolean                       @default(false)
+  status                              String                        @default("pending")
+  review_comments                     String?
+  expires_at                          DateTime?                     @db.Timestamp(6)
+  reviewed_by                         Int?
+  reviewed_at                         DateTime?                     @db.Timestamp(6)
+  slug                                String?
+  updated_at                          DateTime                      @default(now()) @db.Timestamp(6)
+  deactivated_at                      DateTime?                     @db.Timestamp(6)
+  reactivated_at                      DateTime?                     @db.Timestamp(6)
+  reactivation_count                  Int                           @default(0)
+  deactivation_reason                 String?
+  warning_email_sent                  Boolean                       @default(false)
+  jd_digest                           Json?
+  jd_digest_version                   Int?                          @default(1)
+  hiring_manager_id                   Int?
+  client_id                           Int?
+  salary_min                          Int?
+  salary_max                          Int?
+  salary_period                       String?
+  good_to_have_skills                 String[]
+  education_requirement               String?
+  experience_years                    Int?
+  organization_id                     Int?
+  application_graph_sync_jobs         application_graph_sync_jobs[]
+  applications                        applications[]
+  client_shortlists                   client_shortlists[]
+  co_recruiter_invitations            co_recruiter_invitations[]
+  form_invitations                    form_invitations[]
+  job_analytics                       job_analytics[]
+  job_audit_log                       job_audit_log[]
+  job_recruiters                      job_recruiters[]
+  job_sourced_candidates              job_sourced_candidates[]
+  job_sourcing_runs                   job_sourcing_runs[]
+  clients                             clients?                      @relation(fields: [client_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_jobs_hiring_manager_idTousers users?                        @relation("jobs_hiring_manager_idTousers", fields: [hiring_manager_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  organizations                       organizations?                @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_jobs_posted_byTousers         users                         @relation("jobs_posted_byTousers", fields: [posted_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_jobs_reviewed_byTousers       users?                        @relation("jobs_reviewed_byTousers", fields: [reviewed_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  recruiter_feedback_events           recruiter_feedback_events[]
+  resume_import_batches               resume_import_batches[]
+  resume_import_items                 resume_import_items[]
+
+  @@index([client_id])
+  @@index([deactivated_at])
+  @@index([hiring_manager_id], map: "jobs_hiring_manager_idx")
+  @@index([is_active])
+  @@index([organization_id], map: "jobs_org_idx")
+  @@index([posted_by])
+  @@index([slug])
+  @@index([status])
+}
+
+model organization_credit_balances {
+  id                  Int           @id @default(autoincrement())
+  organization_id     Int           @unique(map: "org_credit_balances_org_idx")
+  recurring_allocated Int           @default(0)
+  recurring_used      Int           @default(0)
+  rollover_credits    Int           @default(0)
+  purchased_credits   Int           @default(0)
+  purchased_used      Int           @default(0)
+  period_start        DateTime?     @db.Timestamp(6)
+  period_end          DateTime?     @db.Timestamp(6)
+  created_at          DateTime      @default(now()) @db.Timestamp(6)
+  updated_at          DateTime      @default(now()) @db.Timestamp(6)
+  organizations       organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model organization_credit_transactions {
+  id              Int           @id @default(autoincrement())
+  organization_id Int
+  user_id         Int?
+  type            String
+  amount          Int
+  metadata        Json?
+  created_at      DateTime      @default(now()) @db.Timestamp(6)
+  organizations   organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users           users?        @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([organization_id], map: "org_credit_transactions_org_idx")
+  @@index([type], map: "org_credit_transactions_type_idx")
+}
+
+model organization_invites {
+  id                                            Int           @id @default(autoincrement())
+  organization_id                               Int
+  email                                         String
+  role                                          String        @default("member")
+  token                                         String        @unique
+  expires_at                                    DateTime      @db.Timestamp(6)
+  invited_by                                    Int
+  accepted_at                                   DateTime?     @db.Timestamp(6)
+  accepted_by                                   Int?
+  created_at                                    DateTime      @default(now()) @db.Timestamp(6)
+  users_organization_invites_accepted_byTousers users?        @relation("organization_invites_accepted_byTousers", fields: [accepted_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_organization_invites_invited_byTousers  users         @relation("organization_invites_invited_byTousers", fields: [invited_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  organizations                                 organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([organization_id, email], map: "org_invites_org_email_idx")
+}
+
+model organization_join_requests {
+  id                                                   Int           @id @default(autoincrement())
+  organization_id                                      Int
+  user_id                                              Int
+  status                                               String        @default("pending")
+  requested_at                                         DateTime      @default(now()) @db.Timestamp(6)
+  responded_at                                         DateTime?     @db.Timestamp(6)
+  responded_by                                         Int?
+  rejection_reason                                     String?
+  organizations                                        organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_organization_join_requests_responded_byTousers users?        @relation("organization_join_requests_responded_byTousers", fields: [responded_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_organization_join_requests_user_idTousers      users         @relation("organization_join_requests_user_idTousers", fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model organization_members {
+  id                                           Int           @id @default(autoincrement())
+  organization_id                              Int
+  user_id                                      Int
+  role                                         String        @default("member")
+  seat_assigned                                Boolean       @default(true)
+  last_activity_at                             DateTime?     @db.Timestamp(6)
+  credits_allocated                            Int           @default(0)
+  credits_used                                 Int           @default(0)
+  credits_rollover                             Int           @default(0)
+  credits_period_start                         DateTime?     @db.Timestamp(6)
+  credits_period_end                           DateTime?     @db.Timestamp(6)
+  joined_at                                    DateTime      @default(now()) @db.Timestamp(6)
+  invited_by                                   Int?
+  users_organization_members_invited_byTousers users?        @relation("organization_members_invited_byTousers", fields: [invited_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  organizations                                organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_organization_members_user_idTousers    users         @relation("organization_members_user_idTousers", fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([organization_id, user_id], map: "org_members_org_user_idx")
+  @@index([user_id], map: "org_members_user_idx")
+}
+
+model organization_subscriptions {
+  id                                                               Int                      @id @default(autoincrement())
+  organization_id                                                  Int
+  plan_id                                                          Int
+  seats                                                            Int                      @default(1)
+  billing_cycle                                                    String
+  status                                                           String                   @default("active")
+  start_date                                                       DateTime                 @db.Timestamp(6)
+  current_period_start                                             DateTime                 @db.Timestamp(6)
+  current_period_end                                               DateTime                 @db.Timestamp(6)
+  cancelled_at                                                     DateTime?                @db.Timestamp(6)
+  cancel_at_period_end                                             Boolean?                 @default(false)
+  cashfree_subscription_id                                         String?
+  cashfree_customer_id                                             String?
+  grace_period_end_date                                            DateTime?                @db.Timestamp(6)
+  payment_failure_count                                            Int?                     @default(0)
+  admin_override                                                   Boolean?                 @default(false)
+  admin_override_reason                                            String?
+  admin_override_by                                                Int?
+  feature_overrides                                                Json?
+  created_at                                                       DateTime                 @default(now()) @db.Timestamp(6)
+  updated_at                                                       DateTime                 @default(now()) @db.Timestamp(6)
+  bonus_credits                                                    Int?                     @default(0)
+  bonus_credits_granted_at                                         DateTime?                @db.Timestamp(6)
+  bonus_credits_reason                                             String?
+  bonus_credits_granted_by                                         Int?
+  custom_credit_limit                                              Int?
+  paid_seats                                                       Int                      @default(0)
+  users_organization_subscriptions_admin_override_byTousers        users?                   @relation("organization_subscriptions_admin_override_byTousers", fields: [admin_override_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_organization_subscriptions_bonus_credits_granted_byTousers users?                   @relation("organization_subscriptions_bonus_credits_granted_byTousers", fields: [bonus_credits_granted_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  organizations                                                    organizations            @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  subscription_plans                                               subscription_plans       @relation(fields: [plan_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  payment_transactions                                             payment_transactions[]
+  subscription_alerts                                              subscription_alerts[]
+  subscription_audit_log                                           subscription_audit_log[]
+}
+
+model organizations {
+  id                               Int                                @id @default(autoincrement())
+  name                             String
+  slug                             String                             @unique
+  logo                             String?
+  domain                           String?                            @unique
+  domain_verified                  Boolean?                           @default(false)
+  domain_approved_by               Int?
+  domain_approved_at               DateTime?                          @db.Timestamp(6)
+  gstin                            String?
+  billing_name                     String?
+  billing_address                  String?
+  billing_city                     String?
+  billing_state                    String?
+  billing_pincode                  String?
+  billing_contact_email            String?
+  billing_contact_name             String?
+  settings                         Json?
+  is_active                        Boolean                            @default(true)
+  created_at                       DateTime                           @default(now()) @db.Timestamp(6)
+  updated_at                       DateTime                           @default(now()) @db.Timestamp(6)
+  signal_tenant_id                 String?                            @unique
+  application_graph_sync_jobs      application_graph_sync_jobs[]
+  applications                     applications[]
+  automation_events                automation_events[]
+  automation_settings              automation_settings[]
+  checkout_intents                 checkout_intents[]
+  client_feedback                  client_feedback[]
+  client_shortlist_items           client_shortlist_items[]
+  client_shortlists                client_shortlists[]
+  clients                          clients[]
+  co_recruiter_invitations         co_recruiter_invitations[]
+  domain_claim_requests            domain_claim_requests[]
+  email_templates                  email_templates[]
+  form_invitations                 form_invitations[]
+  form_responses                   form_responses[]
+  forms                            forms[]
+  job_analytics                    job_analytics[]
+  job_audit_log                    job_audit_log[]
+  job_recruiters                   job_recruiters[]
+  job_sourced_candidates           job_sourced_candidates[]
+  job_sourcing_runs                job_sourcing_runs[]
+  jobs                             jobs[]
+  organization_credit_balances     organization_credit_balances?
+  organization_credit_transactions organization_credit_transactions[]
+  organization_invites             organization_invites[]
+  organization_join_requests       organization_join_requests[]
+  organization_members             organization_members[]
+  organization_subscriptions       organization_subscriptions[]
+  users                            users?                             @relation(fields: [domain_approved_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  payment_transactions             payment_transactions[]
+  pipeline_stages                  pipeline_stages[]
+  recruiter_feedback_events        recruiter_feedback_events[]
+  resume_import_batches            resume_import_batches[]
+  resume_import_items              resume_import_items[]
+  subscription_audit_log           subscription_audit_log[]
+  talent_pool                      talent_pool[]
+  user_ai_usage                    user_ai_usage[]
+}
+
+model payment_transactions {
+  id                         Int                         @id @default(autoincrement())
+  organization_id            Int
+  subscription_id            Int?
+  type                       String
+  amount                     Int
+  tax_amount                 Int                         @default(0)
+  total_amount               Int
+  currency                   String                      @default("INR")
+  status                     String
+  cashfree_order_id          String?                     @unique
+  cashfree_payment_id        String?
+  cashfree_payment_method    String?
+  metadata                   Json?
+  failure_reason             String?
+  invoice_number             String?
+  invoice_url                String?
+  created_at                 DateTime                    @default(now()) @db.Timestamp(6)
+  completed_at               DateTime?                   @db.Timestamp(6)
+  organizations              organizations               @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  organization_subscriptions organization_subscriptions? @relation(fields: [subscription_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model pipeline_stages {
+  id              Int            @id @default(autoincrement())
+  name            String
+  order           Int
+  color           String?        @default("#3b82f6")
+  is_default      Boolean?       @default(false)
+  created_by      Int?
+  created_at      DateTime       @default(now()) @db.Timestamp(6)
+  organization_id Int?
+  organizations   organizations? @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model recruiter_feedback_events {
+  id                     Int           @id @default(autoincrement())
+  organization_id        Int
+  job_id                 Int
+  user_id                Int?
+  signal_candidate_id    String
+  action                 String
+  event_id               String        @unique
+  rank_at_time           Int?
+  fit_score_at_time      Int?
+  source_type_at_time    String?
+  match_tier_at_time     String?
+  location_match_at_time String?
+  role_family            String?
+  location_country_code  String?
+  seniority_band         String?
+  synced_to_signal_at    DateTime?     @db.Timestamp(6)
+  created_at             DateTime      @default(now()) @db.Timestamp(6)
+  jobs                   jobs          @relation(fields: [job_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  organizations          organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users                  users?        @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([action], map: "rfb_action_idx")
+  @@index([signal_candidate_id], map: "rfb_candidate_idx")
+  @@index([organization_id, job_id], map: "rfb_org_job_idx")
+  @@index([synced_to_signal_at], map: "rfb_unsynced_idx")
+}
+
+model resume_import_batches {
+  id                  Int                   @id @default(autoincrement())
+  organization_id     Int
+  job_id              Int
+  uploaded_by_user_id Int
+  status              String                @default("queued")
+  file_count          Int                   @default(0)
+  processed_count     Int                   @default(0)
+  ready_count         Int                   @default(0)
+  needs_review_count  Int                   @default(0)
+  failed_count        Int                   @default(0)
+  created_at          DateTime              @default(now()) @db.Timestamp(6)
+  updated_at          DateTime              @default(now()) @db.Timestamp(6)
+  jobs                jobs                  @relation(fields: [job_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  organizations       organizations         @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users               users                 @relation(fields: [uploaded_by_user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  resume_import_items resume_import_items[]
+
+  @@index([organization_id, job_id], map: "resume_import_batches_org_job_idx")
+  @@index([status])
+  @@index([uploaded_by_user_id], map: "resume_import_batches_uploader_idx")
+}
+
+model resume_import_items {
+  id                    Int                   @id @default(autoincrement())
+  batch_id              Int
+  organization_id       Int
+  job_id                Int
+  uploaded_by_user_id   Int
+  original_filename     String
+  gcs_path              String?
+  content_hash          String?
+  extracted_text        String?
+  extraction_method     String                @default("failed")
+  parsed_name           String?
+  parsed_email          String?
+  parsed_phone          String?
+  status                String                @default("queued")
+  error_reason          String?
+  application_id        Int?
+  source_metadata       Json?
+  attempts              Int                   @default(0)
+  next_attempt_at       DateTime              @default(now()) @db.Timestamp(6)
+  last_processed_at     DateTime?             @db.Timestamp(6)
+  created_at            DateTime              @default(now()) @db.Timestamp(6)
+  updated_at            DateTime              @default(now()) @db.Timestamp(6)
+  applications          applications?         @relation(fields: [application_id], references: [id], onUpdate: NoAction)
+  resume_import_batches resume_import_batches @relation(fields: [batch_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  jobs                  jobs                  @relation(fields: [job_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  organizations         organizations         @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users                 users                 @relation(fields: [uploaded_by_user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([application_id], map: "resume_import_items_application_idx")
+  @@index([batch_id], map: "resume_import_items_batch_idx")
+  @@index([batch_id, status], map: "resume_import_items_batch_status_idx")
+  @@index([batch_id, content_hash], map: "resume_import_items_content_hash_idx")
+  @@index([job_id, parsed_email], map: "resume_import_items_job_email_idx")
+  @@index([status, next_attempt_at], map: "resume_import_items_status_attempt_idx")
+}
+
+model session {
+  sid    String   @id @db.VarChar
+  sess   Json     @db.Json
+  expire DateTime @db.Timestamp(6)
+
+  @@index([expire], map: "IDX_session_expire")
+}
+
+model subscription_alerts {
+  id                         Int                        @id @default(autoincrement())
+  subscription_id            Int
+  alert_type                 String
+  sent_at                    DateTime                   @default(now()) @db.Timestamp(6)
+  recipient_email            String
+  email_status               String                     @default("sent")
+  organization_subscriptions organization_subscriptions @relation(fields: [subscription_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model subscription_audit_log {
+  id                         Int                         @id @default(autoincrement())
+  organization_id            Int
+  subscription_id            Int?
+  action                     String
+  previous_value             Json?
+  new_value                  Json?
+  performed_by               Int?
+  performed_at               DateTime                    @default(now()) @db.Timestamp(6)
+  reason                     String?
+  organizations              organizations               @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users                      users?                      @relation(fields: [performed_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  organization_subscriptions organization_subscriptions? @relation(fields: [subscription_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model subscription_plans {
+  id                          Int                          @id @default(autoincrement())
+  name                        String                       @unique
+  display_name                String
+  description                 String?
+  price_per_seat_monthly      Int
+  price_per_seat_annual       Int
+  ai_credits_per_seat_monthly Int
+  max_credit_rollover_months  Int?                         @default(3)
+  features                    Json
+  is_active                   Boolean                      @default(true)
+  sort_order                  Int                          @default(0)
+  created_at                  DateTime                     @default(now()) @db.Timestamp(6)
+  checkout_intents            checkout_intents[]
+  organization_subscriptions  organization_subscriptions[]
+}
+
+/// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.
+model talent_pool {
+  id               Int             @id @default(autoincrement())
+  email            String
+  name             String
+  phone            String?
+  recruiter_id     Int
+  source           String          @default("external_form")
+  form_response_id Int?
+  notes            String?
+  resume_url       String?
+  created_at       DateTime        @default(now()) @db.Timestamp(6)
+  updated_at       DateTime        @default(now()) @db.Timestamp(6)
+  organization_id  Int?
+  form_responses   form_responses? @relation(fields: [form_response_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  organizations    organizations?  @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users            users           @relation(fields: [recruiter_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([email])
+  @@index([recruiter_id])
+  @@index([source])
+}
+
+model user_ai_usage {
+  id              Int            @id @default(autoincrement())
+  user_id         Int
+  kind            String
+  tokens_in       Int
+  tokens_out      Int
+  cost_usd        Decimal        @db.Decimal(10, 8)
+  computed_at     DateTime       @default(now()) @db.Timestamp(6)
+  metadata        Json?
+  organization_id Int?
+  organizations   organizations? @relation(fields: [organization_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users           users          @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([computed_at])
+  @@index([kind])
+  @@index([user_id])
+}
+
+model user_profiles {
+  id           Int      @id @default(autoincrement())
+  user_id      Int
+  bio          String?
+  skills       String[]
+  linkedin     String?
+  location     String?
+  created_at   DateTime @default(now()) @db.Timestamp(6)
+  updated_at   DateTime @default(now()) @db.Timestamp(6)
+  display_name String?
+  company      String?
+  photo_url    String?
+  is_public    Boolean? @default(false)
+  phone        String?
+  public_id    String?  @unique(map: "user_profiles_public_id_idx")
+  users        users    @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model users {
+  id                                                                                    Int                                @id @default(autoincrement())
+  username                                                                              String                             @unique
+  password                                                                              String
+  first_name                                                                            String?
+  last_name                                                                             String?
+  role                                                                                  String                             @default("candidate")
+  ai_content_free_used                                                                  Boolean?                           @default(false)
+  ai_onboarded_at                                                                       DateTime?                          @db.Timestamp(6)
+  email_verified                                                                        Boolean?                           @default(false)
+  email_verification_token                                                              String?
+  email_verification_expires                                                            DateTime?                          @db.Timestamp(6)
+  password_reset_token                                                                  String?
+  password_reset_expires                                                                DateTime?                          @db.Timestamp(6)
+  profile_prompt_snooze_until                                                           DateTime?                          @db.Timestamp(6)
+  profile_completed_at                                                                  DateTime?                          @db.Timestamp(6)
+  onboarding_completed_at                                                               DateTime?                          @db.Timestamp(6)
+  profile_skipped_at                                                                    DateTime?                          @db.Timestamp(6)
+  ai_fit_jobs                                                                           ai_fit_jobs[]
+  application_feedback                                                                  application_feedback[]
+  application_graph_sync_jobs                                                           application_graph_sync_jobs[]
+  applications_applications_created_by_user_idTousers                                   applications[]                     @relation("applications_created_by_user_idTousers")
+  applications_applications_hm_review_requested_byTousers                               applications[]                     @relation("applications_hm_review_requested_byTousers")
+  applications_applications_user_idTousers                                              applications[]                     @relation("applications_user_idTousers")
+  automation_events                                                                     automation_events[]
+  candidate_resumes                                                                     candidate_resumes[]
+  checkout_intents_checkout_intents_claimed_byTousers                                   checkout_intents[]                 @relation("checkout_intents_claimed_byTousers")
+  checkout_intents_checkout_intents_user_idTousers                                      checkout_intents[]                 @relation("checkout_intents_user_idTousers")
+  client_shortlists                                                                     client_shortlists[]
+  clients                                                                               clients[]
+  co_recruiter_invitations                                                              co_recruiter_invitations[]
+  domain_claim_requests_domain_claim_requests_requested_byTousers                       domain_claim_requests[]            @relation("domain_claim_requests_requested_byTousers")
+  domain_claim_requests_domain_claim_requests_reviewed_byTousers                        domain_claim_requests[]            @relation("domain_claim_requests_reviewed_byTousers")
+  form_invitations                                                                      form_invitations[]
+  forms                                                                                 forms[]
+  hiring_manager_invitations                                                            hiring_manager_invitations[]
+  job_audit_log                                                                         job_audit_log[]
+  job_recruiters_job_recruiters_added_byTousers                                         job_recruiters[]                   @relation("job_recruiters_added_byTousers")
+  job_recruiters_job_recruiters_recruiter_idTousers                                     job_recruiters[]                   @relation("job_recruiters_recruiter_idTousers")
+  jobs_jobs_hiring_manager_idTousers                                                    jobs[]                             @relation("jobs_hiring_manager_idTousers")
+  jobs_jobs_posted_byTousers                                                            jobs[]                             @relation("jobs_posted_byTousers")
+  jobs_jobs_reviewed_byTousers                                                          jobs[]                             @relation("jobs_reviewed_byTousers")
+  organization_credit_transactions                                                      organization_credit_transactions[]
+  organization_invites_organization_invites_accepted_byTousers                          organization_invites[]             @relation("organization_invites_accepted_byTousers")
+  organization_invites_organization_invites_invited_byTousers                           organization_invites[]             @relation("organization_invites_invited_byTousers")
+  organization_join_requests_organization_join_requests_responded_byTousers             organization_join_requests[]       @relation("organization_join_requests_responded_byTousers")
+  organization_join_requests_organization_join_requests_user_idTousers                  organization_join_requests[]       @relation("organization_join_requests_user_idTousers")
+  organization_members_organization_members_invited_byTousers                           organization_members[]             @relation("organization_members_invited_byTousers")
+  organization_members_organization_members_user_idTousers                              organization_members[]             @relation("organization_members_user_idTousers")
+  organization_subscriptions_organization_subscriptions_admin_override_byTousers        organization_subscriptions[]       @relation("organization_subscriptions_admin_override_byTousers")
+  organization_subscriptions_organization_subscriptions_bonus_credits_granted_byTousers organization_subscriptions[]       @relation("organization_subscriptions_bonus_credits_granted_byTousers")
+  organizations                                                                         organizations[]
+  recruiter_feedback_events                                                             recruiter_feedback_events[]
+  resume_import_batches                                                                 resume_import_batches[]
+  resume_import_items                                                                   resume_import_items[]
+  subscription_audit_log                                                                subscription_audit_log[]
+  talent_pool                                                                           talent_pool[]
+  user_ai_usage                                                                         user_ai_usage[]
+  user_profiles                                                                         user_profiles[]
+  whatsapp_audit_log                                                                    whatsapp_audit_log[]
+}
+
+model webhook_events {
+  id            Int      @id @default(autoincrement())
+  provider      String
+  event_id      String
+  event_type    String
+  payload       Json
+  processed_at  DateTime @default(now()) @db.Timestamp(6)
+  status        String
+  error_message String?
+
+  @@unique([provider, event_id], map: "webhook_events_event_id_idx")
+}
+
+model whatsapp_audit_log {
+  id                 Int                 @id @default(autoincrement())
+  application_id     Int?
+  template_id        Int?
+  template_type      String?
+  recipient_phone    String
+  message_id         String?
+  status             String              @default("pending")
+  error_code         String?
+  error_message      String?
+  template_variables Json?
+  sent_at            DateTime            @default(now()) @db.Timestamp(6)
+  delivered_at       DateTime?           @db.Timestamp(6)
+  read_at            DateTime?           @db.Timestamp(6)
+  sent_by            Int?
+  applications       applications?       @relation(fields: [application_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users              users?              @relation(fields: [sent_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  whatsapp_templates whatsapp_templates? @relation(fields: [template_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([application_id])
+  @@index([message_id])
+  @@index([sent_at])
+  @@index([status])
+}
+
+model whatsapp_templates {
+  id                 Int                  @id @default(autoincrement())
+  name               String
+  meta_template_name String               @unique
+  meta_template_id   String?
+  language           String               @default("en")
+  template_type      String
+  category           String               @default("UTILITY")
+  body_template      String
+  status             String               @default("pending")
+  rejection_reason   String?
+  created_at         DateTime             @default(now()) @db.Timestamp(6)
+  whatsapp_audit_log whatsapp_audit_log[]
+
+  @@index([status])
+  @@index([template_type], map: "whatsapp_templates_type_idx")
 }
 
 model Person {
@@ -126,7 +1348,7 @@ model Candidate {
   // Data from search snippets (public SERP data, not scraped)
   searchTitle   String? @db.Text // Title from Google result
   searchSnippet String? @db.Text // Snippet from Google result
-  searchMeta    Json?            // KG + answerBox from Serper (providerMeta)
+  searchMeta    Json? // KG + answerBox from Serper (providerMeta)
 
   // Parsed hints from search (not authoritative)
   nameHint      String? // Parsed from title, may be wrong
@@ -148,26 +1370,21 @@ model Candidate {
   lastEnrichedAt   DateTime?
   confidenceScore  Float? // Overall confidence (0.0-1.0)
 
-  // Location confidence (persisted from calculateLocationConfidence() output)
-  locationConfidence Float?   // 0.0-1.0
-  locationSource     String?  // 'serp_snippet' | 'serp_title' | 'profile' | 'resume' | 'llm'
-
-  // Timestamps
+  profilePictureUrl String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   // Relations
-  identityCandidates  IdentityCandidate[]
-  confirmedIdentities ConfirmedIdentity[]
-  enrichmentSessions  EnrichmentSession[]
-  sourcingCandidates  JobSourcingCandidate[]
+  identityCandidates    IdentityCandidate[]
+  confirmedIdentities   ConfirmedIdentity[]
+  enrichmentSessions    EnrichmentSession[]
+  sourcingCandidates    JobSourcingCandidate[]
   intelligenceSnapshots CandidateIntelligenceSnapshot[]
   globalLink          CandidateGlobalLink?
 
   // Tenant-scoped unique constraints
   @@unique([tenantId, linkedinUrl])
   @@unique([tenantId, linkedinId])
-
   @@index([tenantId])
   @@index([tenantId, linkedinId])
   @@index([roleType])
@@ -182,7 +1399,7 @@ model CandidateIntelligenceSnapshot {
   id                  String   @id @default(cuid())
   candidateId         String
   tenantId            String
-  track               String   @default("tech")  // tech | non_tech
+  track               String   @default("tech") // tech | non_tech
   skillsNormalized    String[]
   roleType            String?
   seniorityBand       String?
@@ -195,11 +1412,7 @@ model CandidateIntelligenceSnapshot {
   sourceFingerprint   String?
   signalsJson         Json?
 
-  // Location confidence (copied from Candidate at snapshot time)
-  locationConfidence  Float?
-  locationSource      String?
-
-  candidate           Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
 
   @@unique([candidateId, tenantId, track])
   @@index([tenantId, track])
@@ -230,9 +1443,9 @@ model IdentityCandidate {
   scoreBreakdown Json? // { bridgeWeight, nameMatch, companyMatch, ... }
 
   // Bridge detection (v2.1)
-  bridgeTier     Int?    // 1 = auto-merge, 2 = human review, 3 = weak
-  bridgeSignals  Json?   // Array of signal strings like ['linkedin_url_in_bio']
-  persistReason  String? // Why this identity was persisted
+  bridgeTier    Int? // 1 = auto-merge, 2 = human review, 3 = weak
+  bridgeSignals Json? // Array of signal strings like ['linkedin_url_in_bio']
+  persistReason String? // Why this identity was persisted
 
   // Evidence pointers (NO PII like emails stored here)
   // Example: { type: "commit_email", commitUrl: "...", commitSha: "..." }
@@ -253,7 +1466,6 @@ model IdentityCandidate {
 
   // Tenant-scoped unique constraint
   @@unique([tenantId, candidateId, platform, platformId])
-
   @@index([tenantId])
   @@index([candidateId])
   @@index([platform])
@@ -300,7 +1512,6 @@ model ConfirmedIdentity {
   // Tenant-scoped unique constraints
   @@unique([tenantId, candidateId, platform, platformId])
   @@unique([tenantId, identityCandidateId])
-
   @@index([tenantId])
   @@index([candidateId])
   @@index([platform])
@@ -345,7 +1556,7 @@ model EnrichmentSession {
   durationMs  Int?
 
   // Optional summary output (generated after discovery)
-  summary            String?  @db.Text
+  summary            String?   @db.Text
   summaryStructured  Json?
   summaryEvidence    Json?
   summaryModel       String?
@@ -411,9 +1622,9 @@ model TenantSettings {
   rateLimitMultiplier Float @default(1.0) // 1.0 = standard, 2.0 = double limits
 
   // Enrichment budget configuration
-  maxEnrichmentsPerDay   Int @default(100) // Daily enrichment limit
+  maxEnrichmentsPerDay    Int @default(100) // Daily enrichment limit
   maxQueriesPerEnrichment Int @default(30) // Max queries per enrichment session
-  maxParallelPlatforms   Int @default(3) // Max platforms to query in parallel
+  maxParallelPlatforms    Int @default(3) // Max platforms to query in parallel
 
   // Feature flags (JSON for flexibility)
   features Json? // { summaryEnabled: true, autoConfirmHighConfidence: false, ... }
@@ -457,7 +1668,6 @@ model SearchCacheV2 {
 
   // Tenant-scoped unique constraint
   @@unique([tenantId, queryHash])
-
   @@index([tenantId])
   @@index([tenantId, queryHash])
   @@index([expiresAt])
@@ -483,26 +1693,26 @@ model CandidateGlobalLink {
 }
 
 model JobSourcingRequest {
-  id                String   @id @default(cuid())
-  tenantId          String
-  externalJobId     String
-  jobContextHash    String
-  jobContext        Json
-  callbackUrl       String
-  status            String   @default("queued")
-  requestedAt       DateTime @default(now())
-  completedAt       DateTime?
-  callbackAttempts  Int      @default(0)
-  lastCallbackError String?  @db.Text
-  callbackStatus    String?  @map("callback_status")
-  callbackSentAt    DateTime? @map("callback_sent_at")
-  resultCount       Int?
-  qualityGateTriggered Boolean @default(false) @map("quality_gate_triggered")
-  queriesExecuted      Int     @default(0) @map("queries_executed")
+  id                   String    @id @default(cuid())
+  tenantId             String
+  externalJobId        String
+  jobContextHash       String
+  jobContext           Json
+  callbackUrl          String
+  status               String    @default("queued")
+  requestedAt          DateTime  @default(now())
+  completedAt          DateTime?
+  callbackAttempts     Int       @default(0)
+  lastCallbackError    String?   @db.Text
+  callbackStatus       String?   @map("callback_status")
+  callbackSentAt       DateTime? @map("callback_sent_at")
+  resultCount          Int?
+  qualityGateTriggered Boolean   @default(false) @map("quality_gate_triggered")
+  queriesExecuted      Int       @default(0) @map("queries_executed")
   diagnostics          Json?
-  lastRerankedAt    DateTime? @map("last_reranked_at")
+  lastRerankedAt       DateTime? @map("last_reranked_at")
 
-  candidates        JobSourcingCandidate[]
+  candidates JobSourcingCandidate[]
 
   @@unique([tenantId, externalJobId, jobContextHash])
   @@index([tenantId, status])
@@ -520,8 +1730,8 @@ model JobSourcingCandidate {
   enrichmentStatus  String
   rank              Int
 
-  sourcingRequest   JobSourcingRequest @relation(fields: [sourcingRequestId], references: [id])
-  candidate         Candidate          @relation(fields: [candidateId], references: [id])
+  sourcingRequest JobSourcingRequest @relation(fields: [sourcingRequestId], references: [id])
+  candidate       Candidate          @relation(fields: [candidateId], references: [id])
 
   @@unique([sourcingRequestId, candidateId])
   @@index([tenantId, sourcingRequestId])

@@ -18,7 +18,7 @@ import { parseSearchQuery } from '@/lib/search/parsers';
 import { searchLinkedInProfilesWithMeta, getProviderConfig } from '@/lib/search/providers';
 import type { ProfileSummary } from '@/types/linkedin';
 import type { Prisma } from '@prisma/client';
-import { extractAllHints, extractCompanyFromHeadline } from '@/lib/enrichment/hint-extraction';
+import { extractAllHints, extractCompanyFromHeadline } from '@/lib/search/hint-extraction';
 import crypto from 'crypto';
 import {
   withRateLimit,
@@ -404,3 +404,4 @@ export async function GET() {
     },
   });
 }
+

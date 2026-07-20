@@ -31,6 +31,60 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
+# pipeline debug logs (overwritten on each run, not for version control)
+/pipeline-logs/
+worker.log
+
+# env files (do not commit secrets)
+.env
+.env*.local
+.env.production
+!.env.example
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+.github/*
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+Screenshot*.png
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# pipeline debug logs (overwritten on each run, not for version control)
+/pipeline-logs/
+worker.log
+
 # env files (do not commit secrets)
 .env
 .env*.local
@@ -58,7 +112,15 @@ prisma/.env
 *.swp
 *.swo
 *~
-
-# research experiment outputs
-research/experiments/*
-!research/experiments/.gitkeep
+# Scratch files
+candidates_dump.txt
+old_schema.txt
+schema_dump.txt
+fix.js
+test-crustdata.ts
+test-skills.ts
+update-key.cjs
+src/lib/sourcing/test_ankush.ts
+src/lib/sourcing/test_regex.ts
+src/lib/sourcing/check.ts
+scripts/queue-check.ts

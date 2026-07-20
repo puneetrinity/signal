@@ -8,23 +8,14 @@
   "scripts": {
     "dev": "next dev",
     "build": "prisma generate && next build",
-    "start": "bash scripts/migrate-with-baseline.sh && next start",
+    "start": "(npx prisma migrate deploy || echo '[start] Migration failed or not needed, starting server anyway') && next start",
     "lint": "eslint",
     "postinstall": "prisma generate",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
     "db:seed": "tsx prisma/seed.ts",
     "db:generate": "prisma generate",
-    "worker:enrichment": "tsx src/lib/enrichment/worker.ts",
-    "worker:sourcing": "tsx src/lib/sourcing/worker.ts",
-    "eval": "tsx scripts/eval-enrichment.ts",
-    "eval:verbose": "tsx scripts/eval-enrichment.ts --verbose",
-    "eval:location": "tsx scripts/eval-location-hints.ts",
-    "eval:location:verbose": "tsx scripts/eval-location-hints.ts --verbose",
-    "eval:resolution": "tsx scripts/eval-location-resolution.ts",
-    "eval:resolution:verbose": "tsx scripts/eval-location-resolution.ts --verbose",
-    "research": "tsx scripts/research-runner.ts",
-    "debug-agent": "tsx scripts/signal-debug-agent.ts"
+    "worker:sourcing": "tsx src/lib/sourcing/worker.ts"
   },
   "dependencies": {
     "@ai-sdk/google": "^2.0.17",
@@ -69,6 +60,7 @@
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
+    "@faker-js/faker": "^10.4.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/pg": "^8.16.0",
