@@ -348,12 +348,14 @@ export async function runSourcingOrchestrator(
   const poolForRankingById = new Map(poolForRanking.map((r) => [r.id, r]));
 
   // 2.5 ActiveGraph Home Pool Search
-  const { generateTagsFromJD, searchHomePool } = await import('./activegraph-client');
+  const { generateTagsFromJD, searchHomePool, HOME_POOL_LIMIT } = await import(
+    './activegraph-client'
+  );
   const homeTags = generateTagsFromJD(requirements);
   let homeCandidates: any[] = [];
   try {
     // Search ActiveGraph for candidates matching the JD tags
-    homeCandidates = await searchHomePool(homeTags, tenantId, 300);
+    homeCandidates = await searchHomePool(homeTags, tenantId, HOME_POOL_LIMIT, requestId);
     log.info({ requestId, tags: homeTags, found: homeCandidates.length }, 'ActiveGraph home pool searched');
   } catch (err) {
     log.error({ err }, 'Failed to search ActiveGraph home pool');
