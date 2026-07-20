@@ -11,6 +11,7 @@ import { verifyServiceJWT } from '@/lib/auth/service-jwt';
 import { requireScope } from '@/lib/auth/service-scopes';
 import { prisma } from '@/lib/prisma';
 import { summarizeIdentitySignals } from '@/lib/sourcing/identity-summary';
+import { resolveLocationDeterministic } from '@/lib/taxonomy/location-service';
 
 function safeObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object'
