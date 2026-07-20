@@ -1105,13 +1105,23 @@ export async function runSourcingOrchestrator(
 
           await sendProgressCallback('pipeline_complete');
 
+          // A candidate can surface from more than one lane (tenant pool +
+          // Crustdata) and upsert to the same local id; dedupe by candidateId
+          // (keeping the first/best-ranked) before insert so the
+          // (sourcingRequestId, candidateId) unique constraint can't fail.
+          const seenFinalIds = new Set<string>();
+          const dedupedFinalAssembled = finalAssembled.filter((a) => {
+            if (seenFinalIds.has(a.candidateId)) return false;
+            seenFinalIds.add(a.candidateId);
+            return true;
+          });
           // Delete any existing JobSourcingCandidate records for retry idempotency
           await prisma.$transaction([
             prisma.jobSourcingCandidate.deleteMany({
               where: { sourcingRequestId: requestId },
             }),
             prisma.jobSourcingCandidate.createMany({
-              data: finalAssembled.map((a) => ({
+              data: dedupedFinalAssembled.map((a) => ({
                 tenantId,
                 sourcingRequestId: requestId,
                 candidateId: a.candidateId,
@@ -1946,13 +1956,21 @@ export async function runSourcingOrchestrator(
 
   const expandedCount = assembled.length - strictMatchedCount;
 
+  // Dedupe by candidateId (keep first/best-ranked) so a candidate present in
+  // more than one lane can't trip the (sourcingRequestId, candidateId) unique.
+  const seenAssembledIds = new Set<string>();
+  const dedupedAssembled = assembled.filter((a) => {
+    if (seenAssembledIds.has(a.candidateId)) return false;
+    seenAssembledIds.add(a.candidateId);
+    return true;
+  });
   // 5. Persist: deleteMany + createMany for retry idempotency
   await prisma.$transaction([
     prisma.jobSourcingCandidate.deleteMany({
       where: { sourcingRequestId: requestId },
     }),
     prisma.jobSourcingCandidate.createMany({
-      data: assembled.map((a) => ({
+      data: dedupedAssembled.map((a) => ({
         tenantId,
         sourcingRequestId: requestId,
         candidateId: a.candidateId,
