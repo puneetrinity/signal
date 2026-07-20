@@ -17,7 +17,7 @@ import type {
   RawSearchResult,
   SearchProviderType,
 } from './types';
-import { extractLocationFromSnippet } from '@/lib/enrichment/hint-extraction';
+import { extractLocationFromSnippet } from '@/lib/search/hint-extraction';
 
 interface SearXNGResult {
   url: string;
@@ -297,3 +297,4 @@ export const searxngProvider: SearchProvider = {
 };
 
 export default searxngProvider;
+

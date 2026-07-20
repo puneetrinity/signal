@@ -12,7 +12,7 @@ const log = createLogger('SourcingCallback');
 
 export const MAX_ATTEMPTS = 5;
 export const BASE_DELAYS_MS = [1_000, 3_000, 10_000, 30_000];
-const REQUEST_TIMEOUT_MS = 10_000;
+const REQUEST_TIMEOUT_MS = 300_000; // 5 minutes
 
 export function jitteredDelay(baseMs: number): number {
   return Math.round(baseMs * (0.8 + Math.random() * 0.4));
@@ -163,7 +163,6 @@ export async function redeliverStaleCallbacks(opts: {
       externalJobId: req.externalJobId,
       status: 'complete',
       candidateCount: req.resultCount ?? 0,
-      enrichedCount: 0,
     };
 
     try {

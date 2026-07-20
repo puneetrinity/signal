@@ -3,6 +3,7 @@
  *
  * Returns sourcing results for a job. Optionally filter by requestId.
  * Scope: jobs:results
+ * Note: Prisma types were recently regenerated.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -10,8 +11,6 @@ import { verifyServiceJWT } from '@/lib/auth/service-jwt';
 import { requireScope } from '@/lib/auth/service-scopes';
 import { prisma } from '@/lib/prisma';
 import { summarizeIdentitySignals } from '@/lib/sourcing/identity-summary';
-import { isNonTechShadow } from '@/lib/enrichment/config';
-import { resolveLocationDeterministic } from '@/lib/taxonomy/location-service';
 
 function safeObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object'
@@ -50,17 +49,22 @@ export async function GET(
   const { id: externalJobId } = await params;
   const tenantId = auth.context.tenantId;
   const requestId = request.nextUrl.searchParams.get('requestId');
+  const includeSummary = request.nextUrl.searchParams.get('includeSummary') === 'true';
+  const includeEvidence = request.nextUrl.searchParams.get('includeEvidence') === 'true';
+  const includeScoreBreakdown = request.nextUrl.searchParams.get('includeScoreBreakdown') === 'true';
+  const limit = parseInt(request.nextUrl.searchParams.get('limit') || '100', 10);
 
   const where = requestId
     ? { id: requestId, tenantId, externalJobId }
     : { tenantId, externalJobId };
 
-  const sourcingRequest = await prisma.jobSourcingRequest.findFirst({
+  const sourcingRequest = (await prisma.jobSourcingRequest.findFirst({
     where,
     orderBy: { requestedAt: 'desc' },
     include: {
       candidates: {
         orderBy: { rank: 'asc' },
+        take: limit,
         include: {
           candidate: {
             select: {
@@ -78,6 +82,18 @@ export async function GET(
               enrichmentStatus: true,
               confidenceScore: true,
               lastEnrichedAt: true,
+              profilePictureUrl: true,
+              enrichmentSessions: {
+                orderBy: { createdAt: 'desc' },
+                take: 1,
+                select: {
+                  id: true,
+                  status: true,
+                  summary: true,
+                  summaryStructured: true,
+                  summaryGeneratedAt: true,
+                }
+              },
               intelligenceSnapshots: {
                 where: { track: { in: ['tech', 'non-tech'] } },
                 orderBy: { computedAt: 'desc' },
@@ -97,7 +113,7 @@ export async function GET(
         },
       },
     },
-  });
+  })) as any;
 
   if (!sourcingRequest) {
     return NextResponse.json(
@@ -106,36 +122,42 @@ export async function GET(
     );
   }
 
-  const candidateIds = sourcingRequest.candidates.map((c) => c.candidateId);
+  const candidates = (sourcingRequest as any).candidates || [];
+  const candidateIds = candidates.map((c: any) => c.candidateId);
   const [identitySignals, confirmedSignals] = candidateIds.length > 0
     ? await Promise.all([
-        prisma.identityCandidate.findMany({
-          where: {
-            tenantId,
-            candidateId: { in: candidateIds },
-          },
-          select: {
-            candidateId: true,
-            platform: true,
-            status: true,
-            confidence: true,
-            bridgeTier: true,
-            updatedAt: true,
-            discoveredAt: true,
-          },
-        }),
-        prisma.confirmedIdentity.findMany({
-          where: {
-            tenantId,
-            candidateId: { in: candidateIds },
-          },
-          select: {
-            candidateId: true,
-            platform: true,
-            confirmedAt: true,
-          },
-        }),
-      ])
+      prisma.identityCandidate.findMany({
+        where: {
+          tenantId,
+          candidateId: { in: candidateIds },
+        },
+        select: {
+          id: true,
+          candidateId: true,
+          platform: true,
+          platformId: true,
+          profileUrl: true,
+          status: true,
+          confidence: true,
+          bridgeTier: true,
+          ...(includeEvidence ? { evidence: true } : {}),
+          ...(includeScoreBreakdown ? { scoreBreakdown: true } : {}),
+          updatedAt: true,
+          discoveredAt: true,
+        },
+      }),
+      prisma.confirmedIdentity.findMany({
+        where: {
+          tenantId,
+          candidateId: { in: candidateIds },
+        },
+        select: {
+          candidateId: true,
+          platform: true,
+          confirmedAt: true,
+        },
+      }),
+    ])
     : [[], []];
 
   const identityByCandidateId = new Map<string, typeof identitySignals>();
@@ -154,12 +176,8 @@ export async function GET(
 
   const now = new Date();
 
-  // Compute per-candidate results and collect snapshot stats
-  let totalWithSnapshot = 0;
-  let staleCount = 0;
-  let totalAgeDays = 0;
-
-  const nonTechShadow = isNonTechShadow();
+  // Compute per-candidate results
+  const nonTechShadow = false;
   const diagnosticsObj = sourcingRequest.diagnostics as Record<string, unknown> | null;
   const diag = diagnosticsObj ?? {};
   const discoveredPromotedInTopCount = (diag.discoveredPromotedInTopCount as number) ?? 0;
@@ -171,26 +189,14 @@ export async function GET(
       : null,
   );
 
-  const candidateResults = sourcingRequest.candidates.map((sc) => {
-    const techSnap = sc.candidate.intelligenceSnapshots.find((s) => s.track === 'tech') ?? null;
-    const nonTechSnap = sc.candidate.intelligenceSnapshots.find((s) => s.track === 'non-tech') ?? null;
+  const candidateResults = candidates.map((sc: any) => {
+    const techSnap = sc.candidate.intelligenceSnapshots.find((s: any) => s.track === 'tech') ?? null;
+    const nonTechSnap = sc.candidate.intelligenceSnapshots.find((s: any) => s.track === 'non-tech') ?? null;
     const identitySummary = summarizeIdentitySignals(
       identityByCandidateId.get(sc.candidateId) ?? [],
       confirmedByCandidateId.get(sc.candidateId) ?? [],
     );
     const searchSignals = readSearchSignals(sc.candidate.searchMeta);
-
-    let snapshotAgeDays: number | null = null;
-    let staleServed = false;
-    if (techSnap) {
-      totalWithSnapshot++;
-      snapshotAgeDays = Math.floor(
-        (now.getTime() - techSnap.computedAt.getTime()) / (24 * 60 * 60 * 1000),
-      );
-      totalAgeDays += snapshotAgeDays;
-      staleServed = techSnap.staleAfter < now;
-      if (staleServed) staleCount++;
-    }
 
     // Build professionalValidation from non-tech snapshot (null-safe)
     let professionalValidation: {
@@ -222,13 +228,14 @@ export async function GET(
     // Build snapshot output (tech only, preserving existing shape)
     const snapshot = techSnap
       ? {
-          skillsNormalized: techSnap.skillsNormalized,
-          roleType: techSnap.roleType,
-          seniorityBand: techSnap.seniorityBand,
-          location: techSnap.location,
-          computedAt: techSnap.computedAt,
-          staleAfter: techSnap.staleAfter,
-        }
+        skillsNormalized: techSnap.skillsNormalized,
+        roleType: techSnap.roleType,
+        seniorityBand: techSnap.seniorityBand,
+        location: techSnap.location,
+        computedAt: techSnap.computedAt,
+        staleAfter: techSnap.staleAfter,
+        signalsJson: techSnap.signalsJson,
+      }
       : null;
 
     // Extract tier metadata from persisted fitBreakdown JSON
@@ -243,25 +250,25 @@ export async function GET(
     const rawLocationMatchType = (fbRaw?.locationMatchType as string) ?? null;
     const locationMatchType =
       rawLocationMatchType === 'city_exact' ||
-      rawLocationMatchType === 'city_alias' ||
-      rawLocationMatchType === 'country_only' ||
-      rawLocationMatchType === 'unknown_location' ||
-      rawLocationMatchType === 'none'
+        rawLocationMatchType === 'city_alias' ||
+        rawLocationMatchType === 'country_only' ||
+        rawLocationMatchType === 'unknown_location' ||
+        rawLocationMatchType === 'none'
         ? rawLocationMatchType
         : null;
 
     // Clean fitBreakdown: score fields + method flag (strip tier metadata)
     const fitBreakdown = fbRaw
       ? {
-          skillScore: fbRaw.skillScore ?? null,
-          skillScoreMethod: fbRaw.skillScoreMethod ?? null,
-          roleScore: fbRaw.roleScore ?? null,
-          seniorityScore: fbRaw.seniorityScore ?? null,
-          effectiveSeniorityScore: fbRaw.effectiveSeniorityScore ?? null,
-          activityFreshnessScore: fbRaw.activityFreshnessScore ?? null,
-          locationBoost: fbRaw.locationBoost ?? null,
-          unknownLocationPromotion: Boolean(fbRaw.unknownLocationPromotion),
-        }
+        skillScore: fbRaw.skillScore ?? null,
+        skillScoreMethod: fbRaw.skillScoreMethod ?? null,
+        matchedSkills: Array.isArray(fbRaw.matchedSkills) ? fbRaw.matchedSkills : [],
+        roleScore: fbRaw.roleScore ?? null,
+        seniorityScore: fbRaw.seniorityScore ?? null,
+        activityFreshnessScore: fbRaw.activityFreshnessScore ?? null,
+        locationBoost: fbRaw.locationBoost ?? null,
+        unknownLocationPromotion: Boolean(fbRaw.unknownLocationPromotion),
+      }
       : null;
 
     const rawDataConfidence = fbRaw?.dataConfidence;
@@ -289,110 +296,153 @@ export async function GET(
             ? 'location_mismatch'
             : 'location_unknown';
 
-    // Derive countryCode from snapshot location or locationHint
-    const locationText = techSnap?.location ?? sc.candidate.locationHint;
-    let countryCode: string | null = null;
-    if (locationText) {
-      const resolved = resolveLocationDeterministic(locationText);
-      countryCode = resolved.countryCode;
+    const session = sc.candidate.enrichmentSessions?.[0];
+    let aiSummary: { text: string; skills: string[] } | null = null;
+    if (includeSummary && session?.summary) {
+      const structured = (session.summaryStructured as { skills?: string[] }) || {};
+      aiSummary = {
+        text: session.summary,
+        skills: structured?.skills ?? [],
+      };
     }
 
+    const fitScore = sc.fitScore ?? 0;
+    const matchStrength = fitScore >= 0.8 ? 'strong' : fitScore >= 0.6 ? 'good' : 'possible';
+
+    let locationStatus: 'verified' | 'partial' | 'unverified' | 'mismatch' | 'unknown' = 'unknown';
+    if (locationLabel === 'location_verified') locationStatus = 'verified';
+    else if (locationLabel === 'location_unverified' || locationLabel === 'location_unverified_promoted') locationStatus = 'unverified';
+    else if (locationLabel === 'location_mismatch') locationStatus = 'mismatch';
+
+    // Crustdata provides rich data directly — use as fallback before enrichment
+    const searchMetaObj = sc.candidate.searchMeta as Record<string, unknown> | null;
+    const crustdata = searchMetaObj?.crustdata as any | undefined;
+
+    const crustdataEmail: string | null = null; // Person Search doesn't return emails
+    const crustdataSummary = crustdata?.basic_profile?.summary as string | undefined;
+
+    // Free contact availability flags from Person Search
+    const crustdataContact = crustdata?.contact as { has_business_email?: boolean; has_personal_email?: boolean; has_phone_number?: boolean } | undefined;
+
+    // Social handles from Person Search
+    const crustdataTwitter = crustdata?.social_handles?.twitter_identifier?.slug as string | undefined;
+    const crustdataGithub = crustdata?.social_handles?.dev_platform_identifier?.profile_url as string | undefined;
+
+    // Skills waterfall: AI snapshot > AI summary > (Person Search doesn't return skills)
+    let skillsTopN: string[] = [];
+    if (techSnap?.skillsNormalized && Array.isArray(techSnap.skillsNormalized)) {
+      skillsTopN = (techSnap.skillsNormalized as string[]).slice(0, 5);
+    } else if (nonTechSnap?.skillsNormalized && Array.isArray(nonTechSnap.skillsNormalized)) {
+      skillsTopN = (nonTechSnap.skillsNormalized as string[]).slice(0, 5);
+    } else if (aiSummary?.skills && Array.isArray(aiSummary.skills)) {
+      skillsTopN = aiSummary.skills.slice(0, 5);
+    }
+
+    const summaryText = aiSummary?.text ?? (crustdataSummary || null);
+    const summaryShort = summaryText && summaryText.length > 200 ? summaryText.substring(0, 200) + '...' : summaryText;
+
+    const location = techSnap?.location || nonTechSnap?.location || sc.candidate.locationHint;
+
+    const identities = (identityByCandidateId.get(sc.candidateId) ?? []).map(ident => ({
+      platform: ident.platform,
+      platformId: ident.platformId,   // actual value: email address, phone number, github username etc.
+      profileUrl: ident.profileUrl,
+      confidence: ident.confidence,
+      ...(includeScoreBreakdown && ident.scoreBreakdown ? { scoreBreakdown: ident.scoreBreakdown } : {})
+    }));
+
+    const emailIdentity = identities.find(i => i.platform === 'email');
+    const phoneIdentity = identities.find(i => i.platform === 'phone');
+    let githubIdentity = identities.find(i => i.platform === 'github');
+    let twitterIdentity = identities.find(i => i.platform === 'twitter');
+
+    if (!githubIdentity && crustdataGithub) {
+      githubIdentity = {
+        platform: 'github',
+        platformId: crustdataGithub.split('/').pop() || '',
+        profileUrl: crustdataGithub,
+        confidence: 0.9,
+      };
+      identities.push(githubIdentity);
+    }
+
+    if (!twitterIdentity && crustdataTwitter) {
+      const cleanTwitter = crustdataTwitter.replace(/^@/, '');
+      twitterIdentity = {
+        platform: 'twitter',
+        platformId: cleanTwitter,
+        profileUrl: `https://twitter.com/${cleanTwitter}`,
+        confidence: 0.9,
+      };
+      identities.push(twitterIdentity);
+    }
+
+    const emailAvailable = !!emailIdentity || !!crustdataEmail || !!(crustdataContact?.has_business_email || crustdataContact?.has_personal_email);
+    const phoneAvailable = !!phoneIdentity || !!crustdataContact?.has_phone_number;
+
     return {
-      candidateId: sc.candidateId,
+      // --- NEW UNIFIED CARD SCHEMA ---
+      candidate: {
+        id: sc.candidate.id,
+        name: sc.candidate.nameHint,
+        linkedinUrl: sc.candidate.linkedinUrl,
+        headline: sc.candidate.headlineHint,
+        location,
+        company: sc.candidate.companyHint,
+        // Include legacy hints just in case
+        nameHint: sc.candidate.nameHint,
+        locationHint: sc.candidate.locationHint,
+        headlineHint: sc.candidate.headlineHint,
+        companyHint: sc.candidate.companyHint,
+        enrichmentStatus: sc.candidate.enrichmentStatus,
+        confidenceScore: sc.candidate.confidenceScore,
+        lastEnrichedAt: sc.candidate.lastEnrichedAt,
+        profilePictureUrl: sc.candidate.profilePictureUrl,
+        searchMeta: sc.candidate.searchMeta,
+      },
+      sourcingContext: {
+        rank: sc.rank,
+        matchStrength,
+        locationStatus,
+      },
+      cardSignals: {
+        skillsTopN,
+        summaryShort,
+        emailAvailable,
+        phoneAvailable,
+        // Actual contact values — enrichment layer OR direct from Crustdata screener
+        email: emailIdentity?.platformId ?? crustdataEmail,
+        phone: phoneIdentity?.platformId ?? null,
+        github: githubIdentity?.profileUrl ?? (githubIdentity?.platformId ? `https://github.com/${githubIdentity.platformId}` : null),
+        twitter: twitterIdentity?.profileUrl ?? (twitterIdentity?.platformId ? `https://twitter.com/${twitterIdentity.platformId}` : null),
+        activeSeeker: false,
+      },
+      crustdata, // EXPOSE THE RAW CRUSTDATA TO THE UI
+      // --- DETAILED FIELDS FOR DETAIL VIEW ---
+      snapshot,
+      professionalValidation,
       fitScore: sc.fitScore,
       fitBreakdown,
       matchTier,
       locationMatchType,
-      locationLabel,
-      countryCode,
       dataConfidence,
-      sourceType: sc.sourceType,
-      enrichmentStatus: sc.enrichmentStatus,
-      rank: sc.rank,
-      candidate: {
-        id: sc.candidate.id,
-        linkedinUrl: sc.candidate.linkedinUrl,
-        linkedinId: sc.candidate.linkedinId,
-        nameHint: sc.candidate.nameHint,
-        headlineHint: sc.candidate.headlineHint,
-        locationHint: sc.candidate.locationHint,
-        companyHint: sc.candidate.companyHint,
-        seniorityHint: sc.candidate.seniorityHint,
-        searchSnippet: sc.candidate.searchSnippet ?? null,
-        searchMeta: sc.candidate.searchMeta ?? null,
-        searchProvider: sc.candidate.searchProvider ?? null,
-        searchSignals,
-        enrichmentStatus: sc.candidate.enrichmentStatus,
-        confidenceScore: sc.candidate.confidenceScore,
-        lastEnrichedAt: sc.candidate.lastEnrichedAt,
-      },
-      identitySummary,
-      snapshot,
-      freshness: {
-        snapshotAgeDays,
-        staleServed,
-        lastEnrichedAt: sc.candidate.lastEnrichedAt?.toISOString() ?? null,
-      },
-      professionalValidation,
+      locationLabel,
+      ...(identities.length > 0 ? {
+        identitySummary: {
+          topConfidence: Math.max(...identities.map(i => i.confidence)),
+          platforms: Array.from(new Set(identities.map(i => i.platform)))
+        },
+        identities
+      } : {}),
+      ...(aiSummary ? { aiSummary } : {}),
     };
   });
 
-  const snapshotStats = {
-    totalWithSnapshot,
-    staleCount,
-    avgAgeDays: totalWithSnapshot > 0
-      ? Math.round((totalAgeDays / totalWithSnapshot) * 10) / 10
-      : null,
-  };
-
-  // Extract trackDecision from diagnostics (null-safe for pre-classifier requests)
-  const trackDecision = diagnosticsObj?.trackDecision ?? null;
-
-  // Compute group counts from candidate tier data
-  const strictCount = candidateResults.filter((c) => c.matchTier === 'best_matches').length;
-  const expandedCount = candidateResults.filter((c) => c.matchTier === 'broader_pool').length;
-  const groupCounts = {
-    bestMatches: strictCount,
-    broaderPool: expandedCount,
-    strictMatchedCount: strictCount,
-    expandedCount,
-    expansionReason: (diag.expansionReason as string) ?? null,
-    requestedLocation: (diag.requestedLocation as string) ?? null,
-    strictDemotedCount: (diag.strictDemotedCount as number) ?? 0,
-    strictRescuedCount: (diag.strictRescuedCount as number) ?? 0,
-    strictRescueApplied: (diag.strictRescueApplied as boolean) ?? false,
-    strictRescueMinFitScoreUsed: (diag.strictRescueMinFitScoreUsed as number) ?? null,
-    countryGuardFilteredCount: (diag.countryGuardFilteredCount as number) ?? 0,
-    minDiscoveryPerRunApplied: (diag.minDiscoveryPerRunApplied as number) ?? 0,
-    minDiscoveredInOutputApplied: (diag.minDiscoveredInOutputApplied as number) ?? 0,
-    discoveredPromotedCount: (diag.discoveredPromotedCount as number) ?? 0,
-    discoveredPromotedInTopCount: (diag.discoveredPromotedInTopCount as number) ?? 0,
-    unknownLocationPromotedCount: (diag.unknownLocationPromotedCount as number) ?? 0,
-    discoveredOrphanCount: (diag.discoveredOrphanCount as number) ?? 0,
-    discoveredOrphanQueued: (diag.discoveredOrphanQueued as number) ?? 0,
-    locationMatchCounts: (diag.locationMatchCounts as Record<string, number>) ?? null,
-    demotedStrictWithCityMatch: (diag.demotedStrictWithCityMatch as number) ?? 0,
-    strictBeforeDemotion: (diag.strictBeforeDemotion as number) ?? 0,
-    selectedSnapshotTrack: (diag.selectedSnapshotTrack as string) ?? 'tech',
-  };
-
   return NextResponse.json({
-    success: true,
     requestId: sourcingRequest.id,
     externalJobId: sourcingRequest.externalJobId,
-    status: sourcingRequest.status,
-    callbackStatus: sourcingRequest.callbackStatus ?? null,
-    callbackSentAt: sourcingRequest.callbackSentAt?.toISOString() ?? null,
-    requestedAt: sourcingRequest.requestedAt.toISOString(),
-    completedAt: sourcingRequest.completedAt?.toISOString() ?? null,
-    lastRerankedAt: sourcingRequest.lastRerankedAt?.toISOString() ?? null,
     resultCount: sourcingRequest.resultCount,
-    qualityGateTriggered: sourcingRequest.qualityGateTriggered,
-    queriesExecuted: sourcingRequest.queriesExecuted,
-    diagnostics: sourcingRequest.diagnostics,
-    trackDecision,
-    groupCounts,
-    snapshotStats,
-    candidates: candidateResults,
+    data: candidateResults,
   });
 }
+

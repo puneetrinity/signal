@@ -5,7 +5,7 @@
 
 import { prisma } from '@/lib/prisma';
 import { buildJobRequirements, type SourcingJobContextInput } from './jd-digest';
-import { canonicalizeLocation, extractPrimaryCity } from './ranking';
+import { canonicalizeLocation, extractPrimaryCity } from './ranking-new';
 
 /**
  * Returns candidate IDs that appeared in recent completed sourcing requests

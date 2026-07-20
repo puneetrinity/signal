@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/prisma';
-import { extractAllHints, extractCompanyFromHeadline } from '@/lib/enrichment/hint-extraction';
+import { extractAllHints, extractCompanyFromHeadline } from '@/lib/search/hint-extraction';
 import {
   normalizeHint,
   shouldReplaceHint,
@@ -32,89 +32,92 @@ export async function upsertDiscoveredCandidates(
 ): Promise<Map<string, string>> {
   const candidateMap = new Map<string, string>();
 
-  for (const result of profiles) {
-    const linkedinId = extractLinkedInId(result.linkedinUrl);
-    if (!linkedinId) continue;
+  const chunkSize = 25;
+  for (let i = 0; i < profiles.length; i += chunkSize) {
+    const chunk = profiles.slice(i, i + chunkSize);
+    await Promise.all(
+      chunk.map(async (result) => {
+        const linkedinId = extractLinkedInId(result.linkedinUrl);
+        if (!linkedinId) return;
 
-    const extractedHints = extractAllHints(linkedinId, result.title, result.snippet);
-    const nameHint = normalizeHint(result.name ?? extractedHints.nameHint ?? undefined) ?? undefined;
-    const headlineHint = normalizeHint(result.headline ?? extractedHints.headlineHint ?? undefined) ?? undefined;
-    const providerLocation = normalizeHint(result.location ?? undefined) ?? undefined;
-    const extractedLocation = normalizeHint(extractedHints.locationHint ?? undefined) ?? undefined;
-    const providerLocScore = locationHintQualityScore(providerLocation ?? null);
-    const extractedLocScore = locationHintQualityScore(extractedLocation ?? null);
-    const locationHint =
-      providerLocScore >= extractedLocScore && providerLocScore > 0
-        ? providerLocation
-        : extractedLocScore > 0
-          ? extractedLocation
-          : undefined;
-    let companyHint = normalizeHint(extractedHints.companyHint ?? undefined) ?? undefined;
-    if (!companyHint && headlineHint) {
-      companyHint = normalizeHint(extractCompanyFromHeadline(headlineHint) ?? undefined) ?? undefined;
-    }
-    const seniorityHint = extractedHints.seniorityHint ?? undefined;
+        // Run hint extraction only over title + headline — NOT the full snippet blob.
+        // The snippet can be several KB of job description text, causing extractAllHints
+        // to pick up garbage (e.g. "UK" as a company name from "...based in the UK").
+        const hintText = [result.title, result.headline].filter(Boolean).join(' | ');
+        const extractedHints = extractAllHints(linkedinId, result.title, hintText);
+        const nameHint = normalizeHint(result.name ?? extractedHints.nameHint ?? undefined) ?? undefined;
+        const headlineHint = normalizeHint(result.headline ?? extractedHints.headlineHint ?? undefined) ?? undefined;
+        const locationHint = normalizeHint(result.location ?? extractedHints.locationHint ?? undefined) ?? undefined;
+        // Company: prefer explicit value from Crustdata structured field over text extraction.
+        let companyHint = normalizeHint(result.companyHint ?? extractedHints.companyHint ?? undefined) ?? undefined;
+        if (!companyHint && headlineHint) {
+          companyHint = normalizeHint(extractCompanyFromHeadline(headlineHint) ?? undefined) ?? undefined;
+        }
 
-    try {
-      const existing = await prisma.candidate.findUnique({
-        where: { tenantId_linkedinId: { tenantId, linkedinId } },
-        select: {
-          nameHint: true,
-          headlineHint: true,
-          locationHint: true,
-          companyHint: true,
-          seniorityHint: true,
-        },
-      });
+        try {
+          const existing = await prisma.candidate.findUnique({
+            where: { tenantId_linkedinId: { tenantId, linkedinId } },
+            select: {
+              nameHint: true,
+              headlineHint: true,
+              locationHint: true,
+              companyHint: true,
+              profilePictureUrl: true,
+            },
+          });
 
-      // For updates: only overwrite hint fields with truthy values to preserve
-      // existing clean data when new extraction yields nothing/noise.
-      const updateData: Prisma.CandidateUpdateInput = {
-        searchTitle: result.title,
-        searchSnippet: result.snippet,
-        searchMeta: (result.providerMeta ?? undefined) as Prisma.InputJsonValue | undefined,
-        searchProvider,
-        updatedAt: new Date(),
-      };
-      if (shouldReplaceHint(existing?.nameHint ?? null, nameHint)) updateData.nameHint = nameHint;
-      if (shouldReplaceHint(existing?.headlineHint ?? null, headlineHint)) updateData.headlineHint = headlineHint;
-      if (shouldReplaceLocationHint(existing?.locationHint ?? null, locationHint)) updateData.locationHint = locationHint;
-      if (shouldReplaceCompanyHint(existing?.companyHint ?? null, companyHint)) updateData.companyHint = companyHint;
-      if (shouldReplaceHint(existing?.seniorityHint ?? null, seniorityHint)) updateData.seniorityHint = seniorityHint;
+          const updateData: Prisma.CandidateUpdateInput = {
+            searchTitle: result.title,
+            searchSnippet: result.snippet,
+            searchMeta: ({
+              ...(result.providerMeta ?? {}),
+              ...(result.crustdata ? { crustdata: result.crustdata } : {}),
+            }) as Prisma.InputJsonValue,
+            searchProvider,
+            updatedAt: new Date(),
+          };
+          // Only overwrite profilePictureUrl if we don't already have one
+          // (enrichment-sourced pictures are higher quality than Crustdata CDN URLs).
+          if (result.profilePictureUrl && (!existing || !existing.profilePictureUrl)) {
+            updateData.profilePictureUrl = result.profilePictureUrl;
+          }
+          if (shouldReplaceHint(existing?.nameHint ?? null, nameHint)) updateData.nameHint = nameHint;
+          if (shouldReplaceHint(existing?.headlineHint ?? null, headlineHint)) updateData.headlineHint = headlineHint;
+          if (shouldReplaceLocationHint(existing?.locationHint ?? null, locationHint)) updateData.locationHint = locationHint;
+          if (shouldReplaceCompanyHint(existing?.companyHint ?? null, companyHint)) updateData.companyHint = companyHint;
 
-      const candidate = await prisma.candidate.upsert({
-        where: { tenantId_linkedinId: { tenantId, linkedinId } },
-        update: updateData,
-        create: {
-          tenantId,
-          linkedinUrl: result.linkedinUrl,
-          linkedinId,
-          searchTitle: result.title,
-          searchSnippet: result.snippet,
-          searchMeta: (result.providerMeta ?? undefined) as Prisma.InputJsonValue | undefined,
-          nameHint,
-          headlineHint,
-          locationHint,
-          companyHint,
-          seniorityHint,
-          captureSource: 'sourcing',
-          searchQuery,
-          searchProvider,
-        },
-      });
+          const candidate = await prisma.candidate.upsert({
+            where: { tenantId_linkedinId: { tenantId, linkedinId } },
+            update: updateData,
+            create: {
+              tenantId,
+              linkedinUrl: result.linkedinUrl,
+              linkedinId,
+              searchTitle: result.title,
+              searchSnippet: result.snippet,
+              searchMeta: ({
+                ...(result.providerMeta ?? {}),
+                ...(result.crustdata ? { crustdata: result.crustdata } : {}),
+              }) as Prisma.InputJsonValue,
+              nameHint,
+              headlineHint,
+              locationHint,
+              companyHint,
+              captureSource: 'sourcing',
+              searchQuery,
+              searchProvider,
+              ...(result.profilePictureUrl ? { profilePictureUrl: result.profilePictureUrl } : {}),
+            },
+          });
 
-      candidateMap.set(linkedinId, candidate.id);
-
-      // Async graph sync (non-blocking, best-effort)
-      enqueueGraphSync({
-        candidateId: candidate.id,
-        tenantId,
-        trigger: 'discovery',
-      }).catch(() => {}); // fire-and-forget
-    } catch (error) {
-      console.error(`[sourcing] Failed to upsert candidate ${linkedinId}:`, error);
-    }
+          candidateMap.set(linkedinId, candidate.id);
+        } catch (error) {
+          console.error(`[sourcing] Failed to upsert candidate ${linkedinId}:`, error);
+        }
+      })
+    );
   }
 
   return candidateMap;
 }
+
