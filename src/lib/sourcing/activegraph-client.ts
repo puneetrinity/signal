@@ -1,8 +1,16 @@
 import { JobRequirements } from './jd-digest';
 import type { CandidateForRanking } from './ranking-new';
 import type { CrustdataProfileResponse } from './crustdata-client';
+import { signActiveGraphJWT } from './activegraph-auth';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('activegraph-client');
 
 const ACTIVEGRAPH_URL = process.env.ACTIVEGRAPH_URL || 'http://localhost:8000';
+
+/** How many home-pool candidates to request per sourcing run. The server
+ * clamps to its own ceiling and reports truncation via total_matched. */
+export const HOME_POOL_LIMIT = parseInt(process.env.SOURCE_HOME_POOL_LIMIT || '300', 10);
 
 export interface ActiveGraphSearchResult {
   candidate_id: string;
@@ -92,28 +100,49 @@ export function generateTagsFromCandidate(c: CandidateForRanking): string[] {
 export async function searchHomePool(
   tags: string[],
   tenantId: string,
-  limit = 100
+  limit: number = HOME_POOL_LIMIT,
+  requestId?: string
 ): Promise<ActiveGraphSearchResult[]> {
   if (!tags.length) return [];
 
+  const token = await signActiveGraphJWT(tenantId, 'kg:read', requestId);
   const response = await fetch(`${ACTIVEGRAPH_URL}/candidates/search/by-tags`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify({
       tags,
+      // Kept for JWT-disabled dev environments; with JWT enabled the server
+      // derives the tenant from the token's tenant_id claim.
       tenant_id: tenantId,
       limit,
     }),
   });
 
   if (!response.ok) {
-    console.error(`[activegraph-client] search failed: ${response.status} ${response.statusText}`);
+    const body = await response.text().catch(() => '');
+    log.error(
+      { requestId, tenantId, status: response.status, body: body.slice(0, 300) },
+      'ActiveGraph home-pool search failed — continuing without home pool'
+    );
     return [];
   }
 
   const data = await response.json();
+  if (data.truncated) {
+    log.warn(
+      {
+        requestId,
+        tenantId,
+        returned: data.total,
+        totalMatched: data.total_matched,
+        appliedLimit: data.applied_limit,
+      },
+      'ActiveGraph home-pool result truncated — candidates above the limit were dropped'
+    );
+  }
   return data.results || [];
 }
 
@@ -144,16 +173,22 @@ export async function ingestCandidate(
     crustdata: candidate.crustdata,
   };
 
+  const token = await signActiveGraphJWT(tenantId, 'kg:write', requestId);
   const response = await fetch(`${ACTIVEGRAPH_URL}/candidates/resolve/signal/candidate`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify(payload),
   });
 
   if (!response.ok) {
-    console.error(`[activegraph-client] ingest failed for ${candidate.id}: ${response.status} ${response.statusText}`);
+    const body = await response.text().catch(() => '');
+    log.error(
+      { requestId, tenantId, candidateId: candidate.id, status: response.status, body: body.slice(0, 300) },
+      'ActiveGraph candidate ingest failed'
+    );
     return false;
   }
 
