@@ -140,12 +140,19 @@ interface CrustdataGroup {
 // VCs, or CEOs who merely mention a skill like "aws" in their headline.
 // These patterns are OR-joined with pipes, which Crustdata handles natively.
 //
+// PRECISION over recall (#24): terms must be ROLE-SPECIFIC. Generic catch-alls like
+// "software engineer"/"software developer" match ~everything — a live A/B showed the old
+// backend pattern matched 113,362 Bengaluru profiles (0/30 actually backend in the fit-blind
+// slice) vs 600 with backend-specific terms (30/30 backend). The scorer's roleScore taxonomy
+// treats "software engineer" as non-backend, so those generics also scored 2-3/15 and crowded
+// out true matches. Keep these tight; adaptive relaxation for sparse roles lives in #15.
+//
 const ROLE_FAMILY_HEADLINE_FILTERS: Record<string, string> = {
   devops: '(devops|sre|site reliability|platform engineer|infrastructure engineer|cloud engineer|devsecops)',
   sre: '(sre|site reliability|platform engineer|devops|infrastructure engineer)',
-  backend: '(backend|software engineer|software developer|full.?stack|api engineer)',
-  frontend: '(frontend|front.end|ui engineer|react developer|angular developer)',
-  fullstack: '(full.?stack|software engineer|software developer|backend|frontend)',
+  backend: '(backend|back.?end|api engineer|server.?side|backend developer)',
+  frontend: '(frontend|front.?end|ui engineer|react developer|angular developer|web developer)',
+  fullstack: '(full.?stack|full stack developer|full stack engineer)',
   data: '(data engineer|data scientist|analytics engineer|bi engineer|data platform)',
   ml: '(machine learning|ml engineer|data scientist|ai engineer|deep learning)',
   mobile: '(ios developer|android developer|mobile engineer|react native|flutter)',
