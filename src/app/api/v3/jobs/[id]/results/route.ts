@@ -307,8 +307,11 @@ export async function GET(
       };
     }
 
+    // fitScore is on a 0–100 scale (ranking-new emits 0–100). The thresholds
+    // must match that scale — comparing against 0.8/0.6 made EVERY nonzero
+    // score "strong". 80 = strong, 60 = good, below = possible.
     const fitScore = sc.fitScore ?? 0;
-    const matchStrength = fitScore >= 0.8 ? 'strong' : fitScore >= 0.6 ? 'good' : 'possible';
+    const matchStrength = fitScore >= 80 ? 'strong' : fitScore >= 60 ? 'good' : 'possible';
 
     let locationStatus: 'verified' | 'partial' | 'unverified' | 'mismatch' | 'unknown' = 'unknown';
     if (locationLabel === 'location_verified') locationStatus = 'verified';
