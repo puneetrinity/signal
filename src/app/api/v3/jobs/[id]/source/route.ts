@@ -25,6 +25,7 @@ const bodySchema = z.object({
     goodToHaveSkills: z.array(z.string()).optional(),
     location: z.string().optional(),
     experienceYears: z.number().optional(),
+    experienceYearsMax: z.number().optional(),
     education: z.string().optional(),
     // Track hint fields — excluded from jobContextHash (see idempotency caveat below)
     jobTrackHint: z.enum(['auto', 'tech', 'non_tech']).optional(),

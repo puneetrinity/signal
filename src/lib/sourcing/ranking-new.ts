@@ -230,6 +230,24 @@ function getAllRoles(crustdata: CrustdataProfileResponse) {
 
 // ─── COMPONENT SCORING ───
 
+// Total career years, overlap-safe: group roles by company and count each company's tenure
+// once (longest role wins). Mirrors Flow's UI computation (sourcing-experience.ts) so the
+// number we enforce bounds against is the number the recruiter sees. A naive per-role sum
+// double-counts promotions within one company (6yr shown as 18yr).
+export function computeTotalExperienceYears(c: CrustdataProfileResponse): number {
+  const ed = c.experience?.employment_details;
+  const roles = [...(ed?.current ?? []), ...(ed?.past ?? [])];
+  const byCompany = new Map<string, number>();
+  for (const role of roles) {
+    const key = (role.company_name || role.name || role.title || '?').toLowerCase();
+    const years = role.years_at_company_raw ?? getYearsDiff(role.start_date, role.end_date);
+    if (years > 0) byCompany.set(key, Math.max(byCompany.get(key) ?? 0, years));
+  }
+  let total = 0;
+  for (const y of byCompany.values()) total += y;
+  return total;
+}
+
 function computeExperienceScore(c: CrustdataProfileResponse, req: JobRequirements): number {
   const allRoles = getAllRoles(c);
   const currentRole = c.experience?.employment_details?.current?.[0];
@@ -284,6 +302,25 @@ function computeExperienceScore(c: CrustdataProfileResponse, req: JobRequirement
   else if (relevantYears >= 6) yearsPts = 7;
   else if (relevantYears >= 3) yearsPts = 5;
   else if (relevantYears >= 1) yearsPts = 3;
+
+  // Experience-bounds penalty (#24-B). Bounds are the recruiter's min/max on TOTAL career
+  // years; compare against the overlap-safe total (what the UI shows), with 1yr grace for
+  // approximate data ("1 to 2 years" ranges). Penalty, not a hard drop — out-of-bounds
+  // candidates sink in ranking but stay visible.
+  const minYears = req.experienceYears ?? null;
+  const maxYears = req.experienceYearsMax ?? null;
+  if (minYears != null || maxYears != null) {
+    const totalYears = computeTotalExperienceYears(c);
+    if (totalYears > 0) {
+      if (minYears != null && totalYears < minYears - 1) {
+        // Underqualified: harsh proportional scale (3yr vs min 6 → half points).
+        yearsPts = Math.max(0, yearsPts * (totalYears / minYears));
+      } else if (maxYears != null && totalYears > maxYears + 1) {
+        // Overqualified: milder taper — 1pt per year over, floor 2.
+        yearsPts = Math.max(2, yearsPts - (totalYears - maxYears - 1));
+      }
+    }
+  }
 
   // 2. Current role relevance
   let currentRelevancePts = 0;

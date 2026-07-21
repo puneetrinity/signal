@@ -296,6 +296,9 @@ export interface JobRequirements {
   roleFamily: string | null;
   location: string | null;
   experienceYears: number | null;
+  // Recruiter-set upper bound on total experience (optional). Enforced as a
+  // ranking penalty (overqualified candidates sink), not a hard drop.
+  experienceYearsMax: number | null;
   education: string | null;
   // LLM-generated LinkedIn title variants/synonyms from the JD digest (v2+).
   // Preferred source for the Crustdata title filter; empty for old digests.
@@ -309,6 +312,7 @@ export interface SourcingJobContextInput {
   goodToHaveSkills?: string[];
   location?: string;
   experienceYears?: number;
+  experienceYearsMax?: number;
   education?: string;
 }
 
@@ -388,6 +392,7 @@ export function buildJobRequirements(jobContext: SourcingJobContextInput): JobRe
     roleFamily: parsed.roleFamily ?? parsedTitleRoleFamily,
     location: jobContext.location ?? null,
     experienceYears: jobContext.experienceYears ?? null,
+    experienceYearsMax: jobContext.experienceYearsMax ?? null,
     education: jobContext.education ?? null,
     titleSearchTerms: parsed.titleSearchTerms,
   };
