@@ -159,6 +159,48 @@ const ROLE_FAMILY_HEADLINE_FILTERS: Record<string, string> = {
   hr: '(hr manager|recruiter|talent acquisition|people ops|hrbp|chief people)',
 };
 
+// Maps our extracted JD seniority to the Crustdata seniority_level vocabulary
+// (observed values: "Entry Level", "Senior", "Entry Level Manager", "Manager",
+// "Director", "VP", "CXO", "Owner / Partner"). Filtering on this removes the
+// wrong-band noise — e.g. a "senior" role currently pulls ~52% Entry Level
+// profiles — and naturally caps the upper end (excludes CXO/Owner/Partner).
+// Kept generous (accept adjacent bands) to avoid over-restricting the pool.
+const SENIORITY_TO_CRUSTDATA: Record<string, string[]> = {
+  intern: ['Entry Level'],
+  junior: ['Entry Level'],
+  entry: ['Entry Level'],
+  associate: ['Entry Level', 'Senior'],
+  mid: ['Entry Level', 'Senior'],
+  senior: ['Senior'],
+  lead: ['Senior', 'Manager', 'Director'],
+  staff: ['Senior', 'Director'],
+  principal: ['Senior', 'Director'],
+  manager: ['Entry Level Manager', 'Manager', 'Director'],
+  director: ['Director', 'VP'],
+  vp: ['VP', 'CXO'],
+  head: ['Director', 'VP', 'CXO'],
+  executive: ['CXO', 'Owner / Partner'],
+  cxo: ['CXO', 'Owner / Partner'],
+  chief: ['CXO', 'Owner / Partner'],
+};
+
+// Toggle so the seniority filter can be disabled without a deploy if it ever
+// over-restricts a query.
+const SENIORITY_FILTER_ENABLED =
+  (process.env.SOURCE_CRUSTDATA_SENIORITY_FILTER || 'true').toLowerCase() === 'true';
+
+/** Resolve the Crustdata seniority bands to accept for a JD seniority string. */
+function resolveSeniorityBands(seniorityLevel: string | null): string[] {
+  if (!seniorityLevel) return [];
+  const key = seniorityLevel.toLowerCase().trim();
+  if (SENIORITY_TO_CRUSTDATA[key]) return SENIORITY_TO_CRUSTDATA[key];
+  // Substring fallback for compound labels like "senior software engineer".
+  for (const [k, v] of Object.entries(SENIORITY_TO_CRUSTDATA)) {
+    if (key.includes(k)) return v;
+  }
+  return [];
+}
+
 // ─── Search Function ──────────────────────────────────────────────────────────
 
 /**
@@ -214,6 +256,25 @@ export async function searchPeople(
     });
   }
 
+  // 3. Seniority filter — accept the JD's band(s) in Crustdata's seniority
+  //    vocabulary. Biggest single quality lever: strips the ~52% wrong-band
+  //    (e.g. Entry Level) profiles a title-only query lets through, and caps
+  //    the top (excludes CXO/Owner for a mid-senior role).
+  const seniorityBands = SENIORITY_FILTER_ENABLED
+    ? resolveSeniorityBands(requirements.seniorityLevel)
+    : [];
+  if (seniorityBands.length > 0) {
+    conditions.push({
+      op: 'or',
+      conditions: seniorityBands.map((band) => ({
+        field: 'experience.employment_details.current.seniority_level',
+        type: '(.)' as const,
+        value: band,
+      })),
+    });
+  }
+  const seniorityFilterUsed = seniorityBands.length > 0 ? seniorityBands.join('|') : 'none';
+
   const titleFilterUsed = roleFamilyPattern
     ? `role_family:${roleFamilyKey}`
     : primarySkill
@@ -241,12 +302,16 @@ export async function searchPeople(
   console.log('\n' + '='.repeat(60));
   console.log('📡 [CRUSTDATA] CONNECTED — OFFICIAL NESTED SCHEMA API');
   console.log(`🎯 [CRUSTDATA] TITLE FILTER: ${titleFilterUsed}`);
+  console.log(`🎚️  [CRUSTDATA] SENIORITY FILTER: ${seniorityFilterUsed}`);
   console.log('📦 [CRUSTDATA] SENDING PAYLOAD:');
   console.log(JSON.stringify(requestBody, null, 2));
   console.log('⏳ [CRUSTDATA] WAITING FOR RESPONSE...');
   console.log('='.repeat(60) + '\n');
 
-  log.info({ filters: requestBody.filters, limit }, 'Searching Crustdata (official person/search)');
+  log.info(
+    { filters: requestBody.filters, limit, titleFilterUsed, seniorityFilterUsed },
+    'Searching Crustdata (official person/search)'
+  );
 
   const response = await fetch(API_URL, {
     method: 'POST',
