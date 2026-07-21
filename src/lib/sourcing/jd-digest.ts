@@ -285,6 +285,7 @@ export interface JdDigestParsed {
   seniorityLevel: string | null;
   domain: string | null;
   roleFamily: string | null;
+  titleSearchTerms: string[];
 }
 
 export interface JobRequirements {
@@ -296,6 +297,9 @@ export interface JobRequirements {
   location: string | null;
   experienceYears: number | null;
   education: string | null;
+  // LLM-generated LinkedIn title variants/synonyms from the JD digest (v2+).
+  // Preferred source for the Crustdata title filter; empty for old digests.
+  titleSearchTerms: string[];
 }
 
 export interface SourcingJobContextInput {
@@ -326,6 +330,7 @@ export function parseJdDigest(jdDigest: string): JdDigestParsed {
       seniorityLevel: null,
       domain: null,
       roleFamily: null,
+      titleSearchTerms: [],
     };
   }
 
@@ -339,6 +344,12 @@ export function parseJdDigest(jdDigest: string): JdDigestParsed {
       seniorityLevel: parsed.seniorityLevel ? String(parsed.seniorityLevel) : null,
       domain: parsed.domain ? String(parsed.domain) : null,
       roleFamily: parsed.roleFamily ? String(parsed.roleFamily) : null,
+      titleSearchTerms: Array.isArray(parsed?.titleSearchTerms)
+        ? parsed.titleSearchTerms
+          .map((t: unknown) => String(t).trim().toLowerCase())
+          .filter((t: string) => t.length >= 3 && t.length <= 60)
+          .slice(0, 6)
+        : [],
     };
   } catch {
     // Fallback: semicolon/comma-delimited keywords
@@ -351,6 +362,7 @@ export function parseJdDigest(jdDigest: string): JdDigestParsed {
       seniorityLevel: null,
       domain: null,
       roleFamily: null,
+      titleSearchTerms: [],
     };
   }
 }
@@ -377,5 +389,6 @@ export function buildJobRequirements(jobContext: SourcingJobContextInput): JobRe
     location: jobContext.location ?? null,
     experienceYears: jobContext.experienceYears ?? null,
     education: jobContext.education ?? null,
+    titleSearchTerms: parsed.titleSearchTerms,
   };
 }
