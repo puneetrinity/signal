@@ -111,6 +111,16 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+// Back-compat scale migration. fit/role/skill thresholds were historically expressed as 0-1
+// fractions, but fitScore is 0-100 and component scores (roleScore 0-15, skillScore 0-25) use
+// their own maxima. Any value in (0,1] is treated as a LEGACY FRACTION of `maxScale` and upgraded;
+// values already on-scale pass through. This keeps old Railway 0-1 env overrides working after the
+// scale fix — without it, a stale `SOURCE_QUALITY_THRESHOLD=0.55` would silently stay broken.
+function scaleThreshold(raw: number, maxScale: number): number {
+  const v = raw > 0 && raw <= 1 ? raw * maxScale : raw;
+  return clamp(v, 0, maxScale);
+}
+
 export function getSourcingConfig(): SourcingConfig {
   const rawQueryMode = (process.env.SOURCING_QUERY_GEN_MODE || 'deterministic').toLowerCase();
   const queryGenMode: SourcingConfig['queryGenMode'] =
@@ -129,29 +139,29 @@ export function getSourcingConfig(): SourcingConfig {
     maxSerpQueries: parseIntSafe(process.env.MAX_SERP_QUERIES, 3),
     minDiscoveryPerRun: parseNonNegativeIntSafe(process.env.SOURCE_MIN_DISCOVERY_PER_RUN, 20),
     minDiscoveredInOutput: parseNonNegativeIntSafe(process.env.SOURCE_MIN_DISCOVERED_IN_OUTPUT, 15),
-    discoveredPromotionMinFitScore: clamp(
-      parseFloatSafe(process.env.SOURCE_DISCOVERED_PROMOTION_MIN_FIT_SCORE, 0.45),
-      0,
-      1,
+    discoveredPromotionMinFitScore: scaleThreshold(
+      parseFloatSafe(process.env.SOURCE_DISCOVERED_PROMOTION_MIN_FIT_SCORE, 45),
+      100,
     ),
     initialEnrichCount: parseIntSafe(process.env.INITIAL_ENRICH_COUNT, 20),
     snapshotStaleDays: parseIntSafe(process.env.SNAPSHOT_STALE_DAYS, 30),
     staleRefreshMaxPerRun: parseIntSafe(process.env.STALE_REFRESH_MAX_PER_RUN, 10),
     qualityTopK: parseIntSafe(process.env.SOURCE_QUALITY_TOP_K, 20),
-    qualityMinAvgFit: clamp(parseFloatSafe(process.env.SOURCE_QUALITY_MIN_AVG_FIT, 0.45), 0, 1),
-    qualityThreshold: clamp(parseFloatSafe(process.env.SOURCE_QUALITY_THRESHOLD, 0.55), 0, 1),
+    qualityMinAvgFit: scaleThreshold(parseFloatSafe(process.env.SOURCE_QUALITY_MIN_AVG_FIT, 45), 100),
+    qualityThreshold: scaleThreshold(parseFloatSafe(process.env.SOURCE_QUALITY_THRESHOLD, 55), 100),
     qualityMinCountAbove: parseIntSafe(process.env.SOURCE_QUALITY_MIN_COUNT_ABOVE, 15),
     dailySerpCapPerTenant: parseIntSafe(process.env.SOURCE_DAILY_SERP_CAP_PER_TENANT, 0),
     // Discovery + tier assembly
     minDiscoveryShareLowQuality: clamp(parseFloatSafe(process.env.SOURCE_MIN_DISCOVERY_SHARE_LOW_QUALITY, 0.40), 0, 1),
     maxDiscoveryShare: clamp(parseFloatSafe(process.env.SOURCE_MAX_DISCOVERY_SHARE, 0.70), 0, 1),
     minStrictMatchesBeforeExpand: parseIntSafe(process.env.SOURCE_MIN_STRICT_MATCHES_BEFORE_EXPAND, 20),
-    bestMatchesMinFitScore: clamp(parseFloatSafe(process.env.SOURCE_BEST_MATCHES_MIN_FIT_SCORE, 0.60), 0, 1),
+    bestMatchesMinFitScore: scaleThreshold(parseFloatSafe(process.env.SOURCE_BEST_MATCHES_MIN_FIT_SCORE, 60), 100),
     strictRescueCount: parseIntSafe(process.env.SOURCE_STRICT_RESCUE_COUNT, 5),
-    strictRescueMinFitScore: clamp(parseFloatSafe(process.env.SOURCE_STRICT_RESCUE_MIN_FIT_SCORE, 0.30), 0, 1),
+    strictRescueMinFitScore: scaleThreshold(parseFloatSafe(process.env.SOURCE_STRICT_RESCUE_MIN_FIT_SCORE, 30), 100),
     countryGuardEnabled: process.env.SOURCE_COUNTRY_GUARD_ENABLED !== 'false',
     countryGuardSerpLocaleEnabled: process.env.SOURCE_COUNTRY_GUARD_SERP_LOCALE_ENABLED === 'true',
-    fitScoreEpsilon: clamp(parseFloatSafe(process.env.SOURCE_FIT_SCORE_EPSILON, 0.03), 0, 0.2),
+    // epsilon is a fitScore *delta* (0-100 scale); legacy 0.03 upgrades to 3 points.
+    fitScoreEpsilon: clamp(scaleThreshold(parseFloatSafe(process.env.SOURCE_FIT_SCORE_EPSILON, 3), 100), 0, 20),
     // Discovery query generation + adaptive budget
     queryGenMode,
     queryGroqTimeoutMs: parseIntSafe(process.env.SOURCING_QUERY_GROQ_TIMEOUT_MS, 2500),
@@ -223,7 +233,7 @@ export function getSourcingConfig(): SourcingConfig {
       return 'adaptive' as const;
     })(),
     // Unknown-location controls
-    unknownLaneFitFloorNonTech: clamp(parseFloatSafe(process.env.SOURCE_UNKNOWN_LANE_FIT_FLOOR_NON_TECH, 0.40), 0, 1),
+    unknownLaneFitFloorNonTech: scaleThreshold(parseFloatSafe(process.env.SOURCE_UNKNOWN_LANE_FIT_FLOOR_NON_TECH, 40), 100),
     unknownLocationPenaltyMultiplier: clamp(parseFloatSafe(process.env.SOURCE_UNKNOWN_LOCATION_PENALTY_MULTIPLIER, 0.85), 0.5, 1),
     nonTechLocationMismatchPenaltyMultiplier: clamp(
       parseFloatSafe(process.env.SOURCE_NON_TECH_LOCATION_MISMATCH_PENALTY_MULTIPLIER, 0.75),
@@ -233,9 +243,9 @@ export function getSourcingConfig(): SourcingConfig {
     unknownAssemblyDiscoveredReserveTech: parseNonNegativeIntSafe(process.env.SOURCE_UNKNOWN_ASSEMBLY_DISCOVERED_RESERVE_TECH, 2),
     // Top-20 quality guards (tech only)
     techTop20GuardsEnabled: process.env.SOURCE_TECH_TOP20_GUARDS_ENABLED !== 'false',
-    techTop20RoleMin: clamp(parseFloatSafe(process.env.SOURCE_TECH_TOP20_ROLE_MIN, 0.35), 0, 1),
+    techTop20RoleMin: scaleThreshold(parseFloatSafe(process.env.SOURCE_TECH_TOP20_ROLE_MIN, 5.25), 15), // vs roleScore 0-15
     techTop20RoleCap: clamp(parseNonNegativeIntSafe(process.env.SOURCE_TECH_TOP20_ROLE_CAP, 1), 0, 5),
-    techTop20SkillMin: clamp(parseFloatSafe(process.env.SOURCE_TECH_TOP20_SKILL_MIN, 0.10), 0, 1),
+    techTop20SkillMin: scaleThreshold(parseFloatSafe(process.env.SOURCE_TECH_TOP20_SKILL_MIN, 2.5), 25), // vs skillScore 0-25
   };
 }
 
