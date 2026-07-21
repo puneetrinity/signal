@@ -44,6 +44,57 @@ export type LocationMatchType = 'city_exact' | 'city_alias' | 'country_only' | '
 export const STRONG_LOCATION_TYPES = new Set<LocationMatchType>(['city_exact', 'city_alias', 'country_only']);
 export type MatchTier = 'strict_location' | 'expanded_location';
 
+// --- #31: skill-data-aware scoring helpers ---------------------------------
+// Base-rate prior: a candidate qualified by title/role but with NO skill data is assumed to
+// match ~1/3 of the listed must-have skills. UNKNOWN skills impute to this neutral level (not 0),
+// so we never penalise a candidate for a data gap; a real match promotes above it and a real
+// mismatch demotes below it, keeping the signal symmetric.
+const SKILL_UNKNOWN_PRIOR = 0.35;
+
+const ENGINEERING_ROLE_FAMILIES = new Set([
+  'backend', 'frontend', 'fullstack', 'full_stack', 'mobile', 'devops', 'sre', 'platform',
+  'platform_engineering', 'data_engineering', 'ml', 'ml_engineering', 'machine_learning',
+  'embedded', 'qa', 'security', 'software', 'data', 'infrastructure',
+]);
+
+// Map a JD role family to the coarse Crustdata function_category it should sit in.
+// Fixes the long-standing `targetFunction = null` bug that capped skill/experience scores.
+function roleFamilyToFunctionCategory(roleFamily: string | null): string | null {
+  if (!roleFamily) return null;
+  const f = roleFamily.toLowerCase();
+  if (ENGINEERING_ROLE_FAMILIES.has(f)) return 'Engineering';
+  const map: Record<string, string> = {
+    product: 'Product', design: 'Design', sales: 'Sales', marketing: 'Marketing',
+    finance: 'Finance', hr: 'Human Resources', operations: 'Operations',
+  };
+  return map[f] ?? null;
+}
+
+// Discipline terms (what the JD digest tends to emit as `domain`) are NOT industries and can
+// never match Crustdata `company_industries`. For these we return a neutral domain score rather
+// than the broken flat floor; real vertical industries (fintech, healthcare, …) still discriminate.
+const DISCIPLINE_DOMAINS = new Set([
+  'software engineering', 'engineering', 'software development', 'software', 'technology',
+  'information technology', 'it', 'computer science', 'programming', 'web development',
+  'backend', 'frontend', 'full stack', 'fullstack', 'devops', 'data engineering',
+  'machine learning', 'ml', 'ai', 'artificial intelligence', 'data science',
+]);
+function isDisciplineDomain(domain: string): boolean {
+  return DISCIPLINE_DOMAINS.has(domain.trim().toLowerCase());
+}
+
+function clamp01(x: number): number {
+  if (!Number.isFinite(x)) return 0;
+  return x < 0 ? 0 : x > 1 ? 1 : x;
+}
+
+interface SkillFitResult {
+  score: number;
+  method: 'snapshot' | 'text_fallback' | null;
+  matched: string[];
+}
+// ---------------------------------------------------------------------------
+
 export interface FitBreakdown {
   experienceScore: number;
   skillScore: number;
@@ -55,6 +106,7 @@ export interface FitBreakdown {
   dataConfidence: number;
   activityFreshnessScore?: number;
   skillScoreMethod?: 'snapshot' | 'text_fallback';
+  matchedSkills?: string[];
   unknownLocationPromotion?: boolean;
 }
 
@@ -187,7 +239,7 @@ function computeExperienceScore(c: CrustdataProfileResponse, req: JobRequirement
   let tenureCount = 0;
   
   const targetFamily = req.roleFamily || null;
-  const targetFunction = null; // We'd pull this from requirements if available, assume null for now
+  const targetFunction = roleFamilyToFunctionCategory(req.roleFamily);
 
   let seniorityProgressionValue = 1; // 1 = mixed
   let lastSeniorityIdx = -1;
@@ -277,61 +329,77 @@ function computeExperienceScore(c: CrustdataProfileResponse, req: JobRequirement
   return yearsPts + currentRelevancePts + pastRelevancePts + seniorityProgressionValue + tenurePts;
 }
 
-function computeSkillFunctionFit(c: CrustdataProfileResponse, req: JobRequirements): number {
-  if (!req.topSkills || req.topSkills.length === 0) return 0;
-  
-  let matchScore = 0;
-  let maxPossible = 0;
-
-  const currentRole = c.experience?.employment_details?.current?.[0];
-  const targetFunction = null; // Replace if available
-
-  // Function match (8pts)
-  let functionPts = 0;
-  if (currentRole && targetFunction && currentRole.function_category?.toLowerCase() === targetFunction) {
-    functionPts = 8;
-  } else if (currentRole?.function_category) {
-    functionPts = 3; // some adjacent function
-  }
-
-  // Skills in text (12pts max)
-  let textMatchTotal = 0;
+// Returns the subset of required skills whose surface forms appear in the candidate's role
+// titles/descriptions/headline. Weak on /person/search (skills rarely live in titles) but kept
+// as a low-confidence fallback when no structured skill data exists.
+function matchSkillsInText(c: CrustdataProfileResponse, required: string[]): string[] {
   const allRoles = getAllRoles(c);
   const headline = c.basic_profile?.headline || '';
-
-  for (const skill of req.topSkills) {
+  const matched: string[] = [];
+  for (const skill of required) {
     const forms = getSkillSurfaceForms(skill);
-    let bestSkillScore = 0;
-
+    let hit = false;
     for (const role of allRoles) {
-      const isCurrent = !role.end_date;
-      const endedYearsAgo = role.end_date ? (Date.now() - new Date(role.end_date).getTime()) / (1000 * 60 * 60 * 24 * 365) : 0;
-      let weight = 0.1;
-      if (isCurrent) weight = 1.0;
-      else if (endedYearsAgo < 3) weight = 0.7;
-      else if (endedYearsAgo < 6) weight = 0.4;
-
       const bag = [role.title, role.description, headline].filter(Boolean).join(' ').toLowerCase();
-      
-      let matched = false;
       for (const form of forms) {
         if (form.length <= 2 && /^[a-z]+$/.test(form) && !SHORT_ALIAS_ALLOWLIST.has(form)) continue;
-        if (buildSkillRegex(form).test(bag)) { matched = true; break; }
+        if (buildSkillRegex(form).test(bag)) { hit = true; break; }
       }
-      
-      if (matched && weight > bestSkillScore) {
-        bestSkillScore = weight;
-      }
+      if (hit) break;
     }
-    textMatchTotal += bestSkillScore;
+    if (hit) matched.push(skill);
+  }
+  return matched;
+}
+
+// Skill + function fit, 0..25. Data-aware (#31): structured skills from a Memory snapshot score a
+// genuine match/mismatch; unknown skills impute to a neutral prior (never penalised for a data
+// gap); the deviation from prior scales with data confidence, so a fresh resume moves rank more
+// than a stale inference. Function fit (0..8) is independent of skill data.
+function computeSkillFunctionFit(
+  c: CrustdataProfileResponse,
+  req: JobRequirements,
+  availableSkills: string[] | null,
+  skillConfidence: number,
+): SkillFitResult {
+  const targetFunction = roleFamilyToFunctionCategory(req.roleFamily);
+  const currentRole = c.experience?.employment_details?.current?.[0]
+    ?? c.experience?.employment_details?.past?.[0];
+  let functionPts = 0;
+  if (currentRole?.function_category) {
+    functionPts = targetFunction && currentRole.function_category.toLowerCase() === targetFunction.toLowerCase()
+      ? 8 : 3;
   }
 
-  const skillCoveragePts = (textMatchTotal / req.topSkills.length) * 12;
+  const SKILL_MAX = 17;
+  const required = req.topSkills || [];
+  const prior = SKILL_UNKNOWN_PRIOR * SKILL_MAX;
 
-  // Adjacent/transferable (5pts) - implicit in regex for now
-  const adjacentPts = 5 * (skillCoveragePts / 12); 
+  if (required.length === 0) {
+    return { score: functionPts + prior, method: null, matched: [] };
+  }
 
-  return functionPts + skillCoveragePts + adjacentPts;
+  // 1) Structured skills from Memory snapshot — the real signal (symmetric, confidence-weighted).
+  if (availableSkills && availableSkills.length > 0) {
+    const have = new Set(availableSkills.map((s) => canonicalizeSkill(s)));
+    const matched = required.filter((s) => have.has(canonicalizeSkill(s)));
+    const raw = (matched.length / required.length) * SKILL_MAX; // full match=17, none=0
+    const score = prior + (raw - prior) * clamp01(skillConfidence);
+    return { score: functionPts + score, method: 'snapshot', matched };
+  }
+
+  // 2) Weak fallback: skills mentioned in title/headline text. POSITIVE-ONLY — a skill absent from
+  // a headline is not evidence of skill absence (it just isn't in the title), so text can promote
+  // above the prior but never demote below it. Only structured snapshot skills justify demotion.
+  const textMatched = matchSkillsInText(c, required);
+  if (textMatched.length > 0) {
+    const raw = (textMatched.length / required.length) * SKILL_MAX;
+    const score = prior + Math.max(0, raw - prior) * 0.5; // low confidence for text inference
+    return { score: functionPts + score, method: 'text_fallback', matched: textMatched };
+  }
+
+  // 3) Unknown skills → neutral prior. Never penalised for a data gap.
+  return { score: functionPts + prior, method: null, matched: [] };
 }
 
 function computeRoleTitleScore(c: CrustdataProfileResponse, targetRoleFamily: string | null): number {
@@ -378,7 +446,10 @@ function computeRoleTitleScore(c: CrustdataProfileResponse, targetRoleFamily: st
 }
 
 function computeDomainIndustryScore(c: CrustdataProfileResponse, req: JobRequirements, isTech: boolean): number {
-  if (!req.domain) return isTech ? 5 : 10; // neutral
+  const neutral = isTech ? 5 : 10;
+  // A discipline ("software engineering") is not an industry and can never match company_industries;
+  // return neutral instead of the broken flat floor. Real vertical industries still discriminate.
+  if (!req.domain || isDisciplineDomain(req.domain)) return neutral;
 
   const target = req.domain.toLowerCase();
   
@@ -552,7 +623,11 @@ export function rankCandidates(
     }
 
     const expScore = computeExperienceScore(c.crustdata, requirements) * (expWeight / 25);
-    const sklScore = computeSkillFunctionFit(c.crustdata, requirements) * (skillWeight / 25);
+    const snap = c.snapshot;
+    const availableSkills = snap?.skillsNormalized && snap.skillsNormalized.length > 0 ? snap.skillsNormalized : null;
+    const skillConfidence = snap && snap.staleAfter && snap.staleAfter.getTime() <= Date.now() ? 0.6 : 1;
+    const skillFit = computeSkillFunctionFit(c.crustdata, requirements, availableSkills, skillConfidence);
+    const sklScore = skillFit.score * (skillWeight / 25);
     const rolScore = computeRoleTitleScore(c.crustdata, requirements.roleFamily) * (roleWeight / 15);
     const domScore = computeDomainIndustryScore(c.crustdata, requirements, track === 'tech') * (domWeight / (track === 'tech' ? 10 : 20));
     const senScore = computeSeniorityScore(c.crustdata, requirements.seniorityLevel) * (senWeight / 10);
@@ -581,6 +656,7 @@ export function rankCandidates(
     if (c.crustdata.experience?.employment_details?.current?.length) conf = 1.0;
 
     let finalScore = gatedScore * conf;
+    if (!Number.isFinite(finalScore)) finalScore = 0; // #31: NaN never leaks into fitScore/sort
     if (finalScore < 0) finalScore = 0;
     if (finalScore > 100) finalScore = 100;
 
@@ -593,9 +669,11 @@ export function rankCandidates(
         roleScore: rolScore, 
         seniorityScore: senScore, 
         domainIndustryScore: domScore, 
-        locationBoost: locScore, 
-        educationScore: eduScore, 
-        dataConfidence: conf 
+        locationBoost: locScore,
+        educationScore: eduScore,
+        dataConfidence: conf,
+        skillScoreMethod: skillFit.method ?? undefined,
+        matchedSkills: skillFit.matched,
       },
       matchTier,
       locationMatchType
