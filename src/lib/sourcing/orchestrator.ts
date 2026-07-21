@@ -546,7 +546,7 @@ export async function runSourcingOrchestrator(
     for (const sc of scoredPool) {
       if (
         sc.locationMatchType === 'unknown_location' &&
-        !(sc.fitScore >= 0.60 && sc.fitBreakdown.roleScore >= 0.70)
+        !(sc.fitScore >= 60 && sc.fitBreakdown.roleScore >= 10.5)
       ) {
         sc.fitScore *= config.unknownLocationPenaltyMultiplier;
         unknownLocationPoolPenaltyApplied++;
@@ -1395,7 +1395,7 @@ export async function runSourcingOrchestrator(
           for (const sc of scoredDiscovered) {
             if (
               sc.locationMatchType === 'unknown_location' &&
-              !(sc.fitScore >= 0.50 && sc.fitBreakdown.roleScore >= 0.7)
+              !(sc.fitScore >= 50 && sc.fitBreakdown.roleScore >= 10.5)
             ) {
               sc.fitScore *= config.unknownLocationPenaltyMultiplier;
               unknownLocationPenaltyApplied++;
@@ -1451,7 +1451,7 @@ export async function runSourcingOrchestrator(
               }
             }
 
-            const roleGate = sc.fitBreakdown.roleScore >= 0.7;
+            const roleGate = sc.fitBreakdown.roleScore >= 10.5;
             const isUnknownLocation = sc.locationMatchType === 'unknown_location';
             const unknownLocationPromotionCapRatio = trackDecision?.track === 'tech' ? 0.1 : 0.15;
             const maxUnknownPromoted = Math.ceil(config.targetCount * unknownLocationPromotionCapRatio);

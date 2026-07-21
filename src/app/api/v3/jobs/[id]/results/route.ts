@@ -311,7 +311,11 @@ export async function GET(
     // must match that scale — comparing against 0.8/0.6 made EVERY nonzero
     // score "strong". 80 = strong, 60 = good, below = possible.
     const fitScore = sc.fitScore ?? 0;
-    const matchStrength = fitScore >= 80 ? 'strong' : fitScore >= 60 ? 'good' : 'possible';
+    // "strong" requires VERIFIED skills (snapshot), not just a high coarse-signal score — otherwise
+    // an unverified senior-backend-in-city candidate is labelled strong on role/location alone.
+    // Until Memory supplies skills, this keeps strong honest (empty) rather than misleading.
+    const hasVerifiedSkills = fbRaw?.skillScoreMethod === 'snapshot';
+    const matchStrength = (fitScore >= 80 && hasVerifiedSkills) ? 'strong' : fitScore >= 60 ? 'good' : 'possible';
 
     let locationStatus: 'verified' | 'partial' | 'unverified' | 'mismatch' | 'unknown' = 'unknown';
     if (locationLabel === 'location_verified') locationStatus = 'verified';
