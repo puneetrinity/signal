@@ -238,14 +238,27 @@ export async function searchPeople(
     });
   }
 
-  // 2. Title filter — prefer role-family terms over raw skill.
+  // 2. Title filter. Priority:
+  //    a) digest titleSearchTerms — LLM-generated per-job LinkedIn title variants/synonyms
+  //       (digest v2+). Handles tech variants AND non-tech synonym families per job.
+  //    b) static role-family map — fallback for old digests / LLM failure.
+  //    c) primary skill as title keyword — last resort.
+  const digestTitleTerms = (requirements.titleSearchTerms ?? [])
+    .map((t) => t.trim().toLowerCase())
+    .filter((t) => t.length >= 3 && t.length <= 60)
+    .slice(0, 6);
   const roleFamilyKey = (requirements.roleFamily ?? '').toLowerCase();
   const roleFamilyPattern = ROLE_FAMILY_HEADLINE_FILTERS[roleFamilyKey];
   const primarySkill = requirements.topSkills?.[0];
 
-  if (roleFamilyPattern) {
-    const terms = roleFamilyPattern.replace(/[()]/g, '').split('|');
-    const orConditions = terms.map(term => ({
+  const titleTerms = digestTitleTerms.length > 0
+    ? digestTitleTerms
+    : roleFamilyPattern
+      ? roleFamilyPattern.replace(/[()]/g, '').split('|')
+      : [];
+
+  if (titleTerms.length > 0) {
+    const orConditions = titleTerms.map(term => ({
       field: 'experience.employment_details.current.title',
       type: '(.)' as const,
       value: term,
@@ -255,7 +268,7 @@ export async function searchPeople(
       conditions: orConditions,
     });
   } else if (primarySkill) {
-    // Fallback: no role family mapping — use top skill as title keyword
+    // Fallback: no digest terms and no role family mapping — use top skill as title keyword
     conditions.push({
       field: 'experience.employment_details.current.title',
       type: '(.)',
@@ -282,11 +295,13 @@ export async function searchPeople(
   }
   const seniorityFilterUsed = seniorityBands.length > 0 ? seniorityBands.join('|') : 'none';
 
-  const titleFilterUsed = roleFamilyPattern
-    ? `role_family:${roleFamilyKey}`
-    : primarySkill
-      ? `skill:${primarySkill}`
-      : 'none';
+  const titleFilterUsed = digestTitleTerms.length > 0
+    ? `digest:${digestTitleTerms.join('|')}`
+    : roleFamilyPattern
+      ? `role_family:${roleFamilyKey}`
+      : primarySkill
+        ? `skill:${primarySkill}`
+        : 'none';
 
   const requestBody: {
     limit: number;
