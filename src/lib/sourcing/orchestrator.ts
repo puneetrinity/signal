@@ -964,9 +964,42 @@ export async function runSourcingOrchestrator(
 
             // Combine ActiveGraph/Pool candidates with fresh Crustdata candidates
             // Filter out pool candidates that we just fetched from Crustdata to avoid duplicates
-            const fetchedCrustdataIds = new Set(mappedForRanking.map(c => c.id));
-            const activeGraphAndPool = poolForRanking.filter(c => !fetchedCrustdataIds.has(c.id));
-            const combinedForRanking = [...activeGraphAndPool, ...mappedForRanking];
+            // Identity key that survives id-namespace mismatch: pool candidates
+            // carry a LOCAL id while fresh Crustdata candidates carry a linkedin
+            // URL as their id, so a plain id-set filter misses the same person in
+            // both lists — which duplicated every overlapping candidate through
+            // ranking, telemetry AND the served top-100 (the recruiter got ~50
+            // instead of ~100). Both lists carry the raw Crustdata blob with a
+            // stable crustdata_person_id — dedupe on that (fallbacks: linkedin
+            // slug, then raw id).
+            const identityKey = (c: any): string => {
+              const cd = c?.crustdata || {};
+              if (cd.crustdata_person_id != null) return `cid:${cd.crustdata_person_id}`;
+              const url =
+                c?.linkedinUrl ||
+                cd?.social_handles?.professional_network_identifier?.profile_url ||
+                (typeof c?.id === 'string' && c.id.includes('linkedin.com') ? c.id : null);
+              const slug = url ? extractLinkedInIdFromUrl(url) : null;
+              if (slug) return `li:${slug.toLowerCase()}`;
+              return `id:${c?.id ?? ''}`;
+            };
+            // Pool candidates come first so their (often enriched) data wins over
+            // the fresh Crustdata duplicate for the same person.
+            const combinedRaw = [...poolForRanking, ...mappedForRanking];
+            const seenIdentity = new Set<string>();
+            const combinedForRanking = combinedRaw.filter((c: any) => {
+              const key = identityKey(c);
+              if (seenIdentity.has(key)) return false;
+              seenIdentity.add(key);
+              return true;
+            });
+            const duplicatesRemoved = combinedRaw.length - combinedForRanking.length;
+            if (duplicatesRemoved > 0) {
+              log.info(
+                { requestId, duplicatesRemoved, unique: combinedForRanking.length, raw: combinedRaw.length },
+                'Deduped pool+Crustdata candidates by identity before ranking'
+              );
+            }
 
             // Local ranking against full JD
             const locationBoostWeight = getLocationBoostWeight(config, trackDecision?.track);
