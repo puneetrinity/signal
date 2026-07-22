@@ -10,7 +10,9 @@ const ACTIVEGRAPH_URL = process.env.ACTIVEGRAPH_URL || 'http://localhost:8000';
 
 /** How many home-pool candidates to request per sourcing run. The server
  * clamps to its own ceiling and reports truncation via total_matched. */
-export const HOME_POOL_LIMIT = parseInt(process.env.SOURCE_HOME_POOL_LIMIT || '300', 10);
+// Matches Memory's GLOBAL_SEARCH_LIMIT_MAX (500) — the server is the
+// authoritative binding limit; searchGlobalPool logs when it truncates us.
+export const HOME_POOL_LIMIT = parseInt(process.env.SOURCE_HOME_POOL_LIMIT || '500', 10);
 
 /** Home-pool results are merged into ranking only when explicitly enabled:
  * Memory returns signal_candidate_id values (LinkedIn URLs) that Discover's
@@ -119,6 +121,14 @@ export async function searchGlobalPool(
 
   const data = await response.json().catch(() => null);
   if (!data || !Array.isArray(data.results)) return null;
+  if (typeof data.applied_limit === 'number' && data.applied_limit < limit) {
+    // No silent caps: the server clamped our request — candidates beyond
+    // applied_limit never entered the vector set.
+    log.warn(
+      { requestId, requested: limit, appliedLimit: data.applied_limit },
+      'Global pool vector search truncated by server cap'
+    );
+  }
   return data.results as GlobalPoolSearchResult[];
 }
 
