@@ -892,11 +892,42 @@ export async function runSourcingOrchestrator(
 
         try {
           console.log('\n' + '🔍'.repeat(20));
-          console.log('🚀 [ORCHESTRATOR] INITIATING PRIMARY DISCOVERY (CRUSTDATA SCREENER)');
-          console.log('📋 [ORCHESTRATOR] STRATEGY: Screener flat schema → 240 profiles with skills/emails → rank locally → top 100');
+          console.log('🚀 [ORCHESTRATOR] INITIATING PRIMARY DISCOVERY (CRUSTDATA /person/search, 300 profiles → rank locally → top 100)');
           await sendProgressCallback('crustdata_fetching');
           const { searchPeople } = await import('./crustdata-client');
-          const crustProfiles = await searchPeople(requirements, 300);
+
+          // ── Stage-2 exclusion: don't re-buy people refreshed recently. ─────
+          // /person/search returns the lowest-person_id slice, so without this
+          // every run re-purchases the same ~34% known overlap. Excluding only
+          // FRESH-known people (updatedAt within excludeKnownFreshDays) means
+          // 9 credits buy NEW people, while stale-known people deliberately
+          // cycle back in and get their blobs refreshed (Stage-1 convergence).
+          let excludePersonIds: number[] = [];
+          if (config.excludeKnownEnabled) {
+            try {
+              const cutoff = new Date(Date.now() - config.excludeKnownFreshDays * 24 * 60 * 60 * 1000);
+              const rows = await prisma.$queryRaw<{ pid: string | null }[]>`
+                SELECT ("searchMeta"->'crustdata'->>'crustdata_person_id') AS pid
+                FROM candidates
+                WHERE "tenantId" = ${tenantId}
+                  AND "updatedAt" > ${cutoff}
+                  AND ("searchMeta"->'crustdata'->>'crustdata_person_id') IS NOT NULL
+                ORDER BY "updatedAt" DESC
+                LIMIT ${config.excludeKnownMax}
+              `;
+              excludePersonIds = rows
+                .map((r) => Number(r.pid))
+                .filter((n) => Number.isFinite(n));
+              log.info(
+                { requestId, excludedKnown: excludePersonIds.length, freshDays: config.excludeKnownFreshDays },
+                'Excluding fresh-known people from Crustdata query'
+              );
+            } catch (exclErr) {
+              log.warn({ requestId, err: String(exclErr) }, 'Exclusion-list query failed — sourcing without exclusion');
+            }
+          }
+
+          const crustProfiles = await searchPeople(requirements, 300, { excludePersonIds });
           crustDataSucceeded = true;
 
           if (crustProfiles.length > 0) {

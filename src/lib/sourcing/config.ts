@@ -3,6 +3,10 @@ export interface SourcingConfig {
   minGoodEnough: number;
   jobMaxEnrich: number;
   maxSerpQueries: number;
+  // Stage-2 exclusion: skip re-buying people refreshed within freshDays.
+  excludeKnownEnabled: boolean;
+  excludeKnownFreshDays: number;
+  excludeKnownMax: number;
   minDiscoveryPerRun: number;
   minDiscoveredInOutput: number;
   discoveredPromotionMinFitScore: number;
@@ -137,6 +141,9 @@ export function getSourcingConfig(): SourcingConfig {
     minGoodEnough: parseIntSafe(process.env.MIN_GOOD_ENOUGH, 30),
     jobMaxEnrich: parseIntSafe(process.env.JOB_MAX_ENRICH, 50),
     maxSerpQueries: parseIntSafe(process.env.MAX_SERP_QUERIES, 3),
+    excludeKnownEnabled: process.env.SOURCE_EXCLUDE_KNOWN_ENABLED !== 'false',
+    excludeKnownFreshDays: parseIntSafe(process.env.SOURCE_EXCLUDE_KNOWN_FRESH_DAYS, 14),
+    excludeKnownMax: parseIntSafe(process.env.SOURCE_EXCLUDE_KNOWN_MAX, 2000),
     minDiscoveryPerRun: parseNonNegativeIntSafe(process.env.SOURCE_MIN_DISCOVERY_PER_RUN, 20),
     minDiscoveredInOutput: parseNonNegativeIntSafe(process.env.SOURCE_MIN_DISCOVERED_IN_OUTPUT, 15),
     discoveredPromotionMinFitScore: scaleThreshold(

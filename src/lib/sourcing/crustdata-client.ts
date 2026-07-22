@@ -125,7 +125,7 @@ export interface CrustdataProfileResponse {
 interface CrustdataCondition {
   field: string;
   type: '=' | '!=' | '<' | '=<' | '>' | '=>' | 'in' | 'not_in' | '(.)' | '(!)' | '[.]' | 'geo_distance';
-  value: string | number | string[] | object;
+  value: string | number | string[] | number[] | object;
 }
 
 // Group: op + conditions array of leaf objects
@@ -222,12 +222,31 @@ function resolveSeniorityBands(seniorityLevel: string | null): string[] {
 export async function searchPeople(
   requirements: JobRequirements,
   limit: number = 300,
+  options?: {
+    /**
+     * Known crustdata_person_ids to exclude (Stage-2 dedup economics).
+     * /person/search orders by lowest person_id — without exclusion every run
+     * re-buys the same slice (~34% re-buy measured). Excluding fresh-known
+     * people makes each run buy NEW people; stale-known people are deliberately
+     * NOT excluded so they cycle back in and get their blobs refreshed.
+     */
+    excludePersonIds?: number[];
+  },
 ): Promise<CrustdataProfileResponse[]> {
   if (!CRUSTDATA_API_KEY) {
     throw new Error('CRUSTDATA_API_KEY is not configured');
   }
 
   const conditions: (CrustdataCondition | CrustdataGroup)[] = [];
+
+  const excludeIds = (options?.excludePersonIds ?? []).filter((n) => Number.isFinite(n));
+  if (excludeIds.length > 0) {
+    conditions.push({
+      field: 'crustdata_person_id',
+      type: 'not_in',
+      value: excludeIds,
+    });
+  }
 
   // 1. Region filter — use full_location (can match country, city, state)
   if (requirements.location) {
@@ -326,13 +345,14 @@ export async function searchPeople(
   console.log('📡 [CRUSTDATA] CONNECTED — OFFICIAL NESTED SCHEMA API');
   console.log(`🎯 [CRUSTDATA] TITLE FILTER: ${titleFilterUsed}`);
   console.log(`🎚️  [CRUSTDATA] SENIORITY FILTER: ${seniorityFilterUsed}`);
-  console.log('📦 [CRUSTDATA] SENDING PAYLOAD:');
-  console.log(JSON.stringify(requestBody, null, 2));
+  console.log('📦 [CRUSTDATA] SENDING PAYLOAD (exclusion ids elided):');
+  console.log(JSON.stringify(requestBody, (k, v) =>
+    Array.isArray(v) && v.length > 20 && typeof v[0] === 'number' ? `[${v.length} ids]` : v, 2));
   console.log('⏳ [CRUSTDATA] WAITING FOR RESPONSE...');
   console.log('='.repeat(60) + '\n');
 
   log.info(
-    { filters: requestBody.filters, limit, titleFilterUsed, seniorityFilterUsed },
+    { limit, titleFilterUsed, seniorityFilterUsed, excludedKnown: excludeIds.length },
     'Searching Crustdata (official person/search)'
   );
 
