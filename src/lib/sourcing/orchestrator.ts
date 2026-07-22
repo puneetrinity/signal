@@ -347,50 +347,102 @@ export async function runSourcingOrchestrator(
   const poolForRanking: CandidateForRanking[] = poolRows.map((r) => toRankingCandidate(r));
   const poolForRankingById = new Map(poolForRanking.map((r) => [r.id, r]));
 
-  // 2.5 ActiveGraph Home Pool Search — read path is gated until Discover can
-  // reconcile Memory's signal_candidate_id values with local candidate CUIDs.
-  const { generateTagsFromJD, searchHomePool, HOME_POOL_LIMIT, HOME_POOL_ENABLED } = await import(
+  // 2.5 ActiveGraph Home Pool Search — vector search over the platform pool
+  // (#29 slice 5) with tag search as fallback for older Memory deploys.
+  const { generateTagsFromJD, searchHomePool, searchGlobalPool, HOME_POOL_LIMIT, HOME_POOL_ENABLED } = await import(
     './activegraph-client'
   );
-  let homeCandidates: any[] = [];
+  let addedFromHome = 0;
+  let homeSearchMode: 'vector' | 'tags' | 'off' = 'off';
   if (HOME_POOL_ENABLED) {
-    const homeTags = generateTagsFromJD(requirements);
+    // Primary: vector search. Returns hydrated crustdata blobs + verified
+    // skills_normalized (resume/extraction-derived), which flow into the
+    // ranker's snapshot path — the #31 skill socket.
+    let vectorResults: Awaited<ReturnType<typeof searchGlobalPool>> = null;
     try {
-      const homeResult = await searchHomePool(homeTags, tenantId, HOME_POOL_LIMIT, requestId);
-      if (homeResult === null) {
-        log.warn({ requestId, tags: homeTags }, 'ActiveGraph home pool UNAVAILABLE — proceeding without it');
-      } else {
-        homeCandidates = homeResult;
-        log.info({ requestId, tags: homeTags, found: homeCandidates.length }, 'ActiveGraph home pool searched');
-      }
+      vectorResults = await searchGlobalPool(requirements, tenantId, HOME_POOL_LIMIT, requestId);
     } catch (err) {
-      log.error({ err, requestId }, 'Failed to search ActiveGraph home pool');
+      log.error({ err, requestId }, 'Global pool vector search threw');
+    }
+
+    if (vectorResults !== null) {
+      homeSearchMode = 'vector';
+      let skippedNoProfile = 0;
+      for (const gc of vectorResults) {
+        const localId = gc.signal_candidate_id || gc.tenant_candidate_id;
+        if (!localId || poolForRankingById.has(localId)) continue;
+        if (!gc.crustdata_profile) {
+          // No hydrated blob (cross-tenant public row) — the ranker would
+          // floor it at fitScore 10. Deferred to #12 blob sharing.
+          skippedNoProfile++;
+          continue;
+        }
+        const now = new Date();
+        const mappedCandidate: CandidateForRanking = {
+          id: localId,
+          headlineHint: gc.headline ?? gc.crustdata_profile?.basic_profile?.headline ?? null,
+          locationHint: gc.location_city ?? gc.crustdata_profile?.basic_profile?.location?.full_location ?? null,
+          searchTitle: gc.crustdata_profile?.basic_profile?.current_title ?? null,
+          searchSnippet: null,
+          enrichmentStatus: 'completed',
+          lastEnrichedAt: now,
+          crustdata: gc.crustdata_profile,
+          snapshot: {
+            skillsNormalized: gc.skills_normalized ?? [],
+            roleType: gc.role_family,
+            seniorityBand: gc.seniority_band,
+            location: gc.location_city,
+            computedAt: now,
+            staleAfter: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+          },
+        };
+        poolForRanking.push(mappedCandidate);
+        poolForRankingById.set(mappedCandidate.id, mappedCandidate);
+        addedFromHome++;
+      }
+      log.info(
+        { requestId, found: vectorResults.length, added: addedFromHome, skippedNoProfile },
+        'Global pool vector search merged'
+      );
+    } else {
+      // Fallback: legacy tag search.
+      homeSearchMode = 'tags';
+      const homeTags = generateTagsFromJD(requirements);
+      let homeCandidates: any[] = [];
+      try {
+        const homeResult = await searchHomePool(homeTags, tenantId, HOME_POOL_LIMIT, requestId);
+        if (homeResult === null) {
+          log.warn({ requestId, tags: homeTags }, 'ActiveGraph home pool UNAVAILABLE — proceeding without it');
+        } else {
+          homeCandidates = homeResult;
+          log.info({ requestId, tags: homeTags, found: homeCandidates.length }, 'ActiveGraph home pool searched (tags)');
+        }
+      } catch (err) {
+        log.error({ err, requestId }, 'Failed to search ActiveGraph home pool');
+      }
+      for (const hc of homeCandidates) {
+        if (!poolForRankingById.has(hc.signal_candidate_id)) {
+          const mappedCandidate: CandidateForRanking = {
+            id: hc.signal_candidate_id,
+            headlineHint: hc.profile?.basic_profile?.headline ?? null,
+            locationHint: hc.profile?.basic_profile?.location?.full_location ?? null,
+            searchTitle: null,
+            searchSnippet: null,
+            enrichmentStatus: 'completed',
+            lastEnrichedAt: new Date(),
+            crustdata: hc.profile, // Map the full Crustdata blob for the ranker
+            snapshot: null,
+          };
+          poolForRanking.push(mappedCandidate);
+          poolForRankingById.set(mappedCandidate.id, mappedCandidate);
+          addedFromHome++;
+        }
+      }
     }
   } else {
     log.info({ requestId }, 'ActiveGraph home pool disabled (SOURCE_HOME_POOL_ENABLED=false)');
   }
-
-  // Merge ActiveGraph candidates into the pool for ranking if they aren't already there
-  let addedFromHome = 0;
-  for (const hc of homeCandidates) {
-    if (!poolForRankingById.has(hc.signal_candidate_id)) {
-      const mappedCandidate: CandidateForRanking = {
-        id: hc.signal_candidate_id,
-        headlineHint: hc.profile?.basic_profile?.headline ?? null,
-        locationHint: hc.profile?.basic_profile?.location?.full_location ?? null,
-        searchTitle: null,
-        searchSnippet: null,
-        enrichmentStatus: 'completed',
-        lastEnrichedAt: new Date(),
-        crustdata: hc.profile, // Map the full Crustdata blob for the ranker
-        snapshot: null,
-      };
-      poolForRanking.push(mappedCandidate);
-      poolForRankingById.set(mappedCandidate.id, mappedCandidate);
-      addedFromHome++;
-    }
-  }
-  log.info({ requestId, addedFromHome, totalPool: poolForRanking.length }, 'Merged ActiveGraph candidates into ranking pool');
+  log.info({ requestId, addedFromHome, homeSearchMode, totalPool: poolForRanking.length }, 'Merged ActiveGraph candidates into ranking pool');
 
   const hasLocationConstraint = Boolean(requirements.location?.trim());
   const requestedCountryCode = config.countryGuardEnabled && hasLocationConstraint
