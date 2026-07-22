@@ -429,6 +429,10 @@ export async function GET(
       // --- DETAILED FIELDS FOR DETAIL VIEW ---
       snapshot,
       professionalValidation,
+      // Membership-derived label (pool / pool_enriched / discovered) — was
+      // never emitted, so Flow's `|| 'discovered'` fallback re-labeled every
+      // candidate as newly-discovered regardless of what Signal persisted.
+      sourceType: sc.sourceType,
       fitScore: sc.fitScore,
       fitBreakdown,
       matchTier,
