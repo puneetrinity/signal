@@ -37,7 +37,7 @@ export async function upsertDiscoveredCandidates(
     const chunk = profiles.slice(i, i + chunkSize);
     await Promise.all(
       chunk.map(async (result) => {
-        const linkedinId = extractLinkedInId(result.linkedinUrl);
+        const linkedinId = result.canonicalLinkedinId || extractLinkedInId(result.linkedinUrl);
         if (!linkedinId) return;
 
         // Run hint extraction only over title + headline — NOT the full snippet blob.

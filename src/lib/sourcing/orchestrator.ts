@@ -80,6 +80,18 @@ export interface OrchestratorResult {
   countryGuardFilteredCount: number;
   countryGuardSerpLocaleSkippedCount: number;
   countryGuardEscapeCounts: { no_location: number; country_match: number; city_only_unknown_country: number };
+  // Stage-3 two-layer pool read telemetry. Null when the flag is off.
+  twoLayerPool: {
+    enabled: boolean;
+    layer1Size: number;
+    layer1CapHit: boolean;
+    layer1EligibleCount: number;
+    layer2Size: number;
+    vectorLaneResolved: number;
+    recentLaneAdded: number;
+    fallbackHydrateUsed: boolean;
+    freshSurvivorRefreshes: number;
+  } | null;
   selectedSnapshotTrack: string;
   locationCoverageTriggered: boolean;
   noveltySuppressedCount: number;
@@ -260,33 +272,143 @@ export async function runSourcingOrchestrator(
   // Reset per-run debug log timers
   resetPipelineLogTimers();
 
-  // 1. Query tenant pool (capped at 5000 most recent)
+  // 1. Query tenant pool
   const snapshotTrackFilter = jobTrackToDbFilter(trackDecision?.track);
   const selectedSnapshotTrack = snapshotTrackFilter.length === 1
     ? snapshotTrackFilter[0]
     : 'tech'; // blended uses deterministic tech-first preference
 
-  const poolRows = await prisma.candidate.findMany({
-    where: { tenantId },
-    select: {
-      id: true,
-      linkedinId: true,
-      headlineHint: true,
-      seniorityHint: true,
-      locationHint: true,
-      searchTitle: true,
-      searchSnippet: true,
-      enrichmentStatus: true,
-      lastEnrichedAt: true,
-      searchMeta: true,
-      intelligenceSnapshots: {
-        where: { track: { in: snapshotTrackFilter } },
-        orderBy: { computedAt: 'desc' },
-      },
+  // Hoisted from section 2.5: the two-layer read below needs the vector search
+  // before hydration; 2.5 reuses the prefetched result (one Memory call/run).
+  const { generateTagsFromJD, searchHomePool, searchGlobalPool, HOME_POOL_LIMIT, HOME_POOL_ENABLED } = await import(
+    './activegraph-client'
+  );
+
+  const poolSelect = {
+    id: true,
+    linkedinId: true,
+    headlineHint: true,
+    seniorityHint: true,
+    locationHint: true,
+    searchTitle: true,
+    searchSnippet: true,
+    enrichmentStatus: true,
+    lastEnrichedAt: true,
+    searchMeta: true,
+    intelligenceSnapshots: {
+      where: { track: { in: snapshotTrackFilter } },
+      orderBy: { computedAt: 'desc' },
     },
-    take: 5000,
-    orderBy: { updatedAt: 'desc' },
-  });
+  } satisfies Prisma.CandidateSelect;
+
+  // ── Stage-3 two-layer pool read ────────────────────────────────────────────
+  // Layer 1: slim full-width projection of the tenant pool (no blobs, no
+  // snapshots — ~200 bytes/row) keeps the discovery gates, dedup sets, country
+  // guard and funnel metrics truthful at any pool size. If this query ever
+  // shows up in run latency it is cacheable per-tenant with a short TTL.
+  // Layer 2: only vector top-N ∪ recent-K rows are hydrated full-width and
+  // ranked, so ranking cost stays constant as Memory grows.
+  type SlimPoolRow = {
+    id: string;
+    linkedinId: string;
+    linkedinUrl: string | null;
+    locationHint: string | null;
+    serper: Prisma.JsonValue | null;
+  };
+  let slimPool: SlimPoolRow[] = [];
+  const slimById = new Map<string, SlimPoolRow>();
+  const slimBySlug = new Map<string, SlimPoolRow>();
+  let layer1CapHit = false;
+  let recentLaneAdded = 0;
+  let vectorLaneResolved = 0;
+  let fallbackHydrateUsed = false;
+  let freshSurvivorRefreshes = 0;
+  let prefetchedVectorResults: Awaited<ReturnType<typeof searchGlobalPool>> = null;
+
+  const fetchPoolByIds = (ids: string[]) =>
+    prisma.candidate.findMany({ where: { tenantId, id: { in: ids } }, select: poolSelect });
+  let poolRows: Awaited<ReturnType<typeof fetchPoolByIds>>;
+
+  if (config.twoLayerPoolEnabled) {
+    slimPool = await prisma.$queryRaw<SlimPoolRow[]>`
+      SELECT "id", "linkedinId", "linkedinUrl", "locationHint",
+             "searchMeta"->'serper' AS "serper"
+      FROM "candidates"
+      WHERE "tenantId" = ${tenantId}
+      ORDER BY "updatedAt" DESC
+      LIMIT ${config.poolLayer1Cap}
+    `;
+    layer1CapHit = slimPool.length >= config.poolLayer1Cap;
+    if (layer1CapHit) {
+      log.warn(
+        { requestId, layer1Cap: config.poolLayer1Cap },
+        'Layer-1 cap hit — gates/dedup/metrics see a truncated pool',
+      );
+    }
+    for (const r of slimPool) {
+      slimById.set(r.id, r);
+      if (r.linkedinId) slimBySlug.set(r.linkedinId.toLowerCase(), r);
+      if (r.linkedinUrl) {
+        const slug = extractLinkedInIdFromUrl(r.linkedinUrl);
+        if (slug) slimBySlug.set(slug.toLowerCase(), r);
+      }
+    }
+
+    if (HOME_POOL_ENABLED) {
+      try {
+        prefetchedVectorResults = await searchGlobalPool(requirements, tenantId, HOME_POOL_LIMIT, requestId);
+      } catch (err) {
+        log.error({ err, requestId }, 'Global pool vector search threw');
+      }
+    }
+
+    const layer2Ids = new Set<string>();
+    for (const gc of prefetchedVectorResults ?? []) {
+      const slug = (gc.linkedin_id || (gc.linkedin_url ? extractLinkedInIdFromUrl(gc.linkedin_url) : null) || '').toLowerCase();
+      const local = slug ? slimBySlug.get(slug) : undefined;
+      if (local) layer2Ids.add(local.id);
+    }
+    vectorLaneResolved = layer2Ids.size;
+
+    if (prefetchedVectorResults === null) {
+      // Fail-open: Memory unavailable (or home pool disabled) → hydrate by
+      // recency, approximating the legacy read so pool ranking never goes dark.
+      fallbackHydrateUsed = true;
+      for (const r of slimPool.slice(0, config.poolFallbackHydrateCap)) layer2Ids.add(r.id);
+    } else {
+      // Recency lane (embedding-lag guard): a candidate who entered the pool
+      // minutes ago still has embedding_status=queued in Memory and is
+      // invisible to vector search until the embedding sweep drains.
+      for (const r of slimPool.slice(0, config.poolRecentK)) {
+        if (!layer2Ids.has(r.id)) {
+          layer2Ids.add(r.id);
+          recentLaneAdded++;
+        }
+      }
+    }
+
+    poolRows = layer2Ids.size > 0 ? await fetchPoolByIds(Array.from(layer2Ids)) : [];
+    log.info(
+      {
+        requestId,
+        layer1Size: slimPool.length,
+        layer1CapHit,
+        layer2Size: poolRows.length,
+        vectorLaneResolved,
+        recentLaneAdded,
+        fallbackHydrateUsed,
+      },
+      'Two-layer pool read',
+    );
+  } else {
+    // Legacy single-layer read (capped at 5000 most recent, full-width).
+    poolRows = await prisma.candidate.findMany({
+      where: { tenantId },
+      select: poolSelect,
+      take: 5000,
+      orderBy: { updatedAt: 'desc' },
+    });
+  }
 
   const poolById = new Map(poolRows.map((r) => [r.id, r]));
   log.info({ requestId, poolSize: poolRows.length }, 'Pool queried');
@@ -350,9 +472,6 @@ export async function runSourcingOrchestrator(
 
   // 2.5 ActiveGraph Home Pool Search — vector search over the platform pool
   // (#29 slice 5) with tag search as fallback for older Memory deploys.
-  const { generateTagsFromJD, searchHomePool, searchGlobalPool, HOME_POOL_LIMIT, HOME_POOL_ENABLED } = await import(
-    './activegraph-client'
-  );
   let addedFromHome = 0;
   let homeSearchMode: 'vector' | 'tags' | 'off' = 'off';
   if (HOME_POOL_ENABLED) {
@@ -360,10 +479,17 @@ export async function runSourcingOrchestrator(
     // skills_normalized (resume/extraction-derived), which flow into the
     // ranker's snapshot path — the #31 skill socket.
     let vectorResults: Awaited<ReturnType<typeof searchGlobalPool>> = null;
-    try {
-      vectorResults = await searchGlobalPool(requirements, tenantId, HOME_POOL_LIMIT, requestId);
-    } catch (err) {
-      log.error({ err, requestId }, 'Global pool vector search threw');
+    if (config.twoLayerPoolEnabled) {
+      // Two-layer mode already ran the vector search to select Layer 2 —
+      // reuse it here so the merge below still attaches Memory's verified
+      // snapshot/blob onto the hydrated entries.
+      vectorResults = prefetchedVectorResults;
+    } else {
+      try {
+        vectorResults = await searchGlobalPool(requirements, tenantId, HOME_POOL_LIMIT, requestId);
+      } catch (err) {
+        log.error({ err, requestId }, 'Global pool vector search threw');
+      }
     }
 
     if (vectorResults !== null) {
@@ -731,15 +857,22 @@ export async function runSourcingOrchestrator(
     return true;
   }
 
-  // Pre-assembly location coverage estimate from scored pool
-  const poolWithLocation = scoredPool.filter((sc) => {
-    const poolCandidate = poolForRankingById.get(sc.candidateId);
-    return hasMeaningfulLocation(poolCandidate?.snapshot?.location) ||
-      hasMeaningfulLocation(poolCandidate?.locationHint);
-  }).length;
-  const poolLocationCoverage = scoredPool.length > 0
-    ? poolWithLocation / scoredPool.length
-    : 0;
+  // Pre-assembly location coverage estimate. Two-layer: computed over the FULL
+  // slim pool — the Layer-2 vector selection biases toward text-rich rows, so
+  // measuring coverage on the ranked subset would overstate it. Layer 1 only
+  // carries locationHint (snapshot-only locations count as uncovered); the
+  // prod verification run compares this against the legacy value.
+  const poolLocationCoverage = config.twoLayerPoolEnabled
+    ? (slimPool.length > 0
+      ? slimPool.filter((r) => hasMeaningfulLocation(r.locationHint)).length / slimPool.length
+      : 0)
+    : (scoredPool.length > 0
+      ? scoredPool.filter((sc) => {
+        const poolCandidate = poolForRankingById.get(sc.candidateId);
+        return hasMeaningfulLocation(poolCandidate?.snapshot?.location) ||
+          hasMeaningfulLocation(poolCandidate?.locationHint);
+      }).length / scoredPool.length
+      : 0);
   const locationCoverageTriggered = hasLocationConstraint && poolLocationCoverage < config.locationCoverageFloor;
 
   const topK = scoredPool.slice(0, Math.min(scoredPool.length, config.qualityTopK));
@@ -803,8 +936,41 @@ export async function runSourcingOrchestrator(
   let discoverySkippedReason: OrchestratorResult['discoverySkippedReason'] = null;
   let discoveryTelemetry: DiscoveryTelemetry | null = null;
 
-  const poolSize = scoredPool.length;
+  // Two-layer: discovery sizing uses the Layer-1 ELIGIBLE count — the full
+  // pool minus rows the country guard would reject (same derivation as the
+  // scored-candidate guard above, minus snapshot locations which Layer 1
+  // doesn't carry). Using the ranked subset's length here would report a
+  // near-constant ~450 "pool" and over-trigger the deficit as Memory grows.
+  const layer1EligibleCount = config.twoLayerPoolEnabled
+    ? slimPool.filter((r) => {
+      if (!requestedCountryCode) return true;
+      const cc = deriveCountryCodeFromLocationText(r.locationHint);
+      if (cc) return cc === requestedCountryCode;
+      if (config.countryGuardSerpLocaleEnabled) {
+        const serpCc = extractSerpSignals(r.serper != null ? { serper: r.serper } : null).localeCountryCode;
+        if (serpCc && serpCc !== requestedCountryCode) return false;
+      }
+      return true;
+    }).length
+    : 0;
+  const poolSize = config.twoLayerPoolEnabled ? layer1EligibleCount : scoredPool.length;
   const poolDeficit = Math.max(0, config.targetCount - poolSize);
+
+  // Built lazily at the result sites — freshSurvivorRefreshes mutates later.
+  const buildTwoLayerTelemetry = (): OrchestratorResult['twoLayerPool'] =>
+    config.twoLayerPoolEnabled
+      ? {
+        enabled: true,
+        layer1Size: slimPool.length,
+        layer1CapHit,
+        layer1EligibleCount,
+        layer2Size: poolRows.length,
+        vectorLaneResolved,
+        recentLaneAdded,
+        fallbackHydrateUsed,
+        freshSurvivorRefreshes,
+      }
+      : null;
   const strictPoolCount = scoredPool.filter((sc) => sc.matchTier === 'strict_location').length;
   const strictCoverageDeficit = hasLocationConstraint
     ? Math.max(0, config.minStrictMatchesBeforeExpand - strictPoolCount)
@@ -865,7 +1031,11 @@ export async function runSourcingOrchestrator(
         'Discovery skipped by spend guard',
       );
     } else {
-      const existingLinkedinIds = new Set(poolRows.map((r) => r.linkedinId));
+      // Two-layer: dedup set from Layer 1 — complete at any pool size. The
+      // hydrated poolRows subset would let discovery re-buy pool members.
+      const existingLinkedinIds = config.twoLayerPoolEnabled
+        ? new Set(slimPool.map((r) => r.linkedinId))
+        : new Set(poolRows.map((r) => r.linkedinId));
       log.info(
         {
           requestId,
@@ -1141,6 +1311,28 @@ export async function runSourcingOrchestrator(
             });
             const duplicatesRemoved = combinedRaw.length - combinedForRanking.length;
 
+            // Stage-3: a stale-known pool member can cycle back via Crustdata
+            // (Stage-2 deliberately lets them) while their pool row sits
+            // OUTSIDE the Layer-2 ranking set — the fresh entry is then the
+            // only copy in ranking. Match such entries to Layer 1 so they
+            // (a) upsert onto the existing row under its case-preserved
+            // linkedinId (the URL-derived slug can differ in case, miss
+            // tenantId_linkedinId and crash into unique(linkedinUrl)),
+            // (b) label as pool members, and (c) still trigger the Stage-1
+            // searchMeta re-upsert even when ranked below the served top-100
+            // — otherwise "what ranking sees equals what the store holds"
+            // silently regresses for exactly the people staleness cycles back.
+            const slimMatchByCandidate = new Map<CandidateForRanking, SlimPoolRow>();
+            if (config.twoLayerPoolEnabled) {
+              for (const c of combinedForRanking) {
+                if (poolForRankingById.has(c.id)) continue; // pool copy already in ranking set
+                const url = (c as any).linkedinUrl;
+                const slug = url ? extractLinkedInIdFromUrl(url) : null;
+                const slim = slug ? slimBySlug.get(slug.toLowerCase()) : undefined;
+                if (slim) slimMatchByCandidate.set(c, slim);
+              }
+            }
+
             // Fresh-blob merge: for every pool entry whose person was ALSO in
             // this run's Crustdata batch, swap in the fresh blob (+picture),
             // keep the pool snapshot, and queue a DB re-upsert so the stored
@@ -1166,6 +1358,11 @@ export async function runSourcingOrchestrator(
                   snippet: fresh.searchSnippet || '',
                   linkedinUrl: (fresh as any).linkedinUrl,
                   linkedinId,
+                  // Honored by upsertDiscoveredCandidates as the upsert key —
+                  // the plain linkedinId field was silently ignored (it
+                  // re-extracts from the URL), so case-differing fresh slugs
+                  // missed the existing row despite PR#23's intent.
+                  canonicalLinkedinId: linkedinId,
                   name: (fresh as any).name,
                   headline: fresh.headlineHint,
                   location: fresh.locationHint || '',
@@ -1219,6 +1416,9 @@ export async function runSourcingOrchestrator(
                 snippet: p.searchSnippet || '',
                 linkedinUrl: p.linkedinUrl,
                 linkedinId: extractLinkedInIdFromUrl(p.linkedinUrl) || '',
+                // Fresh entry whose person is a pool member outside the
+                // ranking set: upsert onto the existing row, case-preserved.
+                canonicalLinkedinId: slimMatchByCandidate.get(p)?.linkedinId,
                 name: p.name,
                 headline: p.headlineHint,
                 location: p.locationHint || '',
@@ -1227,6 +1427,35 @@ export async function runSourcingOrchestrator(
                 crustdata: (p as any).crustdata,
               };
             }).filter((p): p is NonNullable<typeof p> => p !== null && !!p.linkedinId);
+
+            // Stage-1 convergence for fresh-entry-as-survivor (see the
+            // slimMatchByCandidate comment): pool members outside the ranking
+            // set whose fresh copy did NOT crack the served top-100 would
+            // otherwise never re-upsert — their stored blob stays stale.
+            if (config.twoLayerPoolEnabled && slimMatchByCandidate.size > 0) {
+              const top100Ids = new Set(scored.slice(0, 100).map((sc) => sc.candidateId));
+              for (const [c, slim] of slimMatchByCandidate) {
+                if (!(c as any).crustdata) continue;
+                if (top100Ids.has(c.id)) {
+                  freshSurvivorRefreshes++; // upserted via top100Profiles (canonical key)
+                  continue;
+                }
+                poolRefreshProfiles.push({
+                  title: c.searchTitle || '',
+                  snippet: c.searchSnippet || '',
+                  linkedinUrl: (c as any).linkedinUrl,
+                  linkedinId: slim.linkedinId,
+                  canonicalLinkedinId: slim.linkedinId,
+                  name: (c as any).name,
+                  headline: c.headlineHint ?? undefined,
+                  location: c.locationHint || '',
+                  companyHint: (c as any).companyHint ?? undefined,
+                  profilePictureUrl: (c as any).profilePictureUrl ?? undefined,
+                  crustdata: (c as any).crustdata,
+                });
+                freshSurvivorRefreshes++;
+              }
+            }
 
             const { upsertDiscoveredCandidates } = await import('./upsert-candidates');
             // poolRefreshProfiles: pool winners whose person was re-fetched this
@@ -1248,7 +1477,11 @@ export async function runSourcingOrchestrator(
               const poolCandidate = poolForRankingById.get(sc.candidateId);
               
               const linkedinUrl = profile?.linkedinUrl || poolCandidate?.id || '';
-              const linkedinId = extractLinkedInIdFromUrl(linkedinUrl);
+              // candidateMap is keyed by the canonical (case-preserved) slug
+              // when the person matched an existing pool row — look up with
+              // the same key or pool-matched fresh entries drop out here.
+              const linkedinId = (profile ? slimMatchByCandidate.get(profile)?.linkedinId : undefined)
+                ?? extractLinkedInIdFromUrl(linkedinUrl);
               const dbId = profile && linkedinId ? candidateMap.get(linkedinId) : poolCandidate?.id;
 
               return {
@@ -1318,7 +1551,11 @@ export async function runSourcingOrchestrator(
           // pool/pool_enriched → talent_pool) and poolCount reported 0 — the
           // recruiter could never see Memory's contribution.
           const finalAssembled: AssembledCandidate[] = crustdataPrimaryList.map((sc, index) => {
-            const isPoolMember = poolForRankingById.has(sc.candidateId);
+            // Two-layer: membership from Layer 1 (full pool), not the ranked
+            // subset — a pool member outside vector top-N re-bought from
+            // Crustdata upserts onto its existing row id and must still label
+            // as pool. slimById is empty when the flag is off.
+            const isPoolMember = poolForRankingById.has(sc.candidateId) || slimById.has(sc.candidateId);
             const hasVerifiedSkills = (sc.fitBreakdown as any)?.skillScoreMethod === 'snapshot';
             const sourceType = isPoolMember
               ? (hasVerifiedSkills ? 'pool_enriched' : 'pool')
@@ -1409,6 +1646,7 @@ export async function runSourcingOrchestrator(
             countryGuardFilteredCount: 0,
             countryGuardSerpLocaleSkippedCount: 0,
             countryGuardEscapeCounts: { totalEscaped: 0, cityAliasEscaped: 0, serpLocaleEscaped: 0 } as any,
+            twoLayerPool: buildTwoLayerTelemetry(),
             selectedSnapshotTrack,
             locationCoverageTriggered: false,
             noveltySuppressedCount: 0,
@@ -2327,6 +2565,7 @@ export async function runSourcingOrchestrator(
     countryGuardFilteredCount,
     countryGuardSerpLocaleSkippedCount,
     countryGuardEscapeCounts,
+    twoLayerPool: buildTwoLayerTelemetry(),
     selectedSnapshotTrack,
     locationCoverageTriggered,
     noveltySuppressedCount,

@@ -134,6 +134,11 @@ export interface ProfileSummary {
   profilePictureUrl?: string | null;
   crustdata?: any;
   providerMeta?: Record<string, unknown>;
+  // Overrides the URL-derived slug as the upsert key. Set when the profile is
+  // matched to an existing pool row whose stored linkedinId differs in case:
+  // the URL-derived slug would miss tenantId_linkedinId and crash into
+  // unique(linkedinUrl) on the create path, losing the candidate.
+  canonicalLinkedinId?: string;
 }
 
 /**
