@@ -7,6 +7,13 @@ export interface SourcingConfig {
   excludeKnownEnabled: boolean;
   excludeKnownFreshDays: number;
   excludeKnownMax: number;
+  // Stage-3 two-layer pool read: slim full-pool projection (Layer 1) keeps
+  // gates/dedup/metrics truthful at any pool size; only vector top-N plus the
+  // recent-K embedding-lag lane (Layer 2) is hydrated and ranked.
+  twoLayerPoolEnabled: boolean;
+  poolRecentK: number;
+  poolLayer1Cap: number;
+  poolFallbackHydrateCap: number;
   minDiscoveryPerRun: number;
   minDiscoveredInOutput: number;
   discoveredPromotionMinFitScore: number;
@@ -144,6 +151,10 @@ export function getSourcingConfig(): SourcingConfig {
     excludeKnownEnabled: process.env.SOURCE_EXCLUDE_KNOWN_ENABLED !== 'false',
     excludeKnownFreshDays: parseIntSafe(process.env.SOURCE_EXCLUDE_KNOWN_FRESH_DAYS, 14),
     excludeKnownMax: parseIntSafe(process.env.SOURCE_EXCLUDE_KNOWN_MAX, 2000),
+    twoLayerPoolEnabled: process.env.SOURCE_TWO_LAYER_POOL_ENABLED === 'true',
+    poolRecentK: parseIntSafe(process.env.SOURCE_POOL_RECENT_K, 150),
+    poolLayer1Cap: parseIntSafe(process.env.SOURCE_POOL_LAYER1_CAP, 50000),
+    poolFallbackHydrateCap: parseIntSafe(process.env.SOURCE_POOL_FALLBACK_HYDRATE_CAP, 2000),
     minDiscoveryPerRun: parseNonNegativeIntSafe(process.env.SOURCE_MIN_DISCOVERY_PER_RUN, 20),
     minDiscoveredInOutput: parseNonNegativeIntSafe(process.env.SOURCE_MIN_DISCOVERED_IN_OUTPUT, 15),
     discoveredPromotionMinFitScore: scaleThreshold(
