@@ -40,6 +40,88 @@ export interface ActiveGraphSearchResult {
   profile: CrustdataProfileResponse | null;
 }
 
+export interface GlobalPoolSearchResult {
+  id: string; // global_candidate_id
+  name: string | null;
+  headline: string | null;
+  linkedin_url: string | null;
+  linkedin_id: string | null;
+  role_family: string | null;
+  seniority_band: string | null;
+  skills_normalized: string[] | null;
+  location_city: string | null;
+  location_country_code: string | null;
+  similarity: number;
+  crustdata_profile: CrustdataProfileResponse | null;
+  tenant_candidate_id: string | null;
+  signal_candidate_id: string | null;
+}
+
+/**
+ * Builds the query text for vector pool search. Mirrors Memory's
+ * build_candidate_embedding_text shape (name/headline/role/seniority,
+ * "skills: ...", location) so JD queries and candidate rows live in the
+ * same vector space.
+ */
+export function buildPoolQueryText(req: JobRequirements): string {
+  const parts: string[] = [];
+  if (req.title) parts.push(req.title);
+  if (req.roleFamily) parts.push(req.roleFamily);
+  if (req.seniorityLevel) parts.push(req.seniorityLevel);
+  if (req.topSkills?.length) parts.push('skills: ' + req.topSkills.slice(0, 30).join(', '));
+  if (req.location) parts.push(req.location.split(',')[0].trim());
+  return parts.join('. ');
+}
+
+/**
+ * Vector search over Memory's platform pool (#29 slice 5 — hybrid retrieval).
+ * Returns null when the endpoint is unavailable/disabled so the caller can
+ * fall back to tag search.
+ */
+export async function searchGlobalPool(
+  requirements: JobRequirements,
+  tenantId: string,
+  limit: number = HOME_POOL_LIMIT,
+  requestId?: string
+): Promise<GlobalPoolSearchResult[] | null> {
+  const queryText = buildPoolQueryText(requirements);
+  if (!queryText.trim()) return [];
+
+  const token = await signActiveGraphJWT(tenantId, 'kg:read', requestId);
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(`${ACTIVEGRAPH_URL}/global-candidates/search`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        query_text: queryText,
+        limit,
+        location_city: requirements.location ? requirements.location.split(',')[0].trim() : null,
+      }),
+    });
+  } catch (err) {
+    log.warn({ requestId, err: String(err) }, 'Global pool vector search unreachable');
+    return null;
+  }
+
+  if (!response.ok) {
+    // 503 = GLOBAL_MEMORY_ENABLED off server-side — expected until slice-1 flips it.
+    const body = await response.text().catch(() => '');
+    log.info(
+      { requestId, status: response.status, body: body.slice(0, 200) },
+      'Global pool vector search unavailable — falling back to tag search'
+    );
+    return null;
+  }
+
+  const data = await response.json().catch(() => null);
+  if (!data || !Array.isArray(data.results)) return null;
+  return data.results as GlobalPoolSearchResult[];
+}
+
 /**
  * Derives search tags from the JD requirements for querying ActiveGraph.
  */
