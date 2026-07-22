@@ -2,6 +2,7 @@ import { JobRequirements } from './jd-digest';
 import type { CandidateForRanking } from './ranking-new';
 import type { CrustdataProfileResponse } from './crustdata-client';
 import { signActiveGraphJWT } from './activegraph-auth';
+import { resolveLocationDeterministic } from '@/lib/taxonomy/location-service';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger('activegraph-client');
@@ -89,6 +90,19 @@ export async function searchGlobalPool(
   const queryText = buildPoolQueryText(requirements);
   if (!queryText.trim()) return [];
 
+  const rawCity = requirements.location ? requirements.location.split(',')[0].trim() : null;
+  let cityAliases: string[] | null = null;
+  if (rawCity) {
+    const resolved = resolveLocationDeterministic(rawCity);
+    cityAliases = Array.from(
+      new Set(
+        [rawCity, resolved.city, resolved.rawCity]
+          .filter((c): c is string => !!c && !!c.trim())
+          .map((c) => c.toLowerCase()),
+      ),
+    );
+  }
+
   const token = await signActiveGraphJWT(tenantId, 'kg:read', requestId);
   let response: Response;
   try {
@@ -101,7 +115,11 @@ export async function searchGlobalPool(
       body: JSON.stringify({
         query_text: queryText,
         limit,
-        location_city: requirements.location ? requirements.location.split(',')[0].trim() : null,
+        location_city: rawCity,
+        // Alias expansion (e.g. bengaluru + bangalore): Memory's filter is
+        // ILIKE ANY over these — 'Bangalore Urban' rows failed a plain
+        // 'bengaluru' substring and were unreachable at ANY limit.
+        location_cities: cityAliases,
       }),
     });
   } catch (err) {
