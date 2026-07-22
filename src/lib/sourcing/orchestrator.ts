@@ -1311,20 +1311,31 @@ export async function runSourcingOrchestrator(
           );
         } else {
           console.log('🛑 [ORCHESTRATOR] CRUSTDATA RESPONDED — SKIPPING SERPER FALLBACK');
+          // Stage-5 truth-in-labeling: sourceType from POOL MEMBERSHIP, not
+          // from which code lane served the candidate. The old blanket
+          // 'crustdata_query' label meant pool candidates always displayed as
+          // newly-discovered in Flow (toDisplayBucket only knows
+          // pool/pool_enriched → talent_pool) and poolCount reported 0 — the
+          // recruiter could never see Memory's contribution.
           const finalAssembled: AssembledCandidate[] = crustdataPrimaryList.map((sc, index) => {
+            const isPoolMember = poolForRankingById.has(sc.candidateId);
+            const hasVerifiedSkills = (sc.fitBreakdown as any)?.skillScoreMethod === 'snapshot';
+            const sourceType = isPoolMember
+              ? (hasVerifiedSkills ? 'pool_enriched' : 'pool')
+              : 'discovered';
             return {
               candidateId: sc.candidateId,
               name: sc.name || '',
               headlineHint: sc.headlineHint || '',
               locationHint: sc.locationHint || '',
-              sourceType: 'crustdata_query',
+              sourceType,
               matchTier: sc.matchTier,
               locationMatchType: sc.locationMatchType,
               fitScore: sc.fitScore,
               fitBreakdown: sc.fitBreakdown,
               rank: index + 1,
               enrichmentStatus: 'pending',
-              dataConfidence: 'medium',
+              dataConfidence: hasVerifiedSkills ? 'high' : 'medium',
             };
           });
 
@@ -1369,7 +1380,7 @@ export async function runSourcingOrchestrator(
             discoveredCount: finalAssembled.length,
             discoveryShortfallRate: 0,
             candidateCount: finalAssembled.length,
-            poolCount: 0,
+            poolCount: dedupedFinalAssembled.filter((a) => a.sourceType === 'pool' || a.sourceType === 'pool_enriched').length,
             queriesExecuted: 1,
             qualityGateTriggered: false,
             avgFitTopK: Number(avgFitTopK.toFixed(4)),
