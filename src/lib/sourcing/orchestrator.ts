@@ -407,7 +407,28 @@ export async function runSourcingOrchestrator(
           skippedNoLocalId++;
           continue;
         }
-        if (poolForRankingById.has(localId)) continue;
+        const alreadyPooled = poolForRankingById.get(localId);
+        if (alreadyPooled) {
+          // Candidate is already in the ranking pool from Signal's own DB —
+          // MERGE Memory's verified signals instead of skipping, or the
+          // resume-derived skills never reach the ranker (job 142: test
+          // candidates ranked on the neutral prior despite verified skills).
+          if (!alreadyPooled.snapshot && (gc.skills_normalized?.length || gc.role_family || gc.seniority_band)) {
+            const now = new Date();
+            alreadyPooled.snapshot = {
+              skillsNormalized: gc.skills_normalized ?? [],
+              roleType: gc.role_family,
+              seniorityBand: gc.seniority_band,
+              location: gc.location_city,
+              computedAt: now,
+              staleAfter: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+            };
+          }
+          if (!alreadyPooled.crustdata && gc.crustdata_profile) {
+            alreadyPooled.crustdata = gc.crustdata_profile;
+          }
+          continue;
+        }
         if (!gc.crustdata_profile) {
           // No hydrated blob (cross-tenant public row) — the ranker would
           // floor it at fitScore 10. Deferred to #12 blob sharing.
