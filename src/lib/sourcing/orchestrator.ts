@@ -1093,8 +1093,13 @@ export async function runSourcingOrchestrator(
               if (slug) return `li:${slug.toLowerCase()}`;
               return `id:${c?.id ?? ''}`;
             };
-            // Pool candidates come first so their (often enriched) data wins over
-            // the fresh Crustdata duplicate for the same person.
+            // Pool candidates come first so the surviving entry keeps its LOCAL
+            // id + DB snapshot linkage — but the FRESH Crustdata blob wins for
+            // ranking (Stage-1 freshness): the old rule kept the pool row's
+            // stale searchMeta blob and discarded the just-fetched one, and
+            // since pool winners were never re-upserted, their stored blob
+            // never refreshed either — staleness compounded every run.
+            // Memory-only fields (verified snapshot skills) are preserved.
             const combinedRaw = [...poolForRanking, ...mappedForRanking];
             const seenIdentity = new Set<string>();
             const combinedForRanking = combinedRaw.filter((c: any) => {
@@ -1104,10 +1109,46 @@ export async function runSourcingOrchestrator(
               return true;
             });
             const duplicatesRemoved = combinedRaw.length - combinedForRanking.length;
-            if (duplicatesRemoved > 0) {
+
+            // Fresh-blob merge: for every pool entry whose person was ALSO in
+            // this run's Crustdata batch, swap in the fresh blob (+picture),
+            // keep the pool snapshot, and queue a DB re-upsert so the stored
+            // searchMeta converges with what we just ranked.
+            const freshByIdentity = new Map(mappedForRanking.map((m: any) => [identityKey(m), m]));
+            const poolRefreshProfiles: any[] = [];
+            let poolBlobsRefreshed = 0;
+            for (const c of combinedForRanking) {
+              if (!poolForRankingById.has(c.id)) continue;
+              const fresh = freshByIdentity.get(identityKey(c));
+              if (!fresh || fresh === c || !(fresh as any).crustdata) continue;
+              (c as any).crustdata = (fresh as any).crustdata;
+              if ((fresh as any).profilePictureUrl) (c as any).profilePictureUrl = (fresh as any).profilePictureUrl;
+              // c.snapshot (Memory-verified skills) intentionally untouched.
+              // Upsert key = the POOL ROW's own linkedinId (case-preserved): a
+              // case-differing fresh slug would miss tenantId_linkedinId and
+              // crash into unique(linkedinUrl) on the create path.
+              const linkedinId = poolById.get(c.id)?.linkedinId
+                || extractLinkedInIdFromUrl((fresh as any).linkedinUrl || '');
+              if (linkedinId) {
+                poolRefreshProfiles.push({
+                  title: fresh.searchTitle || '',
+                  snippet: fresh.searchSnippet || '',
+                  linkedinUrl: (fresh as any).linkedinUrl,
+                  linkedinId,
+                  name: (fresh as any).name,
+                  headline: fresh.headlineHint,
+                  location: fresh.locationHint || '',
+                  companyHint: (fresh as any).companyHint ?? undefined,
+                  profilePictureUrl: (fresh as any).profilePictureUrl ?? undefined,
+                  crustdata: (fresh as any).crustdata,
+                });
+              }
+              poolBlobsRefreshed++;
+            }
+            if (duplicatesRemoved > 0 || poolBlobsRefreshed > 0) {
               log.info(
-                { requestId, duplicatesRemoved, unique: combinedForRanking.length, raw: combinedRaw.length },
-                'Deduped pool+Crustdata candidates by identity before ranking'
+                { requestId, duplicatesRemoved, poolBlobsRefreshed, unique: combinedForRanking.length, raw: combinedRaw.length },
+                'Deduped pool+Crustdata candidates; fresh blobs merged onto pool entries'
               );
             }
 
@@ -1157,9 +1198,19 @@ export async function runSourcingOrchestrator(
             }).filter((p): p is NonNullable<typeof p> => p !== null && !!p.linkedinId);
 
             const { upsertDiscoveredCandidates } = await import('./upsert-candidates');
-            const candidateMap = await upsertDiscoveredCandidates(tenantId, top100Profiles, 'crustdata_query', 'crustdata');
+            // poolRefreshProfiles: pool winners whose person was re-fetched this
+            // run — upserting them refreshes their stored searchMeta blob so the
+            // DB copy converges with the fresh data we just ranked (Stage-1:
+            // "what ranking sees equals what the store holds"). No id churn:
+            // upsert keys on (tenantId, linkedinId), the existing row wins.
+            const candidateMap = await upsertDiscoveredCandidates(
+              tenantId,
+              [...top100Profiles, ...poolRefreshProfiles],
+              'crustdata_query',
+              'crustdata'
+            );
 
-            console.log(`💾 [ORCHESTRATOR] UPSERTED ${candidateMap.size} CANDIDATES TO DB`);
+            console.log(`💾 [ORCHESTRATOR] UPSERTED ${candidateMap.size} CANDIDATES TO DB (${poolRefreshProfiles.length} pool-blob refreshes)`);
 
             const allRankedWithIds = scored.slice(0, 100).map((sc) => {
               const profile = profileByUrl.get(sc.candidateId);
