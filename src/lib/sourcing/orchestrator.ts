@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/prisma';
+import { extractLinkedInIdFromUrl } from './discovery';
 import { Prisma } from '@prisma/client';
 import { redis } from '@/lib/redis/client';
 import { toJsonValue } from '@/lib/prisma/json';
@@ -368,9 +369,45 @@ export async function runSourcingOrchestrator(
     if (vectorResults !== null) {
       homeSearchMode = 'vector';
       let skippedNoProfile = 0;
+      let skippedNoLocalId = 0;
+      // Resolve pool results to Signal-LOCAL candidate cuids. Memory's stored
+      // signal_candidate_id is whatever id Signal sent at ingest time (a
+      // LinkedIn-URL id for Crustdata candidates), NOT a Signal DB cuid —
+      // persisting with a non-cuid id collides on unique(linkedinUrl) and then
+      // fails the jobSourcingCandidate FK (job 140 failure). Every same-tenant
+      // pool candidate exists locally, so look them up by url/slug.
+      const urls = vectorResults.map((g) => g.linkedin_url).filter((u): u is string => !!u);
+      const slugs = vectorResults.map((g) => g.linkedin_id).filter((s): s is string => !!s);
+      const localRows = urls.length || slugs.length
+        ? await prisma.candidate.findMany({
+            where: {
+              tenantId,
+              OR: [
+                ...(urls.length ? [{ linkedinUrl: { in: urls } }] : []),
+                ...(slugs.length ? [{ linkedinId: { in: slugs } }] : []),
+              ],
+            },
+            select: { id: true, linkedinId: true, linkedinUrl: true },
+          })
+        : [];
+      const localBySlug = new Map<string, string>();
+      for (const c of localRows) {
+        if (c.linkedinId) localBySlug.set(c.linkedinId.toLowerCase(), c.id);
+        if (c.linkedinUrl) {
+          const slug = extractLinkedInIdFromUrl(c.linkedinUrl);
+          if (slug) localBySlug.set(slug.toLowerCase(), c.id);
+        }
+      }
       for (const gc of vectorResults) {
-        const localId = gc.signal_candidate_id || gc.tenant_candidate_id;
-        if (!localId || poolForRankingById.has(localId)) continue;
+        const slug = (gc.linkedin_id || (gc.linkedin_url ? extractLinkedInIdFromUrl(gc.linkedin_url) : null) || '').toLowerCase();
+        const localId = slug ? localBySlug.get(slug) ?? null : null;
+        if (!localId) {
+          // Not in this tenant's Signal DB (cross-tenant public row) — cannot
+          // persist without a local candidate row; deferred to #12.
+          skippedNoLocalId++;
+          continue;
+        }
+        if (poolForRankingById.has(localId)) continue;
         if (!gc.crustdata_profile) {
           // No hydrated blob (cross-tenant public row) — the ranker would
           // floor it at fitScore 10. Deferred to #12 blob sharing.
@@ -401,7 +438,7 @@ export async function runSourcingOrchestrator(
         addedFromHome++;
       }
       log.info(
-        { requestId, found: vectorResults.length, added: addedFromHome, skippedNoProfile },
+        { requestId, found: vectorResults.length, added: addedFromHome, skippedNoProfile, skippedNoLocalId },
         'Global pool vector search merged'
       );
     } else {
