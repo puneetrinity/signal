@@ -14,6 +14,7 @@ import type { CandidateForRanking, FitBreakdown, MatchTier, LocationMatchType, S
 import type { TrackDecision } from './types';
 import { jobTrackToDbFilter } from './types';
 import { guardedTopKSwap } from './top20-guards';
+import { buildLayer1SlugIndex, selectTwoLayerCandidateIds } from './two-layer-pool';
 import {
   resolveRoleDeterministic,
   resolveRolesBatch,
@@ -362,30 +363,17 @@ export async function runSourcingOrchestrator(
       }
     }
 
-    const layer2Ids = new Set<string>();
-    for (const gc of prefetchedVectorResults ?? []) {
-      const slug = (gc.linkedin_id || (gc.linkedin_url ? extractLinkedInIdFromUrl(gc.linkedin_url) : null) || '').toLowerCase();
-      const local = slug ? slimBySlug.get(slug) : undefined;
-      if (local) layer2Ids.add(local.id);
-    }
-    vectorLaneResolved = layer2Ids.size;
-
-    if (prefetchedVectorResults === null) {
-      // Fail-open: Memory unavailable (or home pool disabled) → hydrate by
-      // recency, approximating the legacy read so pool ranking never goes dark.
-      fallbackHydrateUsed = true;
-      for (const r of slimPool.slice(0, config.poolFallbackHydrateCap)) layer2Ids.add(r.id);
-    } else {
-      // Recency lane (embedding-lag guard): a candidate who entered the pool
-      // minutes ago still has embedding_status=queued in Memory and is
-      // invisible to vector search until the embedding sweep drains.
-      for (const r of slimPool.slice(0, config.poolRecentK)) {
-        if (!layer2Ids.has(r.id)) {
-          layer2Ids.add(r.id);
-          recentLaneAdded++;
-        }
-      }
-    }
+    const layer2Selection = selectTwoLayerCandidateIds({
+      slimPool,
+      slimBySlug: buildLayer1SlugIndex(slimPool),
+      vectorResults: prefetchedVectorResults,
+      recentK: config.poolRecentK,
+      fallbackHydrateCap: config.poolFallbackHydrateCap,
+    });
+    const layer2Ids = layer2Selection.ids;
+    vectorLaneResolved = layer2Selection.vectorLaneResolved;
+    recentLaneAdded = layer2Selection.recentLaneAdded;
+    fallbackHydrateUsed = layer2Selection.fallbackHydrateUsed;
 
     poolRows = layer2Ids.size > 0 ? await fetchPoolByIds(Array.from(layer2Ids)) : [];
     log.info(
@@ -535,6 +523,12 @@ export async function runSourcingOrchestrator(
         }
         const alreadyPooled = poolForRankingById.get(localId);
         if (alreadyPooled) {
+          if (Number.isFinite(gc.similarity)) {
+            alreadyPooled.semanticSimilarity = Math.max(
+              alreadyPooled.semanticSimilarity ?? Number.NEGATIVE_INFINITY,
+              gc.similarity,
+            );
+          }
           // Candidate is already in the ranking pool from Signal's own DB —
           // MERGE Memory's verified signals instead of skipping, or the
           // resume-derived skills never reach the ranker (job 142: test
@@ -571,6 +565,7 @@ export async function runSourcingOrchestrator(
           enrichmentStatus: 'completed',
           lastEnrichedAt: now,
           crustdata: gc.crustdata_profile,
+          semanticSimilarity: gc.similarity,
           snapshot: {
             skillsNormalized: gc.skills_normalized ?? [],
             roleType: gc.role_family,
@@ -772,6 +767,7 @@ export async function runSourcingOrchestrator(
   const scoredPoolRaw = rankCandidates(poolForRanking, requirements, {
     fitScoreEpsilon: config.fitScoreEpsilon,
     track: trackDecision?.track,
+    semanticSimilarityWeight: config.semanticSimilarityWeight,
   });
   const countryGuardFilteredCandidateIds = new Set<string>();
   let countryGuardSerpLocaleSkippedCount = 0;
@@ -1385,6 +1381,7 @@ export async function runSourcingOrchestrator(
             const scored = rankCandidates(combinedForRanking, requirements, {
               fitScoreEpsilon: config.fitScoreEpsilon,
               track: trackDecision?.track,
+              semanticSimilarityWeight: config.semanticSimilarityWeight,
             });
 
             console.log(`📊 [ORCHESTRATOR] LOCAL RANKING DONE — ${scored.length} candidates scored`);
@@ -1831,6 +1828,7 @@ export async function runSourcingOrchestrator(
           const scoredDiscovered = rankCandidates(discoveredForRanking, requirements, {
             fitScoreEpsilon: config.fitScoreEpsilon,
             track: trackDecision?.track,
+            semanticSimilarityWeight: config.semanticSimilarityWeight,
           });
 
           // Penalize discovered unknown_location candidates that don't clear quality thresholds
@@ -2616,4 +2614,3 @@ export async function runSourcingOrchestrator(
   log.info({ requestId, resolvedTrack: trackDecision?.track ?? null, ...result }, 'Orchestrator complete');
   return result;
 }
-

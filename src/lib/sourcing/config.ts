@@ -35,6 +35,7 @@ export interface SourcingConfig {
   countryGuardEnabled: boolean;
   countryGuardSerpLocaleEnabled: boolean;
   fitScoreEpsilon: number;
+  semanticSimilarityWeight: number;
   // Discovery query generation + adaptive budget
   queryGenMode: 'deterministic' | 'hybrid';
   queryGroqTimeoutMs: number;
@@ -180,6 +181,13 @@ export function getSourcingConfig(): SourcingConfig {
     countryGuardSerpLocaleEnabled: process.env.SOURCE_COUNTRY_GUARD_SERP_LOCALE_ENABLED === 'true',
     // epsilon is a fitScore *delta* (0-100 scale); legacy 0.03 upgrades to 3 points.
     fitScoreEpsilon: clamp(scaleThreshold(parseFloatSafe(process.env.SOURCE_FIT_SCORE_EPSILON, 3), 100), 0, 20),
+    // Calibrated against completed jobs 147/148. This is a bounded,
+    // zero-centered adjustment; set to 0 for an immediate neutral rollback.
+    semanticSimilarityWeight: clamp(
+      parseFloatSafe(process.env.SOURCE_SEMANTIC_SIMILARITY_WEIGHT, 4),
+      0,
+      10,
+    ),
     // Discovery query generation + adaptive budget
     queryGenMode,
     queryGroqTimeoutMs: parseIntSafe(process.env.SOURCING_QUERY_GROQ_TIMEOUT_MS, 2500),

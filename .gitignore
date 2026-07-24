@@ -1,5 +1,5 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-.github/*
+# .github is tracked — CI workflows must reach the remote.
 # dependencies
 /node_modules
 /.pnp
@@ -49,7 +49,7 @@ worker.log
 next-env.d.ts
 
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-.github/*
+# .github is tracked — CI workflows must reach the remote.
 # dependencies
 /node_modules
 /.pnp

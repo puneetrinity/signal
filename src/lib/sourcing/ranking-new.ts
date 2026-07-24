@@ -29,6 +29,7 @@ export interface CandidateForRanking {
   enrichmentStatus: string;
   lastEnrichedAt: Date | null;
   crustdata?: CrustdataProfileResponse | null;
+  semanticSimilarity?: number | null;
   snapshot?: {
     skillsNormalized: string[];
     roleType: string | null;
@@ -94,6 +95,33 @@ interface SkillFitResult {
   method: 'snapshot' | 'text_fallback' | null;
   matched: string[];
 }
+
+function medianOf(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function computeSemanticSimilarityAdjustment(
+  similarity: number | null | undefined,
+  weight: number,
+  center: number,
+): number {
+  if (!Number.isFinite(similarity) || weight <= 0) return 0;
+
+  // Missing similarity is neutral — and neutral is the CENTER of this run's
+  // observed similarity distribution, not a fixed 0.5. Similarity only
+  // reaches vector-returned Memory candidates, and observed cosines cluster
+  // just above 0.5 (median ~0.52 on jobs 147/148), so a fixed center paid
+  // the median pool candidate ~+0.2 while every fresh candidate sat at 0 —
+  // a systematic source advantage disguised as a neutral prior.
+  // Median-centering makes the adjustment zero-sum among candidates that
+  // carry the signal and exactly 0 for those that don't: sourceType cannot
+  // move a score, only relative semantic standing can.
+  const adjustment = ((clamp01(similarity as number) - center) / 0.5) * weight;
+  return Math.max(-weight, Math.min(weight, adjustment));
+}
 // ---------------------------------------------------------------------------
 
 export interface FitBreakdown {
@@ -108,6 +136,8 @@ export interface FitBreakdown {
   activityFreshnessScore?: number;
   skillScoreMethod?: 'snapshot' | 'text_fallback';
   matchedSkills?: string[];
+  semanticSimilarity?: number;
+  semanticSimilarityAdjustment?: number;
   unknownLocationPromotion?: boolean;
 }
 
@@ -633,10 +663,19 @@ export function rankCandidates(
     fitScoreEpsilon?: number;
     track?: JobTrack;
     gates?: MustHaveGates;
+    semanticSimilarityWeight?: number;
   },
 ): ScoredCandidate[] {
   const track = options?.track ?? 'tech';
-  
+
+  // Per-run neutral center for the similarity adjustment (see
+  // computeSemanticSimilarityAdjustment). 0.5 only as the no-signal default.
+  const observedSimilarities = candidates
+    .map((c) => c.semanticSimilarity)
+    .filter((s): s is number => Number.isFinite(s))
+    .map(clamp01);
+  const similarityCenter = medianOf(observedSimilarities) ?? 0.5;
+
   return candidates.map(c => {
     // If no crustdata, fallback to a basic low score (legacy paths)
     if (!c.crustdata) {
@@ -678,7 +717,13 @@ export function rankCandidates(
 
     const eduScore = computeEducationScore(c.crustdata, track) * (eduWeight / 5);
 
+    const semanticSimilarityAdjustment = computeSemanticSimilarityAdjustment(
+      c.semanticSimilarity,
+      options?.semanticSimilarityWeight ?? 0,
+      similarityCenter,
+    );
     let rawScore = expScore + sklScore + rolScore + domScore + senScore + locScore + eduScore;
+    rawScore += semanticSimilarityAdjustment;
     
     // Dampen seniority if role mismatch
     if (rolScore < (roleWeight * 0.3)) {
@@ -712,6 +757,10 @@ export function rankCandidates(
         dataConfidence: conf,
         skillScoreMethod: skillFit.method ?? undefined,
         matchedSkills: skillFit.matched,
+        semanticSimilarity: Number.isFinite(c.semanticSimilarity)
+          ? clamp01(c.semanticSimilarity as number)
+          : undefined,
+        semanticSimilarityAdjustment: semanticSimilarityAdjustment || undefined,
       },
       matchTier,
       locationMatchType
