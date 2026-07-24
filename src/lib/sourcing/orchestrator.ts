@@ -34,6 +34,12 @@ import {
   computeSerpEvidence,
   extractSerpSignals,
 } from '@/lib/search/serp-signals';
+import {
+  buildCanonicalQueryFingerprint,
+  buildRelaxationRungs,
+  selectRelaxationRung,
+  type CoverageState,
+} from './relaxation-ladder';
 
 import {
   logSourcingRaw,
@@ -42,6 +48,7 @@ import {
 } from './debug-pipeline-logs';
 
 const log = createLogger('SourcingOrchestrator');
+const CRUSTDATA_REQUEST_LIMIT = 300;
 
 export interface OrchestratorResult {
   candidateCount: number;
@@ -146,6 +153,34 @@ export interface OrchestratorResult {
   roleResolutionMetrics: RoleResolutionMetrics | null;
   locationResolutionMetrics: LocationResolutionMetrics | null;
   sourceMetrics?: SourceMetrics;
+  relaxationLadder?: {
+    scope: 'tenant';
+    scopeKey: string;
+    queryFingerprint: string;
+    enabled: boolean;
+    selectedRung: string;
+    selectionReason: string;
+    selectedDescription: string;
+    availableRungs: string[];
+    submittedExclusionCount: number;
+    requestedLimit: number;
+    providerTotal: number | null;
+    rawReturnedCount: number;
+    dedupedReturnedCount: number;
+    baselineTotal: number | null;
+    baselineObservedAt: Date | null;
+    knownShare: number | null;
+    shortfall: boolean;
+    saturatedRungs: Array<{
+      rung: string;
+      knownShare: number | null;
+      shortfall: boolean;
+      baselineFresh: boolean;
+    }>;
+    stateTtlHours: number;
+    saturationRatio: number;
+    error: string | null;
+  } | null;
 }
 
 interface AssembledCandidate {
@@ -1099,6 +1134,7 @@ export async function runSourcingOrchestrator(
         let crustdataPrimaryList: any[] = [];
         let crustdataReserveList: any[] = [];
         let eligibleSourceEntries: Array<{ sourceType: CandidateSourceType; fitScore: number | null }> = [];
+        let relaxationLadder: OrchestratorResult['relaxationLadder'] = null;
 
         try {
           console.log('\n' + '🔍'.repeat(20));
@@ -1137,7 +1173,162 @@ export async function runSourcingOrchestrator(
             }
           }
 
-          const crustProfiles = await searchPeople(requirements, 300, { excludePersonIds });
+          const ladderScope = 'tenant' as const;
+          const ladderFingerprint = buildCanonicalQueryFingerprint(requirements);
+          const ladderRungs = buildRelaxationRungs(
+            requirements,
+            deriveCountryCodeFromLocationText(requirements.location),
+            deriveCountryCodeFromLocationText,
+            config.relaxationMaxRungs,
+          );
+          let ladderSelection = selectRelaxationRung(ladderRungs, new Map(), {
+            enabled: config.relaxationLadderEnabled,
+            requestedLimit: CRUSTDATA_REQUEST_LIMIT,
+            saturationRatio: config.relaxationSaturationRatio,
+            staleBefore: new Date(Date.now() - config.relaxationStateTtlHours * 60 * 60 * 1000),
+          });
+          let selectedCoverageState: CoverageState | undefined;
+          let ladderError: string | null = null;
+
+          if (config.relaxationLadderEnabled) {
+            try {
+              const staleBefore = new Date(Date.now() - config.relaxationStateTtlHours * 60 * 60 * 1000);
+              const rows = await prisma.sourcingCoverageState.findMany({
+                where: {
+                  scope: ladderScope,
+                  scopeKey: tenantId,
+                  queryFingerprint: ladderFingerprint,
+                  rung: { in: ladderRungs.map((rung) => rung.id) },
+                },
+              });
+              const coverageStates = new Map<string, CoverageState>(rows.map((row) => [row.rung, {
+                rung: row.rung,
+                baselineTotal: row.baselineTotal,
+                baselineObservedAt: row.baselineObservedAt,
+                lastProviderTotal: row.lastProviderTotal,
+                lastRawReturnedCount: row.lastRawReturnedCount,
+                lastObservedAt: row.lastObservedAt,
+              }]));
+              ladderSelection = selectRelaxationRung(ladderRungs, coverageStates, {
+                enabled: true,
+                requestedLimit: CRUSTDATA_REQUEST_LIMIT,
+                saturationRatio: config.relaxationSaturationRatio,
+                staleBefore,
+              });
+              selectedCoverageState = coverageStates.get(ladderSelection.rung.id);
+            } catch (error) {
+              ladderError = error instanceof Error ? error.message : String(error);
+              ladderSelection = selectRelaxationRung([ladderRungs[0]!], new Map(), {
+                enabled: false,
+                requestedLimit: CRUSTDATA_REQUEST_LIMIT,
+                saturationRatio: config.relaxationSaturationRatio,
+                staleBefore: new Date(),
+              });
+              log.warn({ requestId, err: ladderError }, 'Relaxation state unavailable; using exact Crustdata query');
+            }
+          }
+
+          relaxationLadder = {
+            scope: ladderScope,
+            scopeKey: tenantId,
+            queryFingerprint: ladderFingerprint,
+            enabled: config.relaxationLadderEnabled,
+            selectedRung: ladderSelection.rung.id,
+            selectionReason: ladderSelection.reason,
+            selectedDescription: ladderSelection.rung.description,
+            availableRungs: ladderRungs.map((rung) => rung.id),
+            submittedExclusionCount: excludePersonIds.length,
+            requestedLimit: CRUSTDATA_REQUEST_LIMIT,
+            providerTotal: null,
+            rawReturnedCount: 0,
+            dedupedReturnedCount: 0,
+            baselineTotal: selectedCoverageState?.baselineTotal ?? null,
+            baselineObservedAt: selectedCoverageState?.baselineObservedAt ?? null,
+            knownShare: ladderSelection.saturation.ratio,
+            shortfall: ladderSelection.saturation.shortfall,
+            saturatedRungs: ladderSelection.saturatedRungs.map((rung) => ({
+              rung: rung.rung,
+              knownShare: rung.ratio,
+              shortfall: rung.shortfall,
+              baselineFresh: rung.baselineFresh,
+            })),
+            stateTtlHours: config.relaxationStateTtlHours,
+            saturationRatio: config.relaxationSaturationRatio,
+            error: ladderError,
+          };
+
+          const crustSearch = await searchPeople(
+            ladderSelection.rung.requirements,
+            CRUSTDATA_REQUEST_LIMIT,
+            { excludePersonIds },
+          );
+          const crustProfiles = crustSearch.profiles;
+
+          // Crustdata totals are affected by not_in. Only a response submitted
+          // with no fresh-known exclusions is a valid unexcluded baseline; do
+          // not mistake the tenant-wide exclusion-list length for segment share.
+          const baselineObserved = excludePersonIds.length === 0 && crustSearch.providerTotal != null;
+          const baselineTotal = baselineObserved
+            ? crustSearch.providerTotal
+            : selectedCoverageState?.baselineTotal ?? null;
+          const baselineObservedAt = baselineObserved
+            ? new Date()
+            : selectedCoverageState?.baselineObservedAt ?? null;
+          const knownShare = baselineTotal != null && crustSearch.providerTotal != null && baselineTotal > 0
+            ? Math.max(0, Math.min(1, (baselineTotal - crustSearch.providerTotal) / baselineTotal))
+            : null;
+
+          relaxationLadder = {
+            ...relaxationLadder,
+            providerTotal: crustSearch.providerTotal,
+            rawReturnedCount: crustSearch.rawReturnedCount,
+            dedupedReturnedCount: crustProfiles.length,
+            baselineTotal,
+            baselineObservedAt,
+            knownShare,
+            shortfall: crustSearch.rawReturnedCount < CRUSTDATA_REQUEST_LIMIT,
+          };
+
+          if (config.relaxationLadderEnabled) {
+            try {
+              await prisma.sourcingCoverageState.upsert({
+                where: {
+                  scope_scopeKey_queryFingerprint_rung: {
+                    scope: ladderScope,
+                    scopeKey: tenantId,
+                    queryFingerprint: ladderFingerprint,
+                    rung: ladderSelection.rung.id,
+                  },
+                },
+                create: {
+                  scope: ladderScope,
+                  scopeKey: tenantId,
+                  queryFingerprint: ladderFingerprint,
+                  rung: ladderSelection.rung.id,
+                  baselineTotal,
+                  baselineObservedAt,
+                  lastProviderTotal: crustSearch.providerTotal,
+                  lastRawReturnedCount: crustSearch.rawReturnedCount,
+                  lastDedupedCount: crustProfiles.length,
+                  lastSubmittedExclusionCount: excludePersonIds.length,
+                  lastObservedAt: new Date(),
+                },
+                update: {
+                  baselineTotal,
+                  baselineObservedAt,
+                  lastProviderTotal: crustSearch.providerTotal,
+                  lastRawReturnedCount: crustSearch.rawReturnedCount,
+                  lastDedupedCount: crustProfiles.length,
+                  lastSubmittedExclusionCount: excludePersonIds.length,
+                  lastObservedAt: new Date(),
+                },
+              });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              relaxationLadder = { ...relaxationLadder, error: message };
+              log.warn({ requestId, err: message }, 'Relaxation state update failed after Crustdata response');
+            }
+          }
           crustDataSucceeded = true;
 
           if (crustProfiles.length > 0) {
@@ -1755,6 +1946,7 @@ export async function runSourcingOrchestrator(
             roleResolutionMetrics: { totalInputs: 0, cacheHits: 0, groqCalls: 0, groqTokensUsed: 0, durationMs: 0 } as any,
             locationResolutionMetrics: { totalInputs: 0, cacheHits: 0, groqCalls: 0, groqTokensUsed: 0, durationMs: 0 } as any,
             sourceMetrics,
+            relaxationLadder,
           };
 
           log.info({ requestId, resolvedTrack: trackDecision?.track ?? null, ...result }, 'Orchestrator complete via Crustdata direct sync pathway');

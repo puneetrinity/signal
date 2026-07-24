@@ -119,6 +119,13 @@ export interface CrustdataProfileResponse {
   };
 }
 
+export interface CrustdataSearchResult {
+  profiles: CrustdataProfileResponse[];
+  providerTotal: number | null;
+  rawReturnedCount: number;
+  requestedLimit: number;
+}
+
 // ─── Filter Types (matching actual Crustdata API schema) ─────────────────────
 
 // Leaf condition: bare object, NO op/conditions fields
@@ -232,7 +239,7 @@ export async function searchPeople(
      */
     excludePersonIds?: number[];
   },
-): Promise<CrustdataProfileResponse[]> {
+): Promise<CrustdataSearchResult> {
   if (!CRUSTDATA_API_KEY) {
     throw new Error('CRUSTDATA_API_KEY is not configured');
   }
@@ -300,8 +307,13 @@ export async function searchPeople(
   //    vocabulary. Biggest single quality lever: strips the ~52% wrong-band
   //    (e.g. Entry Level) profiles a title-only query lets through, and caps
   //    the top (excludes CXO/Owner for a mid-senior role).
+  const querySeniorityLevels = requirements.querySeniorityLevels?.length
+    ? requirements.querySeniorityLevels
+    : requirements.seniorityLevel
+      ? [requirements.seniorityLevel]
+      : [];
   const seniorityBands = SENIORITY_FILTER_ENABLED
-    ? resolveSeniorityBands(requirements.seniorityLevel)
+    ? [...new Set(querySeniorityLevels.flatMap(resolveSeniorityBands))]
     : [];
   if (seniorityBands.length > 0) {
     conditions.push({
@@ -395,8 +407,14 @@ export async function searchPeople(
   console.log(`🔄 [CRUSTDATA] NEXT STEP: local re-ranking against full JD...`);
   console.log('*'.repeat(60) + '\n');
 
-  log.info({ count: deduped.length, total: data.total_count, requested: limit }, 'Crustdata results');
-  return deduped;
+  const providerTotal = Number.isFinite(Number(data.total_count)) ? Number(data.total_count) : null;
+  log.info({ count: deduped.length, total: providerTotal, requested: limit }, 'Crustdata results');
+  return {
+    profiles: deduped,
+    providerTotal,
+    rawReturnedCount: allProfiles.length,
+    requestedLimit: limit,
+  };
 }
 
 

@@ -7,6 +7,12 @@ export interface SourcingConfig {
   excludeKnownEnabled: boolean;
   excludeKnownFreshDays: number;
   excludeKnownMax: number;
+  // Relaxation ladder: reallocate the fixed Crustdata buy after a query rung
+  // is saturated. It never changes ranking or suppresses served candidates.
+  relaxationLadderEnabled: boolean;
+  relaxationSaturationRatio: number;
+  relaxationStateTtlHours: number;
+  relaxationMaxRungs: number;
   // Stage-3 two-layer pool read: slim full-pool projection (Layer 1) keeps
   // gates/dedup/metrics truthful at any pool size; only vector top-N plus the
   // recent-K embedding-lag lane (Layer 2) is hydrated and ranked.
@@ -152,6 +158,14 @@ export function getSourcingConfig(): SourcingConfig {
     excludeKnownEnabled: process.env.SOURCE_EXCLUDE_KNOWN_ENABLED !== 'false',
     excludeKnownFreshDays: parseIntSafe(process.env.SOURCE_EXCLUDE_KNOWN_FRESH_DAYS, 14),
     excludeKnownMax: parseIntSafe(process.env.SOURCE_EXCLUDE_KNOWN_MAX, 2000),
+    relaxationLadderEnabled: process.env.SOURCE_RELAXATION_LADDER_ENABLED !== 'false',
+    relaxationSaturationRatio: clamp(
+      parseFloatSafe(process.env.SOURCE_RELAXATION_SATURATION_RATIO, 0.5),
+      0,
+      1,
+    ),
+    relaxationStateTtlHours: parseIntSafe(process.env.SOURCE_RELAXATION_STATE_TTL_HOURS, 168),
+    relaxationMaxRungs: clamp(parseIntSafe(process.env.SOURCE_RELAXATION_MAX_RUNGS, 8), 1, 8),
     twoLayerPoolEnabled: process.env.SOURCE_TWO_LAYER_POOL_ENABLED === 'true',
     poolRecentK: parseIntSafe(process.env.SOURCE_POOL_RECENT_K, 150),
     poolLayer1Cap: parseIntSafe(process.env.SOURCE_POOL_LAYER1_CAP, 50000),

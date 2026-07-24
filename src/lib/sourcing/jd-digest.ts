@@ -286,6 +286,8 @@ export interface JdDigestParsed {
   domain: string | null;
   roleFamily: string | null;
   titleSearchTerms: string[];
+  adjacentBuckets: string[][];
+  adjacentLocations: Array<{ metro: string; country: string }>;
 }
 
 export interface JobRequirements {
@@ -303,6 +305,13 @@ export interface JobRequirements {
   // LLM-generated LinkedIn title variants/synonyms from the JD digest (v2+).
   // Preferred source for the Crustdata title filter; empty for old digests.
   titleSearchTerms: string[];
+  // v3 Flow digest: later, role-adjacent literal title query groups.
+  adjacentBuckets: string[][];
+  // v3 Flow digest: nearby metros with their country for pre-query guarding.
+  adjacentLocations: Array<{ metro: string; country: string }>;
+  // Search-only override used by the relaxation ladder. Ranking still uses
+  // seniorityLevel from the original job requirements.
+  querySeniorityLevels?: string[];
 }
 
 export interface SourcingJobContextInput {
@@ -335,6 +344,8 @@ export function parseJdDigest(jdDigest: string): JdDigestParsed {
       domain: null,
       roleFamily: null,
       titleSearchTerms: [],
+      adjacentBuckets: [],
+      adjacentLocations: [],
     };
   }
 
@@ -354,6 +365,30 @@ export function parseJdDigest(jdDigest: string): JdDigestParsed {
           .filter((t: string) => t.length >= 3 && t.length <= 60)
           .slice(0, 6)
         : [],
+      adjacentBuckets: Array.isArray(parsed?.adjacentBuckets)
+        ? parsed.adjacentBuckets
+          .filter((bucket: unknown): bucket is unknown[] => Array.isArray(bucket))
+          .map((bucket: unknown[]) => bucket
+            .map((title) => String(title).trim().toLowerCase())
+            .filter((title) => title.length >= 3 && title.length <= 60)
+            .slice(0, 4))
+          .filter((bucket: string[]) => bucket.length > 0)
+          .slice(0, 3)
+        : [],
+      adjacentLocations: Array.isArray(parsed?.adjacentLocations)
+        ? parsed.adjacentLocations
+          .map((location: unknown) => {
+            if (!location || typeof location !== 'object') return null;
+            const value = location as Record<string, unknown>;
+            const metro = typeof value.metro === 'string' ? value.metro.trim() : '';
+            const country = typeof value.country === 'string' ? value.country.trim() : '';
+            return metro && country && metro.length <= 120 && country.length <= 80
+              ? { metro, country }
+              : null;
+          })
+          .filter((location: { metro: string; country: string } | null): location is { metro: string; country: string } => location !== null)
+          .slice(0, 3)
+        : [],
     };
   } catch {
     // Fallback: semicolon/comma-delimited keywords
@@ -367,6 +402,8 @@ export function parseJdDigest(jdDigest: string): JdDigestParsed {
       domain: null,
       roleFamily: null,
       titleSearchTerms: [],
+      adjacentBuckets: [],
+      adjacentLocations: [],
     };
   }
 }
@@ -395,5 +432,7 @@ export function buildJobRequirements(jobContext: SourcingJobContextInput): JobRe
     experienceYearsMax: jobContext.experienceYearsMax ?? null,
     education: jobContext.education ?? null,
     titleSearchTerms: parsed.titleSearchTerms,
+    adjacentBuckets: parsed.adjacentBuckets,
+    adjacentLocations: parsed.adjacentLocations,
   };
 }

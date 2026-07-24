@@ -98,6 +98,7 @@ async function processSourcingJob(
           effectiveStrategy: orchestratorResult.effectiveStrategy,
           executionPath: orchestratorResult.executionPath,
           sourceMetrics: orchestratorResult.sourceMetrics ?? null,
+          relaxationLadder: orchestratorResult.relaxationLadder ?? null,
           dynamicQueryBudgetUsed: orchestratorResult.dynamicQueryBudgetUsed,
           minDiscoveryPerRunApplied: orchestratorResult.minDiscoveryPerRunApplied,
           minDiscoveredInOutputApplied: orchestratorResult.minDiscoveredInOutputApplied,

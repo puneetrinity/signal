@@ -1692,6 +1692,30 @@ model CandidateGlobalLink {
   @@map("candidate_global_links")
 }
 
+/// Per-scope coverage observations for the Crustdata relaxation ladder.
+/// Scope is tenant today; it is explicit so public-profile hydration can later
+/// move purchase deduplication to platform scope without changing this ledger.
+model SourcingCoverageState {
+  id                          String    @id @default(cuid())
+  scope                       String
+  scopeKey                    String
+  queryFingerprint            String
+  rung                        String
+  baselineTotal               Int?
+  baselineObservedAt          DateTime?
+  lastProviderTotal           Int?
+  lastRawReturnedCount        Int       @default(0)
+  lastDedupedCount            Int       @default(0)
+  lastSubmittedExclusionCount Int       @default(0)
+  lastObservedAt              DateTime  @default(now())
+  createdAt                   DateTime  @default(now())
+  updatedAt                   DateTime  @updatedAt
+
+  @@unique([scope, scopeKey, queryFingerprint, rung])
+  @@index([scope, scopeKey, queryFingerprint, lastObservedAt])
+  @@map("sourcing_coverage_states")
+}
+
 model JobSourcingRequest {
   id                   String    @id @default(cuid())
   tenantId             String
