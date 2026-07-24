@@ -156,17 +156,52 @@ export interface MustHaveGates {
   industryRequired?: string;
 }
 
-export function compareFitWithConfidence(a: ScoredCandidate, b: ScoredCandidate, epsilon: number): number {
+function compareByFitScore(a: ScoredCandidate, b: ScoredCandidate, epsilon: number): number {
   const delta = b.fitScore - a.fitScore;
-  if (Math.abs(delta) >= epsilon) return delta;
+  if (delta !== 0) return delta;
 
-  if (a.fitBreakdown.dataConfidence !== b.fitBreakdown.dataConfidence) {
-    return b.fitBreakdown.dataConfidence - a.fitBreakdown.dataConfidence;
-  }
+  // With epsilon disabled, preserve Array#sort's stable score-only order.
+  // With the tie-break enabled, retain the previous deterministic fallback.
+  if (epsilon <= 0) return 0;
 
   if (a.candidateId < b.candidateId) return -1;
   if (a.candidateId > b.candidateId) return 1;
   return 0;
+}
+
+/**
+ * Keep fitScore as the global order and use confidence only as a local,
+ * bounded tie-break. A comparator that switches to confidence inside an
+ * epsilon window is non-transitive, so Array#sort can chain small windows
+ * into an arbitrarily large score inversion.
+ *
+ * This performs one forward adjacent-swap pass after a stable score sort.
+ * A candidate can cross another only when their direct fit-score gap is less
+ * than epsilon, so candidates separated by epsilon or more retain score order.
+ */
+export function orderByFitScoreWithConfidence(
+  candidates: ScoredCandidate[],
+  epsilon: number,
+): ScoredCandidate[] {
+  const ordered = [...candidates].sort((a, b) => compareByFitScore(a, b, epsilon));
+  if (epsilon <= 0) return ordered;
+
+  for (let index = 0; index < ordered.length - 1; index++) {
+    const higherFit = ordered[index];
+    const lowerFit = ordered[index + 1];
+    const scoreGap = higherFit.fitScore - lowerFit.fitScore;
+
+    if (
+      scoreGap >= 0 &&
+      scoreGap < epsilon &&
+      lowerFit.fitBreakdown.dataConfidence > higherFit.fitBreakdown.dataConfidence
+    ) {
+      ordered[index] = lowerFit;
+      ordered[index + 1] = higherFit;
+    }
+  }
+
+  return ordered;
 }
 
 const LOCATION_NOISE_PATTERNS: RegExp[] = [
@@ -674,7 +709,7 @@ export function rankCandidates(
     .map(clamp01);
   const similarityCenter = meanOf(observedSimilarities) ?? 0.5;
 
-  return candidates.map(c => {
+  const scored = candidates.map(c => {
     // If no crustdata, fallback to a basic low score (legacy paths)
     if (!c.crustdata) {
       return {
@@ -763,8 +798,7 @@ export function rankCandidates(
       matchTier,
       locationMatchType
     };
-  }).sort((a, b) => {
-    const epsilon = options?.fitScoreEpsilon ?? 0;
-    return epsilon > 0 ? compareFitWithConfidence(a, b, epsilon) : b.fitScore - a.fitScore;
   });
+
+  return orderByFitScoreWithConfidence(scored, options?.fitScoreEpsilon ?? 0);
 }
