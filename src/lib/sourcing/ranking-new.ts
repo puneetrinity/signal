@@ -96,11 +96,9 @@ interface SkillFitResult {
   matched: string[];
 }
 
-function medianOf(values: number[]): number | null {
+function meanOf(values: number[]): number | null {
   if (values.length === 0) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
 function computeSemanticSimilarityAdjustment(
@@ -110,15 +108,15 @@ function computeSemanticSimilarityAdjustment(
 ): number {
   if (!Number.isFinite(similarity) || weight <= 0) return 0;
 
-  // Missing similarity is neutral — and neutral is the CENTER of this run's
+  // Missing similarity is neutral — and neutral is the MEAN of this run's
   // observed similarity distribution, not a fixed 0.5. Similarity only
   // reaches vector-returned Memory candidates, and observed cosines cluster
   // just above 0.5 (median ~0.52 on jobs 147/148), so a fixed center paid
   // the median pool candidate ~+0.2 while every fresh candidate sat at 0 —
   // a systematic source advantage disguised as a neutral prior.
-  // Median-centering makes the adjustment zero-sum among candidates that
-  // carry the signal and exactly 0 for those that don't: sourceType cannot
-  // move a score, only relative semantic standing can.
+  // Mean-centering makes the adjustment sum to zero among candidates that
+  // carry the signal and exactly 0 for those that do not. This prevents a
+  // source-correlated aggregate lift while retaining relative semantic order.
   const adjustment = ((clamp01(similarity as number) - center) / 0.5) * weight;
   return Math.max(-weight, Math.min(weight, adjustment));
 }
@@ -674,7 +672,7 @@ export function rankCandidates(
     .map((c) => c.semanticSimilarity)
     .filter((s): s is number => Number.isFinite(s))
     .map(clamp01);
-  const similarityCenter = medianOf(observedSimilarities) ?? 0.5;
+  const similarityCenter = meanOf(observedSimilarities) ?? 0.5;
 
   return candidates.map(c => {
     // If no crustdata, fallback to a basic low score (legacy paths)

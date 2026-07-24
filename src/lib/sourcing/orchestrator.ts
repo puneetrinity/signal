@@ -54,8 +54,9 @@ export interface OrchestratorResult {
   countAboveThreshold: number;
   strictTopKCount: number;
   strictCoverageRate: number;
-  effectiveStrategy: 'pool_first' | 'discovery_first';
-  discoveryReason: 'pool_deficit' | 'low_quality_pool' | 'deficit_and_low_quality' | 'minimum_discovery_floor' | 'pool_role_mismatch' | 'deficit_and_role_mismatch' | 'strategy_discovery_first' | null;
+  effectiveStrategy: 'pool_first' | 'discovery_first' | 'crustdata_primary';
+  executionPath: 'crustdata_primary' | 'legacy_assembly';
+  discoveryReason: 'pool_deficit' | 'low_quality_pool' | 'deficit_and_low_quality' | 'minimum_discovery_floor' | 'pool_role_mismatch' | 'deficit_and_role_mismatch' | 'strategy_discovery_first' | 'crustdata_primary' | null;
   discoverySkippedReason: 'daily_serp_cap_reached' | 'cap_guard_unavailable' | null;
   discoveryTelemetry: DiscoveryTelemetry | null;
   snapshotReuseCount: number;
@@ -144,6 +145,7 @@ export interface OrchestratorResult {
   techTop20Thresholds: { roleMin: number; roleCap: number; skillMin: number; guardsEnabled: boolean } | null;
   roleResolutionMetrics: RoleResolutionMetrics | null;
   locationResolutionMetrics: LocationResolutionMetrics | null;
+  sourceMetrics?: SourceMetrics;
 }
 
 interface AssembledCandidate {
@@ -155,6 +157,47 @@ interface AssembledCandidate {
   sourceType: string;
   dataConfidence: 'high' | 'medium' | 'low';
   rank: number;
+}
+
+type CandidateSourceType = 'pool' | 'pool_enriched' | 'discovered';
+
+interface SourceMetricEntry {
+  count: number;
+  share: number;
+  fitScore: { min: number; median: number; max: number } | null;
+}
+
+interface SourceMetrics {
+  eligible: Record<CandidateSourceType, SourceMetricEntry>;
+  top20: Record<CandidateSourceType, SourceMetricEntry>;
+  top100: Record<CandidateSourceType, SourceMetricEntry>;
+  served: Record<CandidateSourceType, SourceMetricEntry>;
+}
+
+const CANDIDATE_SOURCE_TYPES: CandidateSourceType[] = ['pool', 'pool_enriched', 'discovered'];
+
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function summarizeSourceMetrics(
+  candidates: Array<{ sourceType: CandidateSourceType; fitScore: number | null }>,
+): Record<CandidateSourceType, SourceMetricEntry> {
+  return Object.fromEntries(CANDIDATE_SOURCE_TYPES.map((sourceType) => {
+    const matching = candidates.filter((candidate) => candidate.sourceType === sourceType);
+    const scores = matching
+      .map((candidate) => candidate.fitScore)
+      .filter((score): score is number => Number.isFinite(score));
+    return [sourceType, {
+      count: matching.length,
+      share: candidates.length === 0 ? 0 : matching.length / candidates.length,
+      fitScore: scores.length === 0
+        ? null
+        : { min: Math.min(...scores), median: median(scores), max: Math.max(...scores) },
+    }];
+  })) as Record<CandidateSourceType, SourceMetricEntry>;
 }
 
 function formatUtcDay(date = new Date()): string {
@@ -1055,6 +1098,7 @@ export async function runSourcingOrchestrator(
         // Enrichment candidates: primary top 100 + ordered reserve list
         let crustdataPrimaryList: any[] = [];
         let crustdataReserveList: any[] = [];
+        let eligibleSourceEntries: Array<{ sourceType: CandidateSourceType; fitScore: number | null }> = [];
 
         try {
           console.log('\n' + '🔍'.repeat(20));
@@ -1388,6 +1432,20 @@ export async function runSourcingOrchestrator(
             console.log(`🥇 [ORCHESTRATOR] TOP fit score: ${scored[0]?.fitScore?.toFixed(3) ?? 'N/A'}`);
             console.log(`📉 [ORCHESTRATOR] #100 fit score: ${scored[99]?.fitScore?.toFixed(3) ?? 'N/A'}`);
 
+            const rankedCandidateById = new Map(combinedForRanking.map((candidate) => [candidate.id, candidate]));
+            const sourceTypeForScored = (sc: ScoredCandidate): CandidateSourceType => {
+              const candidate = rankedCandidateById.get(sc.candidateId);
+              const isPoolMember = candidate
+                ? poolForRankingById.has(sc.candidateId) || slimMatchByCandidate.has(candidate)
+                : false;
+              if (!isPoolMember) return 'discovered';
+              return sc.fitBreakdown.skillScoreMethod === 'snapshot' ? 'pool_enriched' : 'pool';
+            };
+            eligibleSourceEntries = scored.map((sc) => ({
+              sourceType: sourceTypeForScored(sc),
+              fitScore: sc.fitScore,
+            }));
+
             // ── Rank first (CPU-only, ~1s), then upsert only top 100 ──────────
             // Previously all 300 were upserted BEFORE ranking: 20 sequential
             // batches × ~2s Railway RTT = ~40s wasted. Now we rank in-memory
@@ -1609,22 +1667,33 @@ export async function runSourcingOrchestrator(
           const avgFitTopK = finalAssembled.length > 0
             ? finalAssembled.reduce((sum, c) => sum + (c.fitScore ?? 0), 0) / finalAssembled.length
             : 0;
+          const strictTopKCount = finalAssembled.filter((candidate) => candidate.matchTier === 'strict_location').length;
+          const sourceMetrics: SourceMetrics = {
+            eligible: summarizeSourceMetrics(eligibleSourceEntries),
+            top20: summarizeSourceMetrics(eligibleSourceEntries.slice(0, 20)),
+            top100: summarizeSourceMetrics(eligibleSourceEntries.slice(0, 100)),
+            served: summarizeSourceMetrics(dedupedFinalAssembled.map((candidate) => ({
+              sourceType: candidate.sourceType as CandidateSourceType,
+              fitScore: candidate.fitScore,
+            }))),
+          };
 
           const result: OrchestratorResult = {
-            discoveredCount: finalAssembled.length,
+            discoveredCount: sourceMetrics.served.discovered.count,
             discoveryShortfallRate: 0,
             candidateCount: finalAssembled.length,
             poolCount: dedupedFinalAssembled.filter((a) => a.sourceType === 'pool' || a.sourceType === 'pool_enriched').length,
             queriesExecuted: 1,
-            qualityGateTriggered: false,
+            qualityGateTriggered,
             avgFitTopK: Number(avgFitTopK.toFixed(4)),
-            countAboveThreshold: finalAssembled.length,
-            strictTopKCount: finalAssembled.length,
-            strictCoverageRate: 1.0,
-            effectiveStrategy: 'discovery_first',
-            discoveryReason: 'strategy_discovery_first',
+            countAboveThreshold: finalAssembled.filter((candidate) => (candidate.fitScore ?? 0) >= config.qualityThreshold).length,
+            strictTopKCount,
+            strictCoverageRate: finalAssembled.length === 0 ? 0 : strictTopKCount / finalAssembled.length,
+            effectiveStrategy: 'crustdata_primary',
+            executionPath: 'crustdata_primary',
+            discoveryReason: 'crustdata_primary',
             discoverySkippedReason: null,
-            discoveryTelemetry: { queryRuns: [] } as any,
+            discoveryTelemetry: null,
             snapshotReuseCount: 0,
             snapshotStaleServedCount: 0,
             strictMatchedCount: finalAssembled.length,
@@ -1685,6 +1754,7 @@ export async function runSourcingOrchestrator(
             techTop20Thresholds: null,
             roleResolutionMetrics: { totalInputs: 0, cacheHits: 0, groqCalls: 0, groqTokensUsed: 0, durationMs: 0 } as any,
             locationResolutionMetrics: { totalInputs: 0, cacheHits: 0, groqCalls: 0, groqTokensUsed: 0, durationMs: 0 } as any,
+            sourceMetrics,
           };
 
           log.info({ requestId, resolvedTrack: trackDecision?.track ?? null, ...result }, 'Orchestrator complete via Crustdata direct sync pathway');
@@ -2542,6 +2612,7 @@ export async function runSourcingOrchestrator(
     strictTopKCount,
     strictCoverageRate: Number(strictCoverageRate.toFixed(4)),
     effectiveStrategy,
+    executionPath: 'legacy_assembly',
     discoveryReason,
     discoverySkippedReason,
     discoveryTelemetry,

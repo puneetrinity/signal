@@ -96,6 +96,8 @@ async function processSourcingJob(
           noveltyHint: orchestratorResult.noveltyHint,
           discoveredOrphanCount: orchestratorResult.discoveredOrphanCount,
           effectiveStrategy: orchestratorResult.effectiveStrategy,
+          executionPath: orchestratorResult.executionPath,
+          sourceMetrics: orchestratorResult.sourceMetrics ?? null,
           dynamicQueryBudgetUsed: orchestratorResult.dynamicQueryBudgetUsed,
           minDiscoveryPerRunApplied: orchestratorResult.minDiscoveryPerRunApplied,
           minDiscoveredInOutputApplied: orchestratorResult.minDiscoveredInOutputApplied,
@@ -275,4 +277,3 @@ export async function cleanupSourcingQueue(): Promise<void> {
 
   log.info('Sourcing queue cleaned up');
 }
-
