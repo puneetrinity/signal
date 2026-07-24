@@ -118,8 +118,10 @@ function buildGlobalCandidateFields(
     headline: candidate.headlineHint || undefined,
     location_city: locationUsable ? (resolved.city ?? undefined) : undefined,
     location_country_code: locationUsable ? (resolved.countryCode ?? undefined) : undefined,
-    location_confidence: candidate.locationConfidence ?? undefined,
-    location_source: candidate.locationSource ?? undefined,
+    location_confidence: locationUsable ? resolved.confidence : undefined,
+    location_source: locationUsable
+      ? (snapshot?.location ? 'intelligence_snapshot' : 'candidate_hint')
+      : undefined,
     role_family: snapshot?.roleType ?? candidate.roleType ?? undefined,
     seniority_band: snapshot?.seniorityBand ?? undefined,
     skills_normalized: snapshot?.skillsNormalized?.length

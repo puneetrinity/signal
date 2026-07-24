@@ -22,6 +22,7 @@ import { getSchoolTier, isDegreeRelevant } from '@/lib/taxonomy/education';
 export interface CandidateForRanking {
   id: string;
   headlineHint: string | null;
+  seniorityHint?: string | null;
   locationHint: string | null;
   searchTitle: string | null;
   searchSnippet: string | null;

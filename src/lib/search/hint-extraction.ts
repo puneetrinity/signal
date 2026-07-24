@@ -7,7 +7,7 @@ export function extractLocationFromSerpResult(title: string, snippet: string): s
 export function extractNameFromTitle(title: string): string | null {
   return null;
 }
-export function extractCompanyFromHeadline(headline: string): string | null {
+export function extractCompanyFromHeadline(headline: string | null): string | null {
   return null;
 }
 export function extractAllHints(linkedinId: string, title: string, snippet: string): {
@@ -15,11 +15,13 @@ export function extractAllHints(linkedinId: string, title: string, snippet: stri
   headlineHint: string | null;
   locationHint: string | null;
   companyHint: string | null;
+  seniorityHint: string | null;
 } {
   return {
     nameHint: null,
     headlineHint: null,
     locationHint: null,
     companyHint: null,
+    seniorityHint: null,
   };
 }
