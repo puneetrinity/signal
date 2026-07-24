@@ -48,7 +48,7 @@ function adjustmentOf(scored: ReturnType<typeof rankCandidates>, id: string): nu
   return entry?.fitBreakdown.semanticSimilarityAdjustment ?? 0;
 }
 
-describe('semantic similarity scoring (median-centered)', () => {
+describe('semantic similarity scoring (mean-centered)', () => {
   it('keeps candidates without similarity exactly neutral', () => {
     const scored = rankCandidates(
       [candidate('with-sim', 0.7), candidate('no-sim')],
@@ -59,28 +59,28 @@ describe('semantic similarity scoring (median-centered)', () => {
     expect(adjustmentOf(scored, 'no-sim')).toBe(0);
   });
 
-  it('is zero-sum around the per-run median, not a fixed 0.5', () => {
+  it('is zero-sum around the per-run mean, not a fixed 0.5', () => {
     // A distribution entirely ABOVE 0.5 — the case that previously paid
     // every Memory candidate a positive adjustment while fresh candidates
     // sat at zero (systematic source advantage).
     const scored = rankCandidates(
-      [candidate('low', 0.55), candidate('mid', 0.6), candidate('high', 0.65)],
+      [candidate('low-a', 0.5), candidate('low-b', 0.5), candidate('high', 0.9)],
       requirements,
       { semanticSimilarityWeight: 4 },
     );
 
-    expect(adjustmentOf(scored, 'low')).toBeCloseTo(-0.4);
-    expect(adjustmentOf(scored, 'mid')).toBeCloseTo(0);
-    expect(adjustmentOf(scored, 'high')).toBeCloseTo(0.4);
+    expect(adjustmentOf(scored, 'low-a')).toBeCloseTo(-1.0666667);
+    expect(adjustmentOf(scored, 'low-b')).toBeCloseTo(-1.0666667);
+    expect(adjustmentOf(scored, 'high')).toBeCloseTo(2.1333333);
     const sum =
-      adjustmentOf(scored, 'low') + adjustmentOf(scored, 'mid') + adjustmentOf(scored, 'high');
+      adjustmentOf(scored, 'low-a') + adjustmentOf(scored, 'low-b') + adjustmentOf(scored, 'high');
     expect(sum).toBeCloseTo(0);
   });
 
   it('source-neutrality: similarity-bearing candidates gain no aggregate advantage', () => {
     // Pool candidates carry sims skewed above 0.5; fresh candidates carry none.
     // Identical profiles otherwise — mean fitScore of both groups must match.
-    const pool = [candidate('p1', 0.52), candidate('p2', 0.55), candidate('p3', 0.58)];
+    const pool = [candidate('p1', 0.5), candidate('p2', 0.5), candidate('p3', 0.9)];
     const fresh = [candidate('f1'), candidate('f2'), candidate('f3')];
     const scored = rankCandidates([...pool, ...fresh], requirements, {
       semanticSimilarityWeight: 4,

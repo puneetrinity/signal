@@ -37,6 +37,9 @@ function percentile(values: number[], percent: number): number | null {
 function summarize(values: number[]) {
   return {
     count: values.length,
+    mean: values.length === 0
+      ? null
+      : Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(4)),
     min: percentile(values, 0),
     p10: percentile(values, 0.1),
     p50: percentile(values, 0.5),
