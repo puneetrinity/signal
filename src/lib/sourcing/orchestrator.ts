@@ -1669,6 +1669,7 @@ export async function runSourcingOrchestrator(
             unknownLocationDiscoveredAssembledCount: 0,
             unknownLocationPenaltyApplied: 0,
             unknownLocationPoolPenaltyApplied: 0,
+            nonTechLocationMismatchPenaltyApplied: 0,
             unknownLocationTop20DemotedInitial: 0,
             unknownLocationTop20DemotedFinal: 0,
             roleGuardTop20Demoted: 0,
@@ -2615,5 +2616,4 @@ export async function runSourcingOrchestrator(
   log.info({ requestId, resolvedTrack: trackDecision?.track ?? null, ...result }, 'Orchestrator complete');
   return result;
 }
-
 

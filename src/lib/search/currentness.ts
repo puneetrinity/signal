@@ -15,9 +15,8 @@
 
 import {
   extractCompanyFromHeadline,
-  extractHeadlineFromTitle,
   extractLocationFromSerpResult,
-} from '../enrichment/hint-extraction';
+} from './hint-extraction';
 
 export type Currentness = 'current' | 'historical' | 'unknown';
 
@@ -119,8 +118,25 @@ function nextNonEmptyClause(clauses: string[], index: number): string | null {
   return null;
 }
 
+function extractHeadlineFromSearchTitle(title: string): string | null {
+  const cleaned = title
+    .replace(/^\(\d+\)\s*/, '')
+    .replace(/\s*[|·-]\s*LinkedIn\s*$/i, '')
+    .trim();
+
+  for (const delimiter of [' - ', ' | ', ' · ']) {
+    const index = cleaned.indexOf(delimiter);
+    if (index !== -1) {
+      const headline = cleaned.slice(index + delimiter.length).trim();
+      if (headline) return headline;
+    }
+  }
+
+  return null;
+}
+
 function titleMentions(searchTitle: string): string[] {
-  const headline = extractHeadlineFromTitle(searchTitle);
+  const headline = extractHeadlineFromSearchTitle(searchTitle);
   const company = extractCompanyFromHeadline(headline);
   const phrases = new Set<string>();
   if (headline) phrases.add(headline);
