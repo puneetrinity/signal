@@ -8,7 +8,7 @@ import { buildJobRequirements, type SourcingJobContextInput } from './jd-digest'
 import { rankCandidates } from './ranking-new';
 import { discoverCandidates, type DiscoveredCandidate, type DiscoveryTelemetry } from './discovery';
 import { getLocationBoostWeight, getSourcingConfig } from './config';
-import { isMeaningfulLocation, isNoisyLocationHint, canonicalizeLocation, extractPrimaryCity, compareFitWithConfidence, STRONG_LOCATION_TYPES } from './ranking-new';
+import { isMeaningfulLocation, isNoisyLocationHint, canonicalizeLocation, extractPrimaryCity, orderByFitScoreWithConfidence, STRONG_LOCATION_TYPES } from './ranking-new';
 import { getRecentlyExposedCandidateIds } from './novelty';
 import type { CandidateForRanking, FitBreakdown, MatchTier, LocationMatchType, ScoredCandidate } from './ranking-new';
 import type { TrackDecision } from './types';
@@ -828,7 +828,7 @@ export async function runSourcingOrchestrator(
       }
     }
     if (unknownLocationPoolPenaltyApplied > 0) {
-      scoredPool.sort((a, b) => compareFitWithConfidence(a, b, config.fitScoreEpsilon));
+      scoredPool = orderByFitScoreWithConfidence(scoredPool, config.fitScoreEpsilon);
     }
   }
   let nonTechLocationMismatchPenaltyApplied = 0;
@@ -840,7 +840,7 @@ export async function runSourcingOrchestrator(
       }
     }
     if (nonTechLocationMismatchPenaltyApplied > 0) {
-      scoredPool.sort((a, b) => compareFitWithConfidence(a, b, config.fitScoreEpsilon));
+      scoredPool = orderByFitScoreWithConfidence(scoredPool, config.fitScoreEpsilon);
     }
   }
   if (requestedCountryCode) {
@@ -1913,7 +1913,8 @@ export async function runSourcingOrchestrator(
           }
           // Re-sort after penalty so promotion/front-load ordering reflects demotion.
           if (unknownLocationPenaltyApplied > 0) {
-            scoredDiscovered.sort((a, b) => compareFitWithConfidence(a, b, config.fitScoreEpsilon));
+            const reOrderedDiscovered = orderByFitScoreWithConfidence(scoredDiscovered, config.fitScoreEpsilon);
+            scoredDiscovered.splice(0, scoredDiscovered.length, ...reOrderedDiscovered);
           }
 
           for (const sc of scoredDiscovered) {
@@ -2117,7 +2118,7 @@ export async function runSourcingOrchestrator(
     }
   }
   if (strictDemotedCount > 0) {
-    expandedPool.sort((a, b) => compareFitWithConfidence(a, b, config.fitScoreEpsilon));
+    expandedPool = orderByFitScoreWithConfidence(expandedPool, config.fitScoreEpsilon);
   }
 
   // Strict rescue: avoid zero best-pool when all strict candidates miss the default floor.
