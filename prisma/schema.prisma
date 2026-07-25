@@ -1381,8 +1381,10 @@ model Candidate {
   sourcingCandidates    JobSourcingCandidate[]
   intelligenceSnapshots CandidateIntelligenceSnapshot[]
   globalLink          CandidateGlobalLink?
+  contactEnrichmentOperation ContactEnrichmentOperation?
 
   // Tenant-scoped unique constraints
+  @@unique([tenantId, id])
   @@unique([tenantId, linkedinUrl])
   @@unique([tenantId, linkedinId])
   @@index([tenantId])
@@ -1685,11 +1687,103 @@ model CandidateGlobalLink {
   linkConfidence    Float?   // identity resolution confidence at link time
   matchMethod       String?  // 'linkedin_id_exact' | 'github_exact' | 'email_hash_exact'
 
-  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  candidate Candidate @relation(fields: [tenantId, candidateId], references: [tenantId, id], onDelete: Cascade)
 
   @@unique([tenantId, candidateId])
+  @@unique([tenantId, globalCandidateId])
   @@index([globalCandidateId])
   @@map("candidate_global_links")
+}
+
+/// Durable state machine for shortlist-triggered contact enrichment.
+/// Provider responses never flow into Candidate.searchMeta or sourcing telemetry.
+model ContactEnrichmentOperation {
+  id                  String   @id @default(cuid())
+  tenantId            String
+  candidateId         String
+  globalCandidateId   String?
+  state               String   @default("queued")
+  generation          Int      @default(1)
+  provider             String?
+  providerRequestKey  String?
+  providerRecordId    String?
+  stagedEvidence      Json?
+  stagedAt            DateTime?
+  attempts            Int      @default(0)
+  nextAttemptAt       DateTime @default(now())
+  leaseToken          String?
+  leaseExpiresAt      DateTime?
+  lastErrorCode       String?
+  providerStartedAt   DateTime?
+  selectedEmail       String?
+  completedAt         DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  candidate Candidate @relation(fields: [tenantId, candidateId], references: [tenantId, id], onDelete: Cascade)
+
+  @@unique([tenantId, candidateId])
+  @@unique([tenantId, globalCandidateId])
+  @@index([state, nextAttemptAt])
+  @@index([leaseExpiresAt])
+  @@map("contact_enrichment_operations")
+}
+
+/// Durable, tenant-local delivery ledger for purchased public profiles.
+/// Payloads are never exposed through recruiter APIs or shared telemetry.
+model PublicMemoryIngestOutbox {
+  id                  String    @id
+  tenantId            String
+  signalCandidateId   String
+  sourcingRequestId   String?
+  localCandidateId    String?
+  payload             Json
+  generation          Int       @default(1)
+  status              String    @default("pending")
+  attempts            Int       @default(0)
+  nextAttemptAt       DateTime  @default(now())
+  leaseToken          String?
+  leaseExpiresAt      DateTime?
+  globalCandidateId   String?
+  lastErrorCode       String?
+  acknowledgedAt      DateTime?
+  linkedAt            DateTime?
+  linkAttempts        Int       @default(0)
+  linkNextAttemptAt   DateTime  @default(now())
+  linkLastErrorCode   String?
+  linkDeadAt          DateTime?
+  payloadCompactedAt  DateTime?
+  diagnosticsRecordedAt DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@unique([tenantId, signalCandidateId])
+  @@index([status, nextAttemptAt])
+  @@index([sourcingRequestId, status])
+  @@index([leaseExpiresAt])
+  @@index([linkNextAttemptAt])
+  @@index([status, payloadCompactedAt])
+  @@map("public_memory_ingest_outbox")
+}
+
+/// Per-sourcing-run receipt for a delivery row. Delivery stays idempotent per
+/// public identity while each run retains honest queued/terminal accounting.
+model PublicMemoryIngestReceipt {
+  id                    String   @id
+  tenantId              String
+  signalCandidateId     String
+  sourcingRequestId     String
+  status                String   @default("pending")
+  terminalAt            DateTime?
+  diagnosticsRecordedAt DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@unique([sourcingRequestId, signalCandidateId])
+  @@index([tenantId, signalCandidateId])
+  @@index([sourcingRequestId, status])
+  @@index([diagnosticsRecordedAt, createdAt])
+  @@map("public_memory_ingest_receipts")
 }
 
 /// Fine-query state for the capacity-fill ladder. Scope is tenant today and

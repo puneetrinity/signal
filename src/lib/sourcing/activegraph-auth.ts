@@ -15,6 +15,12 @@ const ACTIVEGRAPH_JWT_AUDIENCE = process.env.ACTIVEGRAPH_JWT_AUDIENCE || 'active
 
 let cachedKey: CryptoKey | null = null;
 
+export type ActiveGraphScope =
+  | 'kg:read'
+  | 'kg:write'
+  | 'contact:read'
+  | 'contact:write';
+
 function decodePemMaybeBase64(pem: string): string {
   return pem.includes('-----BEGIN') ? pem : Buffer.from(pem, 'base64').toString('utf-8');
 }
@@ -29,7 +35,7 @@ async function getSigningKey(): Promise<CryptoKey> {
 
 export async function signActiveGraphJWT(
   tenantId: string,
-  scopes: 'kg:read' | 'kg:write',
+  scopes: ActiveGraphScope,
   requestId?: string
 ): Promise<string> {
   const key = await getSigningKey();

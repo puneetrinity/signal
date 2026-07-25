@@ -20,6 +20,11 @@ export interface SourcingConfig {
   poolRecentK: number;
   poolLayer1Cap: number;
   poolFallbackHydrateCap: number;
+  // Public Memory read and purchase-dedup surfaces ship independently dark.
+  // The orchestrator may activate platform exclusion only when public
+  // hydration is also active, so excluded profiles remain retrievable.
+  publicMemoryHydrationEnabled: boolean;
+  platformExclusionEnabled: boolean;
   minDiscoveryPerRun: number;
   minDiscoveredInOutput: number;
   discoveredPromotionMinFitScore: number;
@@ -167,6 +172,10 @@ export function getSourcingConfig(): SourcingConfig {
     poolRecentK: parseIntSafe(process.env.SOURCE_POOL_RECENT_K, 150),
     poolLayer1Cap: parseIntSafe(process.env.SOURCE_POOL_LAYER1_CAP, 50000),
     poolFallbackHydrateCap: parseIntSafe(process.env.SOURCE_POOL_FALLBACK_HYDRATE_CAP, 2000),
+    publicMemoryHydrationEnabled:
+      process.env.SOURCE_PUBLIC_MEMORY_HYDRATION_ENABLED === 'true',
+    platformExclusionEnabled:
+      process.env.SOURCE_PLATFORM_EXCLUSION_ENABLED === 'true',
     minDiscoveryPerRun: parseNonNegativeIntSafe(process.env.SOURCE_MIN_DISCOVERY_PER_RUN, 20),
     minDiscoveredInOutput: parseNonNegativeIntSafe(process.env.SOURCE_MIN_DISCOVERED_IN_OUTPUT, 15),
     discoveredPromotionMinFitScore: scaleThreshold(

@@ -5,6 +5,7 @@ export interface SlimPoolCandidate {
 }
 
 export interface VectorPoolIdentity {
+  id?: string;
   linkedin_id: string | null;
   linkedin_url: string | null;
 }
@@ -41,12 +42,14 @@ export function selectTwoLayerCandidateIds({
   slimPool,
   slimBySlug,
   vectorResults,
+  resolvedVectorIdByGlobalId = new Map(),
   recentK,
   fallbackHydrateCap,
 }: {
   slimPool: SlimPoolCandidate[];
   slimBySlug: ReadonlyMap<string, string>;
   vectorResults: VectorPoolIdentity[] | null;
+  resolvedVectorIdByGlobalId?: ReadonlyMap<string, string>;
   recentK: number;
   fallbackHydrateCap: number;
 }): TwoLayerSelection {
@@ -62,6 +65,13 @@ export function selectTwoLayerCandidateIds({
   }
 
   for (const result of vectorResults) {
+    const linkedLocalId = result.id
+      ? resolvedVectorIdByGlobalId.get(result.id)
+      : undefined;
+    if (linkedLocalId) {
+      ids.add(linkedLocalId);
+      continue;
+    }
     const linkedinId = result.linkedin_id?.trim();
     const slug = linkedinId
       ? linkedinId.toLowerCase()

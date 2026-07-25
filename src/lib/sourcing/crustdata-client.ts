@@ -20,6 +20,7 @@ export interface CrustdataProfileResponse {
     last_name?: string;
     headline?: string;
     current_title?: string;
+    profile_picture_permalink?: string;
     summary?: string;
     languages?: string[];
     location?: {

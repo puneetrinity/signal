@@ -5,7 +5,6 @@
  */
 
 import { Worker, Job } from 'bullmq';
-import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/prisma';
 import { createLogger } from '@/lib/logger';
 import { toJsonValue } from '@/lib/prisma/json';
@@ -99,6 +98,7 @@ async function processSourcingJob(
           effectiveStrategy: orchestratorResult.effectiveStrategy,
           executionPath: orchestratorResult.executionPath,
           sourceMetrics: orchestratorResult.sourceMetrics ?? null,
+          publicMemory: orchestratorResult.publicMemory,
           dynamicQueryBudgetUsed: orchestratorResult.dynamicQueryBudgetUsed,
           minDiscoveryPerRunApplied: orchestratorResult.minDiscoveryPerRunApplied,
           minDiscoveredInOutputApplied: orchestratorResult.minDiscoveredInOutputApplied,
@@ -165,10 +165,8 @@ async function processSourcingJob(
         status: 'failed',
         qualityGateTriggered: false,
         queriesExecuted: 0,
-        // Preserve trackDecision written at enqueue time; only clear orchestrator fields
-        diagnostics: job.data.resolvedTrack
-          ? toJsonValue({ trackDecision: job.data.resolvedTrack })
-          : Prisma.JsonNull,
+        // Keep enqueue-time and asynchronously reconciled diagnostics. The
+        // public-ingest receipts can settle after the sourcing run itself fails.
       },
     });
 

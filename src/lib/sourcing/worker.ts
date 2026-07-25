@@ -14,6 +14,14 @@ import http from 'http';
 import { startSourcingWorker, cleanupSourcingQueue, getSourcingQueueStats } from './queue';
 import { redeliverStaleCallbacks } from './callback';
 import { createLogger } from '@/lib/logger';
+import {
+  startPublicMemoryIngestWorker,
+  stopPublicMemoryIngestWorker,
+} from './public-memory-ingest-worker';
+import {
+  startContactEnrichmentWorker,
+  stopContactEnrichmentWorker,
+} from '@/lib/contact-enrichment/worker';
 
 const log = createLogger('SourcingWorker');
 
@@ -61,6 +69,62 @@ const CALLBACK_REDELIVERY_BATCH_SIZE = parsePositiveInt(
 log.info({ concurrency: CONCURRENCY, redisConfigured: !!process.env.REDIS_URL }, 'Starting sourcing worker');
 
 const worker = startSourcingWorker({ concurrency: CONCURRENCY });
+const PUBLIC_MEMORY_INGEST_ENABLED =
+  process.env.SOURCE_PUBLIC_MEMORY_INGEST_WORKER_ENABLED !== 'false';
+if (PUBLIC_MEMORY_INGEST_ENABLED) {
+  startPublicMemoryIngestWorker({
+    intervalMs: parsePositiveInt(
+      process.env.SOURCE_PUBLIC_MEMORY_INGEST_INTERVAL_MS,
+      2_000,
+      'SOURCE_PUBLIC_MEMORY_INGEST_INTERVAL_MS',
+    ),
+    options: {
+      batchSize: parsePositiveInt(
+        process.env.SOURCE_PUBLIC_MEMORY_INGEST_BATCH_SIZE,
+        20,
+        'SOURCE_PUBLIC_MEMORY_INGEST_BATCH_SIZE',
+      ),
+      concurrency: parsePositiveInt(
+        process.env.SOURCE_PUBLIC_MEMORY_INGEST_CONCURRENCY,
+        5,
+        'SOURCE_PUBLIC_MEMORY_INGEST_CONCURRENCY',
+      ),
+    },
+  });
+}
+const CONTACT_ENRICHMENT_ENABLED =
+  process.env.CONTACT_ENRICHMENT_WORKER_ENABLED === 'true';
+if (CONTACT_ENRICHMENT_ENABLED) {
+  startContactEnrichmentWorker({
+    intervalMs: parsePositiveInt(
+      process.env.CONTACT_ENRICHMENT_INTERVAL_MS,
+      5_000,
+      'CONTACT_ENRICHMENT_INTERVAL_MS',
+    ),
+    options: {
+      batchSize: parsePositiveInt(
+        process.env.CONTACT_ENRICHMENT_BATCH_SIZE,
+        20,
+        'CONTACT_ENRICHMENT_BATCH_SIZE',
+      ),
+      concurrency: parsePositiveInt(
+        process.env.CONTACT_ENRICHMENT_CONCURRENCY,
+        5,
+        'CONTACT_ENRICHMENT_CONCURRENCY',
+      ),
+      leaseMs: parsePositiveInt(
+        process.env.CONTACT_ENRICHMENT_LEASE_MS,
+        60_000,
+        'CONTACT_ENRICHMENT_LEASE_MS',
+      ),
+      fullEnrichPollMs: parsePositiveInt(
+        process.env.CONTACT_FULLENRICH_POLL_MS,
+        5 * 60_000,
+        'CONTACT_FULLENRICH_POLL_MS',
+      ),
+    },
+  });
+}
 let callbackRedeliveryTimer: NodeJS.Timeout | null = null;
 let callbackRedeliveryRunning = false;
 
@@ -137,6 +201,8 @@ const shutdown = async (signal: string) => {
       clearInterval(callbackRedeliveryTimer);
       callbackRedeliveryTimer = null;
     }
+    stopPublicMemoryIngestWorker();
+    stopContactEnrichmentWorker();
     await cleanupSourcingQueue();
     log.info('Cleanup complete, exiting');
     process.exit(0);
