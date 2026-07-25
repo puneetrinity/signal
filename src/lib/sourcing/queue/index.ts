@@ -88,6 +88,7 @@ async function processSourcingJob(
           countryGuardFilteredCount: orchestratorResult.countryGuardFilteredCount,
           countryGuardSerpLocaleSkippedCount: orchestratorResult.countryGuardSerpLocaleSkippedCount,
           twoLayerPool: orchestratorResult.twoLayerPool,
+          relaxationLadder: orchestratorResult.relaxationLadder ?? null,
           selectedSnapshotTrack: orchestratorResult.selectedSnapshotTrack,
           locationCoverageTriggered: orchestratorResult.locationCoverageTriggered,
           noveltySuppressedCount: orchestratorResult.noveltySuppressedCount,
