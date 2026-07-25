@@ -1692,6 +1692,31 @@ model CandidateGlobalLink {
   @@map("candidate_global_links")
 }
 
+/// Fine-query state for the capacity-fill ladder. Scope is tenant today and
+/// remains explicit for the later public-platform migration in #12.
+model SourcingCoverageState {
+  id                          String   @id @default(cuid())
+  scope                       String
+  scopeKey                    String
+  queryFingerprint            String
+  activeRung                  String?
+  shortfallStreak             Int      @default(0)
+  lastExactProviderTotal      Int?
+  lastExactRequestedLimit     Int      @default(0)
+  lastProviderTotal           Int?
+  lastRequestedLimit          Int      @default(0)
+  lastRawReturnedCount        Int      @default(0)
+  lastSpillObservedAt         DateTime?
+  lastSubmittedExclusionCount Int      @default(0)
+  lastObservedAt              DateTime @default(now())
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @updatedAt
+
+  @@unique([scope, scopeKey, queryFingerprint])
+  @@index([scope, scopeKey, queryFingerprint, lastObservedAt])
+  @@map("sourcing_coverage_states")
+}
+
 model JobSourcingRequest {
   id                   String    @id @default(cuid())
   tenantId             String

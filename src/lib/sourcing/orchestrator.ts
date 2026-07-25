@@ -16,6 +16,15 @@ import { jobTrackToDbFilter } from './types';
 import { guardedTopKSwap } from './top20-guards';
 import { buildLayer1SlugIndex, selectTwoLayerCandidateIds } from './two-layer-pool';
 import {
+  buildFineQueryFingerprint,
+  buildRelaxationRungs,
+  isProviderShortfall,
+  nextActiveRungId,
+  nextShortfallStreak,
+  selectSpillRung,
+  type RelaxationState,
+} from './relaxation-ladder';
+import {
   resolveRoleDeterministic,
   resolveRolesBatch,
   type RoleResolution,
@@ -42,6 +51,7 @@ import {
 } from './debug-pipeline-logs';
 
 const log = createLogger('SourcingOrchestrator');
+const CRUSTDATA_REQUEST_LIMIT = 300;
 
 export interface OrchestratorResult {
   candidateCount: number;
@@ -146,6 +156,29 @@ export interface OrchestratorResult {
   roleResolutionMetrics: RoleResolutionMetrics | null;
   locationResolutionMetrics: LocationResolutionMetrics | null;
   sourceMetrics?: SourceMetrics;
+  relaxationLadder?: {
+    scope: 'tenant';
+    scopeKey: string;
+    fineQueryFingerprint: string;
+    enabled: boolean;
+    submittedExclusionCount: number;
+    exact: {
+      requestedLimit: number;
+      providerTotal: number | null;
+      rawReturnedCount: number;
+      shortfall: boolean;
+    };
+    spill: {
+      rung: string;
+      description: string;
+      requestedLimit: number;
+      providerTotal: number | null;
+      rawReturnedCount: number;
+      shortfall: boolean;
+      nextActiveRung: string;
+    } | null;
+    error: string | null;
+  } | null;
 }
 
 interface AssembledCandidate {
@@ -1099,6 +1132,7 @@ export async function runSourcingOrchestrator(
         let crustdataPrimaryList: any[] = [];
         let crustdataReserveList: any[] = [];
         let eligibleSourceEntries: Array<{ sourceType: CandidateSourceType; fitScore: number | null }> = [];
+        let relaxationLadder: OrchestratorResult['relaxationLadder'] = null;
 
         try {
           console.log('\n' + '🔍'.repeat(20));
@@ -1137,7 +1171,184 @@ export async function runSourcingOrchestrator(
             }
           }
 
-          const crustProfiles = await searchPeople(requirements, 300, { excludePersonIds });
+          const ladderScope = 'tenant' as const;
+          const fineQueryFingerprint = buildFineQueryFingerprint(requirements);
+          const ladderRungs = buildRelaxationRungs(
+            requirements,
+            deriveCountryCodeFromLocationText(requirements.location ?? ''),
+            deriveCountryCodeFromLocationText,
+            config.relaxationMaxRungs,
+          );
+          const stateStaleBefore = new Date(
+            Date.now() - config.relaxationStateTtlHours * 60 * 60 * 1000,
+          );
+          let ladderEnabled = config.relaxationLadderEnabled;
+          let ladderError: string | null = null;
+          let ladderState: RelaxationState | null = null;
+
+          if (ladderEnabled) {
+            try {
+              const row = await prisma.sourcingCoverageState.findUnique({
+                where: {
+                  scope_scopeKey_queryFingerprint: {
+                    scope: ladderScope,
+                    scopeKey: tenantId,
+                    queryFingerprint: fineQueryFingerprint,
+                  },
+                },
+              });
+              if (row) {
+                ladderState = {
+                  activeRung: row.activeRung,
+                  shortfallStreak: row.shortfallStreak,
+                  lastExactProviderTotal: row.lastExactProviderTotal,
+                  lastExactRequestedLimit: row.lastExactRequestedLimit,
+                  lastProviderTotal: row.lastProviderTotal,
+                  lastRequestedLimit: row.lastRequestedLimit,
+                  lastSpillObservedAt: row.lastSpillObservedAt,
+                  lastObservedAt: row.lastObservedAt,
+                };
+              }
+            } catch (error) {
+              ladderEnabled = false;
+              ladderError = error instanceof Error ? error.message : String(error);
+              log.warn({ requestId, err: ladderError }, 'Ladder state unavailable; using exact query only');
+            }
+          }
+
+          const exactSearch = await searchPeople(
+            requirements,
+            CRUSTDATA_REQUEST_LIMIT,
+            { excludePersonIds },
+          );
+          const exactShortfall = isProviderShortfall(
+            exactSearch.providerTotal,
+            CRUSTDATA_REQUEST_LIMIT,
+          );
+          const acquisitionRungByProfile = new Map<object, string>();
+          for (const profile of exactSearch.profiles) acquisitionRungByProfile.set(profile, 'exact');
+
+          let spillSearch: Awaited<ReturnType<typeof searchPeople>> | null = null;
+          let spillRung = null as ReturnType<typeof selectSpillRung>;
+          let spillNextActiveRung: string | null = null;
+          let spillShortfallStreak: number | null = null;
+          const remainingCapacity = Math.max(0, CRUSTDATA_REQUEST_LIMIT - exactSearch.rawReturnedCount);
+
+          // Capacity-fill only: one adjacent query may use exact's unfilled
+          // capacity. It never cascades to a second, broader market in-run.
+          if (ladderEnabled && exactShortfall && remainingCapacity > 0) {
+            spillRung = selectSpillRung(ladderRungs, ladderState, true);
+            if (spillRung) {
+              const exactPersonIds = exactSearch.profiles
+                .map((profile) => profile.crustdata_person_id)
+                .filter((id): id is number => Number.isFinite(id));
+              const spillExclusionIds = [...new Set([...excludePersonIds, ...exactPersonIds])];
+              try {
+                spillSearch = await searchPeople(
+                  spillRung.requirements,
+                  remainingCapacity,
+                  { excludePersonIds: spillExclusionIds },
+                );
+                for (const profile of spillSearch.profiles) {
+                  acquisitionRungByProfile.set(profile, spillRung.id);
+                }
+                spillShortfallStreak = nextShortfallStreak(
+                  ladderState,
+                  spillSearch.providerTotal,
+                  remainingCapacity,
+                  stateStaleBefore,
+                );
+                spillNextActiveRung = spillRung.id;
+                if (spillShortfallStreak >= config.relaxationDepletionRuns) {
+                  const advanced = nextActiveRungId(ladderRungs, spillRung.id);
+                  if (advanced !== spillRung.id) {
+                    spillNextActiveRung = advanced;
+                    spillShortfallStreak = 0;
+                  }
+                }
+              } catch (error) {
+                ladderError = error instanceof Error ? error.message : String(error);
+                log.warn(
+                  { requestId, rung: spillRung.id, err: ladderError },
+                  'Adjacent ladder query failed; continuing with exact results only',
+                );
+                spillRung = null;
+              }
+            }
+          }
+
+          const crustProfiles = [...exactSearch.profiles, ...(spillSearch?.profiles ?? [])];
+          relaxationLadder = {
+            scope: ladderScope,
+            scopeKey: tenantId,
+            fineQueryFingerprint,
+            enabled: ladderEnabled,
+            submittedExclusionCount: excludePersonIds.length,
+            exact: {
+              requestedLimit: CRUSTDATA_REQUEST_LIMIT,
+              providerTotal: exactSearch.providerTotal,
+              rawReturnedCount: exactSearch.rawReturnedCount,
+              shortfall: exactShortfall,
+            },
+            spill: spillSearch && spillRung ? {
+              rung: spillRung.id,
+              description: spillRung.description,
+              requestedLimit: spillSearch.requestedLimit,
+              providerTotal: spillSearch.providerTotal,
+              rawReturnedCount: spillSearch.rawReturnedCount,
+              shortfall: isProviderShortfall(spillSearch.providerTotal, spillSearch.requestedLimit),
+              nextActiveRung: spillNextActiveRung ?? spillRung.id,
+            } : null,
+            error: ladderError,
+          };
+
+          if (ladderEnabled) {
+            try {
+              const now = new Date();
+              await prisma.sourcingCoverageState.upsert({
+                where: {
+                  scope_scopeKey_queryFingerprint: {
+                    scope: ladderScope,
+                    scopeKey: tenantId,
+                    queryFingerprint: fineQueryFingerprint,
+                  },
+                },
+                create: {
+                  scope: ladderScope,
+                  scopeKey: tenantId,
+                  queryFingerprint: fineQueryFingerprint,
+                  activeRung: spillNextActiveRung,
+                  shortfallStreak: spillShortfallStreak ?? 0,
+                  lastExactProviderTotal: exactSearch.providerTotal,
+                  lastExactRequestedLimit: CRUSTDATA_REQUEST_LIMIT,
+                  lastProviderTotal: spillSearch?.providerTotal ?? null,
+                  lastRequestedLimit: spillSearch?.requestedLimit ?? 0,
+                  lastRawReturnedCount: spillSearch?.rawReturnedCount ?? 0,
+                  lastSpillObservedAt: spillSearch ? now : null,
+                  lastSubmittedExclusionCount: excludePersonIds.length,
+                  lastObservedAt: now,
+                },
+                update: {
+                  ...(spillSearch && spillRung ? {
+                    activeRung: spillNextActiveRung,
+                    shortfallStreak: spillShortfallStreak ?? 0,
+                    lastProviderTotal: spillSearch.providerTotal,
+                    lastRequestedLimit: spillSearch.requestedLimit,
+                    lastRawReturnedCount: spillSearch.rawReturnedCount,
+                    lastSpillObservedAt: now,
+                  } : {}),
+                  lastExactProviderTotal: exactSearch.providerTotal,
+                  lastExactRequestedLimit: CRUSTDATA_REQUEST_LIMIT,
+                  lastSubmittedExclusionCount: excludePersonIds.length,
+                  lastObservedAt: now,
+                },
+              });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              if (relaxationLadder) relaxationLadder.error = relaxationLadder.error ?? message;
+              log.warn({ requestId, err: message }, 'Failed to persist ladder state');
+            }
+          }
           crustDataSucceeded = true;
 
           if (crustProfiles.length > 0) {
@@ -1309,6 +1520,9 @@ export async function runSourcingOrchestrator(
                 companyHint,
                 profilePictureUrl,
                 crustdata: p,
+                // Retrieval provenance is diagnostic-only. Ranking below still
+                // receives the original job requirements.
+                acquisitionRung: acquisitionRungByProfile.get(p) ?? 'exact',
               };
             }).filter((p: any) => p.linkedinUrl);
 
@@ -1480,6 +1694,12 @@ export async function runSourcingOrchestrator(
                 companyHint: (p as any).companyHint ?? undefined,
                 profilePictureUrl: (p as any).profilePictureUrl ?? undefined,
                 crustdata: (p as any).crustdata,
+                providerMeta: {
+                  sourcing: {
+                    ladderRung: (p as any).acquisitionRung ?? 'exact',
+                    fineQueryFingerprint,
+                  },
+                },
               };
             }).filter((p): p is NonNullable<typeof p> => p !== null && !!p.linkedinId);
 
@@ -1507,6 +1727,12 @@ export async function runSourcingOrchestrator(
                   companyHint: (c as any).companyHint ?? undefined,
                   profilePictureUrl: (c as any).profilePictureUrl ?? undefined,
                   crustdata: (c as any).crustdata,
+                  providerMeta: {
+                    sourcing: {
+                      ladderRung: (c as any).acquisitionRung ?? 'exact',
+                      fineQueryFingerprint,
+                    },
+                  },
                 });
                 freshSurvivorRefreshes++;
               }
@@ -1755,6 +1981,7 @@ export async function runSourcingOrchestrator(
             roleResolutionMetrics: { totalInputs: 0, cacheHits: 0, groqCalls: 0, groqTokensUsed: 0, durationMs: 0 } as any,
             locationResolutionMetrics: { totalInputs: 0, cacheHits: 0, groqCalls: 0, groqTokensUsed: 0, durationMs: 0 } as any,
             sourceMetrics,
+            relaxationLadder,
           };
 
           log.info({ requestId, resolvedTrack: trackDecision?.track ?? null, ...result }, 'Orchestrator complete via Crustdata direct sync pathway');
