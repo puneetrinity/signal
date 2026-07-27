@@ -11,6 +11,10 @@ import { verifyServiceJWT } from '@/lib/auth/service-jwt';
 import { requireScope } from '@/lib/auth/service-scopes';
 import { prisma } from '@/lib/prisma';
 import { summarizeIdentitySignals } from '@/lib/sourcing/identity-summary';
+import {
+  classifyMatchStrength,
+  computeMatchStrengthBands,
+} from '@/lib/sourcing/match-strength';
 import { resolveLocationDeterministic } from '@/lib/taxonomy/location-service';
 
 function safeObject(value: unknown): Record<string, unknown> | null {
@@ -125,6 +129,18 @@ export async function GET(
 
   const candidates = (sourcingRequest as any).candidates || [];
   const candidateIds = candidates.map((c: any) => c.candidateId);
+  // Percentile cutoffs use the complete persisted run, never the requested
+  // response slice. A limit=20 read must agree with a limit=100 read.
+  const persistedRunScores = await prisma.jobSourcingCandidate.findMany({
+    where: {
+      tenantId,
+      sourcingRequestId: sourcingRequest.id,
+    },
+    select: { fitScore: true },
+  });
+  const matchStrengthBands = computeMatchStrengthBands(
+    persistedRunScores.map((candidate) => candidate.fitScore),
+  );
   const [identitySignals, confirmedSignals] = candidateIds.length > 0
     ? await Promise.all([
       prisma.identityCandidate.findMany({
@@ -307,15 +323,14 @@ export async function GET(
       };
     }
 
-    // fitScore is on a 0–100 scale (ranking-new emits 0–100). The thresholds
-    // must match that scale — comparing against 0.8/0.6 made EVERY nonzero
-    // score "strong". 80 = strong, 60 = good, below = possible.
-    const fitScore = sc.fitScore ?? 0;
-    // "strong" requires VERIFIED skills (snapshot), not just a high coarse-signal score — otherwise
-    // an unverified senior-backend-in-city candidate is labelled strong on role/location alone.
-    // Until Memory supplies skills, this keeps strong honest (empty) rather than misleading.
-    const hasVerifiedSkills = fbRaw?.skillScoreMethod === 'snapshot';
-    const matchStrength = (fitScore >= 80 && hasVerifiedSkills) ? 'strong' : fitScore >= 60 ? 'good' : 'possible';
+    // Display-only labels adapt to this run while retaining the 60-point
+    // honesty floor. "strong" still requires verified snapshot skills; label
+    // derivation never feeds ranking, assembly, persistence, or source treatment.
+    const matchStrength = classifyMatchStrength(
+      sc.fitScore,
+      fbRaw?.skillScoreMethod,
+      matchStrengthBands,
+    );
 
     let locationStatus: 'verified' | 'partial' | 'unverified' | 'mismatch' | 'unknown' = 'unknown';
     if (locationLabel === 'location_verified') locationStatus = 'verified';
@@ -454,7 +469,7 @@ export async function GET(
     requestId: sourcingRequest.id,
     externalJobId: sourcingRequest.externalJobId,
     resultCount: sourcingRequest.resultCount,
+    matchStrengthBands,
     data: candidateResults,
   });
 }
-
