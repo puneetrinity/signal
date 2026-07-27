@@ -60,6 +60,29 @@ export interface GlobalPoolSearchResult {
   signal_candidate_id: string | null;
 }
 
+interface ActiveGraphCandidateResolveResponse {
+  candidate_id?: unknown;
+  resolution_status?: unknown;
+  source_record_id?: unknown;
+}
+
+export function isDurableActiveGraphCandidateResolve(
+  value: unknown,
+): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const response = value as ActiveGraphCandidateResolveResponse;
+  return (
+    (response.resolution_status === 'created' ||
+      response.resolution_status === 'matched') &&
+    typeof response.candidate_id === 'string' &&
+    response.candidate_id.length > 0 &&
+    typeof response.source_record_id === 'string' &&
+    response.source_record_id.length > 0
+  );
+}
+
 /**
  * Builds the query text for vector pool search. Mirrors Memory's
  * build_candidate_embedding_text shape (name/headline/role/seniority,
@@ -278,29 +301,56 @@ export async function searchHomePool(
 /**
  * Write a candidate to the internal library (ActiveGraph).
  */
+export function buildActiveGraphCandidatePayload(
+  tenantId: string,
+  candidate: CandidateForRanking & {
+    linkedinUrl?: string;
+    name?: string;
+  },
+  tags: string[],
+  requestId?: string,
+  options?: {
+    profileObservedAt?: Date;
+    acquisitionGeneration?: number;
+  },
+): Record<string, unknown> {
+  let linkedinUrl = candidate.linkedinUrl || candidate.id;
+  if (!linkedinUrl.startsWith('http')) {
+    linkedinUrl = `https://www.linkedin.com/in/${linkedinUrl}`;
+  }
+  return {
+    signal_candidate_id: candidate.id,
+    source_record_type: 'sourced_candidate',
+    linkedinUrl,
+    display_name: candidate.name,
+    headline: candidate.headlineHint,
+    request_id: requestId,
+    tags,
+    tenant_id: tenantId,
+    crustdata: candidate.crustdata,
+    profile_observed_at:
+      options?.profileObservedAt?.toISOString(),
+    acquisition_generation: options?.acquisitionGeneration,
+  };
+}
+
 export async function ingestCandidate(
   tenantId: string,
   candidate: CandidateForRanking & { linkedinUrl?: string; name?: string },
   tags: string[],
-  requestId?: string
+  requestId?: string,
+  options?: {
+    profileObservedAt?: Date;
+    acquisitionGeneration?: number;
+  },
 ): Promise<boolean> {
-  // Extract standard identifier format from ID (which is the LinkedIn URL)
-  let linkedinUrl = candidate.linkedinUrl || candidate.id;
-  if (!linkedinUrl.startsWith('http')) {
-      linkedinUrl = `https://www.linkedin.com/in/${linkedinUrl}`;
-  }
-
-  const payload = {
-    signal_candidate_id: candidate.id,
-    source_record_type: "sourced_candidate",
-    linkedinUrl: linkedinUrl,
-    display_name: candidate.name,
-    headline: candidate.headlineHint,
-    request_id: requestId,
-    tags: tags,
-    tenant_id: tenantId,
-    crustdata: candidate.crustdata,
-  };
+  const payload = buildActiveGraphCandidatePayload(
+    tenantId,
+    candidate,
+    tags,
+    requestId,
+    options,
+  );
 
   const token = await signActiveGraphJWT(tenantId, 'kg:write', requestId);
   const response = await fetchWithTimeout(`${ACTIVEGRAPH_URL}/candidates/resolve/signal/candidate`, {
@@ -321,6 +371,22 @@ export async function ingestCandidate(
     return false;
   }
 
+  const result = await response.json().catch(() => null);
+  if (!isDurableActiveGraphCandidateResolve(result)) {
+    log.error(
+      {
+        requestId,
+        tenantId,
+        candidateId: candidate.id,
+        resolutionStatus:
+          result && typeof result === 'object'
+            ? (result as { resolution_status?: unknown }).resolution_status
+            : null,
+      },
+      'ActiveGraph candidate ingest was not durably resolved',
+    );
+    return false;
+  }
   return true;
 }
 
@@ -332,7 +398,11 @@ export async function ingestCandidateBatch(
   tenantId: string,
   candidates: (CandidateForRanking & { linkedinUrl?: string; name?: string })[],
   requestId?: string,
-  chunkSize = 10
+  chunkSize = 10,
+  options?: {
+    profileObservedAt?: Date;
+    acquisitionGeneration?: number;
+  },
 ): Promise<number> {
   let success = 0;
   for (let i = 0; i < candidates.length; i += chunkSize) {
@@ -341,7 +411,13 @@ export async function ingestCandidateBatch(
       chunk.map(async (candidate) => {
         try {
           const tags = generateTagsFromCandidate(candidate);
-          return await ingestCandidate(tenantId, candidate, tags, requestId);
+          return await ingestCandidate(
+            tenantId,
+            candidate,
+            tags,
+            requestId,
+            options,
+          );
         } catch (err) {
           log.error({ requestId, candidateId: candidate.id, err: String(err) }, 'ingest threw');
           return false;

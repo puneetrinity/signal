@@ -4,6 +4,7 @@
  * Dedicated queue for v3 sourcing jobs. Mirrors enrichment queue pattern.
  */
 
+import { randomUUID } from 'crypto';
 import { Worker, Job } from 'bullmq';
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/prisma';
@@ -28,27 +29,68 @@ async function processSourcingJob(
 ): Promise<SourcingJobResult> {
   const { requestId, tenantId, externalJobId, callbackUrl } = job.data;
   const startTime = Date.now();
+  const processingLeaseId = randomUUID();
+  const routeFence = {
+    acquisitionGeneration: job.data.acquisitionGeneration,
+    executionAttemptId: job.data.executionAttemptId,
+  };
 
   log.info({ jobId: job.id, requestId, tenantId, externalJobId }, 'Processing sourcing job');
 
-  // Transition queued → processing
-  await prisma.jobSourcingRequest.update({
-    where: { id: requestId },
-    data: { status: 'processing' },
+  // Claim only the execution attempt that the source route enqueued. A stale
+  // worker from an older refresh/retry must not mutate the current request.
+  const claimed = await prisma.jobSourcingRequest.updateMany({
+    where: {
+      id: requestId,
+      tenantId,
+      acquisitionGeneration: routeFence.acquisitionGeneration,
+      executionAttemptId: routeFence.executionAttemptId,
+      status: { in: ['queued', 'processing'] },
+    },
+    data: { status: 'processing', processingLeaseId },
   });
+  if (claimed.count !== 1) {
+    log.info(
+      { jobId: job.id, requestId, routeFence },
+      'Ignoring superseded sourcing execution',
+    );
+    return {
+      requestId,
+      status: 'failed',
+      candidateCount: 0,
+      durationMs: Date.now() - startTime,
+      error: 'Sourcing execution was superseded',
+    };
+  }
+  const executionFence = { ...routeFence, processingLeaseId };
 
   try {
     const jobRequest = await prisma.jobSourcingRequest.findUniqueOrThrow({
       where: { id: requestId },
     });
     const jobContext = jobRequest.jobContext as unknown as SourcingJobContextInput;
-    const orchestratorResult = await runSourcingOrchestrator(requestId, tenantId, jobContext, job.data.resolvedTrack);
+    const orchestratorResult = await runSourcingOrchestrator(
+      requestId,
+      tenantId,
+      jobContext,
+      job.data.resolvedTrack,
+      job.data.acquisitionGeneration,
+      job.data.executionAttemptId,
+      processingLeaseId,
+    );
     const candidateCount = orchestratorResult.candidateCount;
 
     // Transition processing → complete
     const durationMs = Date.now() - startTime;
-    await prisma.jobSourcingRequest.update({
-      where: { id: requestId },
+    const completed = await prisma.jobSourcingRequest.updateMany({
+      where: {
+        id: requestId,
+        tenantId,
+        acquisitionGeneration: executionFence.acquisitionGeneration,
+        executionAttemptId: executionFence.executionAttemptId,
+        processingLeaseId: executionFence.processingLeaseId,
+        status: 'processing',
+      },
       data: {
         status: 'complete',
         callbackStatus: 'pending',
@@ -89,6 +131,8 @@ async function processSourcingJob(
           countryGuardSerpLocaleSkippedCount: orchestratorResult.countryGuardSerpLocaleSkippedCount,
           twoLayerPool: orchestratorResult.twoLayerPool,
           relaxationLadder: orchestratorResult.relaxationLadder ?? null,
+          crustdataAcquisition:
+            orchestratorResult.crustdataAcquisition ?? null,
           selectedSnapshotTrack: orchestratorResult.selectedSnapshotTrack,
           locationCoverageTriggered: orchestratorResult.locationCoverageTriggered,
           noveltySuppressedCount: orchestratorResult.noveltySuppressedCount,
@@ -135,16 +179,38 @@ async function processSourcingJob(
         }),
       },
     });
+    if (completed.count !== 1) {
+      log.info(
+        { jobId: job.id, requestId, executionFence },
+        'Discarding completion from superseded sourcing execution',
+      );
+      return {
+        requestId,
+        status: 'failed',
+        candidateCount: 0,
+        durationMs,
+        error: 'Sourcing execution was superseded',
+      };
+    }
 
     // Deliver callback
     const payload: SourcingCallbackPayload = {
       version: 1,
       requestId,
       externalJobId,
+      acquisitionGeneration: executionFence.acquisitionGeneration,
+      executionAttemptId: executionFence.executionAttemptId,
       status: 'complete',
       candidateCount,
     };
-    await deliverCallback(requestId, tenantId, callbackUrl, payload);
+    await deliverCallback(
+      requestId,
+      tenantId,
+      callbackUrl,
+      payload,
+      true,
+      executionFence,
+    );
 
     const result: SourcingJobResult = {
       requestId,
@@ -159,8 +225,15 @@ async function processSourcingJob(
     const errorMsg = err instanceof Error ? err.message : 'Unknown error';
     const durationMs = Date.now() - startTime;
 
-    await prisma.jobSourcingRequest.update({
-      where: { id: requestId },
+    const failed = await prisma.jobSourcingRequest.updateMany({
+      where: {
+        id: requestId,
+        tenantId,
+        acquisitionGeneration: executionFence.acquisitionGeneration,
+        executionAttemptId: executionFence.executionAttemptId,
+        processingLeaseId: executionFence.processingLeaseId,
+        status: 'processing',
+      },
       data: {
         status: 'failed',
         qualityGateTriggered: false,
@@ -171,17 +244,39 @@ async function processSourcingJob(
           : Prisma.JsonNull,
       },
     });
+    if (failed.count !== 1) {
+      log.info(
+        { jobId: job.id, requestId, executionFence },
+        'Ignoring failure from superseded sourcing execution',
+      );
+      return {
+        requestId,
+        status: 'failed',
+        candidateCount: 0,
+        durationMs,
+        error: 'Sourcing execution was superseded',
+      };
+    }
 
     // Attempt failure callback
     const failPayload: SourcingCallbackPayload = {
       version: 1,
       requestId,
       externalJobId,
+      acquisitionGeneration: executionFence.acquisitionGeneration,
+      executionAttemptId: executionFence.executionAttemptId,
       status: 'failed',
       candidateCount: 0,
       error: errorMsg,
     };
-    await deliverCallback(requestId, tenantId, callbackUrl, failPayload, false).catch((cbErr) => {
+    await deliverCallback(
+      requestId,
+      tenantId,
+      callbackUrl,
+      failPayload,
+      false,
+      executionFence,
+    ).catch((cbErr) => {
       log.error({ requestId, error: cbErr }, 'Failed to deliver failure callback');
     });
 
