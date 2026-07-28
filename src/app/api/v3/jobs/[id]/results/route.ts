@@ -16,6 +16,10 @@ import {
   computeMatchStrengthBands,
 } from '@/lib/sourcing/match-strength';
 import { resolveLocationDeterministic } from '@/lib/taxonomy/location-service';
+import {
+  redactContactIdentities,
+  redactSearchMetaContactValues,
+} from '@/lib/sourcing/public-profile-redaction';
 
 function safeObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object'
@@ -338,7 +342,9 @@ export async function GET(
     else if (locationLabel === 'location_mismatch') locationStatus = 'mismatch';
 
     // Crustdata provides rich data directly — use as fallback before enrichment
-    const searchMetaObj = sc.candidate.searchMeta as Record<string, unknown> | null;
+    const searchMetaObj = redactSearchMetaContactValues(
+      sc.candidate.searchMeta,
+    );
     const crustdata = searchMetaObj?.crustdata as any | undefined;
 
     const crustdataEmail: string | null = null; // Person Search doesn't return emails
@@ -366,7 +372,7 @@ export async function GET(
 
     const location = techSnap?.location || nonTechSnap?.location || sc.candidate.locationHint;
 
-    const identities = (identityByCandidateId.get(sc.candidateId) ?? []).map(ident => ({
+    const rawIdentities = (identityByCandidateId.get(sc.candidateId) ?? []).map(ident => ({
       platform: ident.platform,
       platformId: ident.platformId,   // actual value: email address, phone number, github username etc.
       profileUrl: ident.profileUrl,
@@ -374,8 +380,9 @@ export async function GET(
       ...(includeScoreBreakdown && ident.scoreBreakdown ? { scoreBreakdown: ident.scoreBreakdown } : {})
     }));
 
-    const emailIdentity = identities.find(i => i.platform === 'email');
-    const phoneIdentity = identities.find(i => i.platform === 'phone');
+    const emailIdentity = rawIdentities.find(i => i.platform === 'email');
+    const phoneIdentity = rawIdentities.find(i => i.platform === 'phone');
+    const identities = redactContactIdentities(rawIdentities);
     let githubIdentity = identities.find(i => i.platform === 'github');
     let twitterIdentity = identities.find(i => i.platform === 'twitter');
 
@@ -421,7 +428,7 @@ export async function GET(
         confidenceScore: sc.candidate.confidenceScore,
         lastEnrichedAt: sc.candidate.lastEnrichedAt,
         profilePictureUrl: sc.candidate.profilePictureUrl,
-        searchMeta: sc.candidate.searchMeta,
+        searchMeta: searchMetaObj,
       },
       sourcingContext: {
         rank: sc.rank,
@@ -433,14 +440,14 @@ export async function GET(
         summaryShort,
         emailAvailable,
         phoneAvailable,
-        // Actual contact values — enrichment layer OR direct from Crustdata screener
-        email: emailIdentity?.platformId ?? crustdataEmail,
-        phone: phoneIdentity?.platformId ?? null,
+        // Actual contact values are released only after shortlist authorization.
+        email: null,
+        phone: null,
         github: githubIdentity?.profileUrl ?? (githubIdentity?.platformId ? `https://github.com/${githubIdentity.platformId}` : null),
         twitter: twitterIdentity?.profileUrl ?? (twitterIdentity?.platformId ? `https://twitter.com/${twitterIdentity.platformId}` : null),
         activeSeeker: false,
       },
-      crustdata, // EXPOSE THE RAW CRUSTDATA TO THE UI
+      crustdata,
       // --- DETAILED FIELDS FOR DETAIL VIEW ---
       snapshot,
       professionalValidation,

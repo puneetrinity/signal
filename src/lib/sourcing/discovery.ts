@@ -1011,8 +1011,7 @@ const SPAM_PATTERNS = [
 ];
 
 export function isLikelyPersonProfile(profile: ProfileSummary): boolean {
-  const url = profile.linkedinUrl.toLowerCase();
-  if (!url.includes('/in/')) return false;
+  if (!extractLinkedInIdFromUrl(profile.linkedinUrl)) return false;
 
   const title = (profile.title ?? '').toLowerCase();
   const snippet = (profile.snippet ?? '').toLowerCase();
@@ -1028,9 +1027,22 @@ export function isLikelyPersonProfile(profile: ProfileSummary): boolean {
 export function extractLinkedInIdFromUrl(url: string): string | null {
   try {
     const parsed = new URL(url);
-    const match = parsed.pathname.match(/\/in\/([^/]+)/);
-    if (match) return match[1].split(/[?#]/)[0].replace(/\/$/, '');
-    return null;
+    const host = parsed.hostname.toLowerCase();
+    if (
+      (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') ||
+      (host !== 'linkedin.com' && !host.endsWith('.linkedin.com'))
+    ) {
+      return null;
+    }
+    const segments = parsed.pathname.split('/').filter(Boolean);
+    if (
+      segments.length < 2 ||
+      !['in', 'pub'].includes(segments[0].toLowerCase())
+    ) {
+      return null;
+    }
+    const handle = decodeURIComponent(segments[1]).trim();
+    return handle && !/[/?#\s]/.test(handle) ? handle : null;
   } catch {
     return null;
   }

@@ -58,6 +58,50 @@ describe('two-layer pool selection', () => {
     expect(selection.ids).toEqual(new Set(['local-alice']));
   });
 
+  it('hydrates candidates resolved by canonical Memory link before the recent lane', () => {
+    const selection = selectTwoLayerCandidateIds({
+      slimPool: pool,
+      slimBySlug: buildLayer1SlugIndex(pool),
+      vectorResults: [
+        {
+          id: 'global-charlie',
+          linkedin_id: null,
+          linkedin_url: null,
+        },
+      ],
+      resolvedVectorIdByGlobalId: new Map([
+        ['global-charlie', 'local-charlie'],
+      ]),
+      recentK: 1,
+      fallbackHydrateCap: 10,
+    });
+
+    expect(selection.vectorLaneResolved).toBe(1);
+    expect(selection.recentLaneAdded).toBe(1);
+    expect([...selection.ids]).toEqual(['local-charlie', 'local-alice']);
+  });
+
+  it('lets the canonical global link win over a conflicting LinkedIn slug', () => {
+    const selection = selectTwoLayerCandidateIds({
+      slimPool: pool,
+      slimBySlug: buildLayer1SlugIndex(pool),
+      vectorResults: [
+        {
+          id: 'global-alice',
+          linkedin_id: 'bravo',
+          linkedin_url: null,
+        },
+      ],
+      resolvedVectorIdByGlobalId: new Map([
+        ['global-alice', 'local-alice'],
+      ]),
+      recentK: 0,
+      fallbackHydrateCap: 10,
+    });
+
+    expect([...selection.ids]).toEqual(['local-alice']);
+  });
+
   it('fails open to bounded recency hydration when Memory is unavailable', () => {
     const selection = selectTwoLayerCandidateIds({
       slimPool: pool,

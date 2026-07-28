@@ -1,200 +1,125 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { verifyServiceJWT } from '@/lib/auth/service-jwt';
-import { requireScope } from '@/lib/auth/service-scopes';
-import { prisma } from '@/lib/prisma';
+import { NextRequest, NextResponse } from "next/server";
+import { verifyServiceJWT } from "@/lib/auth/service-jwt";
+import { requireScope } from "@/lib/auth/service-scopes";
+import { contactOperationRouteResult } from "@/lib/contact-enrichment/route-contract";
+import { ActiveGraphContactMemoryClient } from "@/lib/contact-enrichment/memory-client";
+import {
+  applyContactMemoryRevalidation,
+  candidateAppearedInSourcingJob,
+  findOrCreateContactOperation,
+} from "@/lib/contact-enrichment/store";
 
-async function performFullEnrich(candidate: any, fullEnrichKey: string): Promise<string[]> {
-  const parts = (candidate.nameHint || '').trim().split(/\s+/);
-  const firstName = parts[0] || '';
-  const lastName = parts.slice(1).join(' ') || '';
-  
-  const payload = {
-    name: candidate.nameHint || 'Unknown Candidate',
-    data: [{
-      first_name: firstName,
-      last_name: lastName,
-      company_name: candidate.companyHint || '',
-      linkedin_url: candidate.linkedinUrl,
-      enrich_fields: ["contact.personal_emails"]
-    }]
-  };
+interface ShortlistContactTrigger {
+  trigger: "shortlist";
+  jobId: string;
+}
 
-  console.log('\n' + '='.repeat(60));
-  console.log('📡 [FULLENRICH] INITIATING BULK ENRICHMENT');
-  console.log(`🎯 [FULLENRICH] TARGET: ${candidate.linkedinUrl}`);
-  console.log('⏳ [FULLENRICH] SENDING POST REQUEST...');
-
-  const startRes = await fetch('https://app.fullenrich.com/api/v2/contact/enrich/bulk', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${fullEnrichKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(payload)
-  });
-
-  if (!startRes.ok) {
-    throw new Error(`FullEnrich POST failed: ${startRes.status} ${await startRes.text()}`);
+async function readShortlistTrigger(
+  request: NextRequest,
+): Promise<ShortlistContactTrigger | null> {
+  const value: unknown = await request.json().catch(() => null);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
   }
-
-  const startData = await startRes.json();
-  const enrichmentId = startData.enrichment_id;
-  if (!enrichmentId) {
-    console.error('❌ [FULLENRICH] FAILED: No enrichment_id returned');
-    throw new Error('FullEnrich did not return an enrichment_id');
+  const body = value as Record<string, unknown>;
+  if (
+    body.trigger !== "shortlist" ||
+    typeof body.jobId !== "string" ||
+    !body.jobId.trim()
+  ) {
+    return null;
   }
-
-  console.log(`✅ [FULLENRICH] STARTED! Enrichment ID: ${enrichmentId}`);
-  console.log('🔄 [FULLENRICH] POLLING FOR RESULTS...');
-
-  // Polling loop
-  const maxRetries = 20; // approx 40s
-  for (let i = 0; i < maxRetries; i++) {
-    await new Promise(r => setTimeout(r, 2000));
-
-    const pollRes = await fetch(`https://app.fullenrich.com/api/v2/contact/enrich/bulk/${enrichmentId}`, {
-      headers: { 'Authorization': `Bearer ${fullEnrichKey}` }
-    });
-
-    if (!pollRes.ok) {
-      throw new Error(`FullEnrich GET failed: ${pollRes.status} ${await pollRes.text()}`);
-    }
-
-    const pollData = await pollRes.json();
-    if (pollData.status === 'FINISHED') {
-      const contactInfo = pollData.data?.[0]?.contact_info;
-      if (!contactInfo) {
-        console.log('⚠️ [FULLENRICH] FINISHED BUT NO CONTACT INFO FOUND');
-        return [];
-      }
-
-      const emails: string[] = [];
-      if (contactInfo.work_emails) {
-        emails.push(...contactInfo.work_emails.map((e: any) => e.email));
-      }
-      if (contactInfo.personal_emails) {
-        emails.push(...contactInfo.personal_emails.map((e: any) => e.email));
-      }
-      
-      const uniqueEmails = [...new Set(emails)].filter(Boolean); // Deduplicate
-      console.log(`🎉 [FULLENRICH] SUCCESS! Found ${uniqueEmails.length} emails:`, uniqueEmails.join(', '));
-      console.log('='.repeat(60) + '\n');
-      return uniqueEmails;
-    }
-  }
-
-  console.error('⏰ [FULLENRICH] TIMEOUT: Polling took too long');
-  console.log('='.repeat(60) + '\n');
-
-  throw new Error('FullEnrich polling timed out');
+  return { trigger: "shortlist", jobId: body.jobId.trim() };
 }
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> },
 ) {
   const auth = await verifyServiceJWT(request);
   if (!auth.authorized) return auth.response;
 
-  // Signal v3 uses jobs:source for enrichment actions
-  const scopeCheck = requireScope(auth.context, 'jobs:source');
+  const scopeCheck = requireScope(auth.context, "contact:write");
   if (!scopeCheck.authorized) return scopeCheck.response;
 
   const { id: candidateId } = await params;
-  const tenantId = auth.context.tenantId;
-
   try {
-    const candidate = await prisma.candidate.findUnique({
-      where: { id: candidateId },
-    });
-
-    if (!candidate || candidate.tenantId !== tenantId) {
-      return NextResponse.json({ error: 'Candidate not found' }, { status: 404 });
-    }
-
-    if (!candidate.linkedinUrl) {
-      return NextResponse.json({ error: 'Candidate has no LinkedIn URL' }, { status: 400 });
-    }
-
-    let emails: string[] = [];
-    let fullEnrichError = '';
-
-    const fullEnrichKey = process.env.FULLENRICH_API_KEY;
-    if (fullEnrichKey) {
-      try {
-        emails = await performFullEnrich(candidate, fullEnrichKey);
-      } catch (err: any) {
-        console.error('FullEnrich failed, falling back to Enrichlayer:', err.message);
-        fullEnrichError = err.message;
-      }
-    }
-
-    if (emails.length === 0) {
-      const enrichlayerKey = process.env.ENRICHLAYER_API_KEY;
-      if (!enrichlayerKey) {
-        return NextResponse.json({ error: fullEnrichError ? `FullEnrich failed (${fullEnrichError}) and no Enrichlayer fallback key is configured` : 'No API keys configured for enrichment' }, { status: 500 });
-      }
-
-      const apiUrl = new URL('https://enrichlayer.com/api/v2/contact-api/personal-email');
-      apiUrl.searchParams.append('profile_url', candidate.linkedinUrl);
-      apiUrl.searchParams.append('email_validation', 'fast');
-      apiUrl.searchParams.append('page_size', '0');
-
-      console.log('\n' + '='.repeat(60));
-      console.log('📡 [ENRICHLAYER] INITIATING FALLBACK ENRICHMENT');
-      console.log(`🎯 [ENRICHLAYER] TARGET: ${candidate.linkedinUrl}`);
-      console.log('⏳ [ENRICHLAYER] SENDING GET REQUEST...');
-
-      const res = await fetch(apiUrl.toString(), {
-        headers: {
-          'Authorization': `Bearer ${enrichlayerKey}`,
+    const trigger = await readShortlistTrigger(request);
+    if (!trigger) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "A shortlist trigger and non-empty jobId are required",
         },
-      });
-
-      if (!res.ok) {
-        const text = await res.text();
-        let errorMsg = 'Failed to enrich contact from external service';
-        try {
-          const parsed = JSON.parse(text);
-          if (parsed.description) {
-            errorMsg = `Enrichlayer: ${parsed.description}`;
-          }
-        } catch (e) {
-          // Not JSON
-        }
-        console.error(`❌ [ENRICHLAYER] ERROR ${res.status}:`, text);
-        console.log('='.repeat(60) + '\n');
-        return NextResponse.json({ error: errorMsg, details: text, status: res.status }, { status: 502 });
-      }
-
-      const data = await res.json();
-      emails = data.emails || [];
-      console.log(`🎉 [ENRICHLAYER] SUCCESS! Found ${emails.length} emails:`, emails.join(', '));
-      console.log('='.repeat(60) + '\n');
+        { status: 400 },
+      );
     }
-
-    if (emails.length > 0) {
-      // Update candidate searchMeta
-      let searchMeta = candidate.searchMeta as any;
-      if (!searchMeta || typeof searchMeta !== 'object') searchMeta = {};
-      if (!searchMeta.crustdata || typeof searchMeta.crustdata !== 'object') searchMeta.crustdata = {};
-      if (!searchMeta.crustdata.contact || typeof searchMeta.crustdata.contact !== 'object') searchMeta.crustdata.contact = {};
-      
-      searchMeta.crustdata.contact.has_personal_email = true;
-      searchMeta.crustdata.emails = emails;
-
-      await prisma.candidate.update({
-        where: { id: candidateId },
-        data: { searchMeta },
-      });
-    }
-
-    return NextResponse.json({
-      success: true,
-      emails,
+    const appeared = await candidateAppearedInSourcingJob({
+      tenantId: auth.context.tenantId,
+      candidateId,
+      externalJobId: trigger.jobId,
     });
-  } catch (err: any) {
-    console.error('Error in find-contact:', err);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    if (!appeared) {
+      return NextResponse.json(
+        { success: false, error: "Candidate not found for job" },
+        { status: 404 },
+      );
+    }
+    let operation = await findOrCreateContactOperation({
+      tenantId: auth.context.tenantId,
+      candidateId,
+    });
+    if (!operation) {
+      return NextResponse.json(
+        { success: false, error: "Candidate not found" },
+        { status: 404 },
+      );
+    }
+    if (operation.state === "found") {
+      if (!operation.globalCandidateId) {
+        return NextResponse.json(
+          {
+            success: false,
+            state: "failed",
+            emails: [],
+            code: "contact_result_identity_missing",
+          },
+          { status: 409 },
+        );
+      }
+      try {
+        const memory = new ActiveGraphContactMemoryClient();
+        const memoryResult = await memory.lookup({
+          tenantId: auth.context.tenantId,
+          globalCandidateId: operation.globalCandidateId,
+        });
+        operation = await applyContactMemoryRevalidation({
+          operation,
+          result: memoryResult,
+        });
+      } catch {
+        // Never return a cached address when the suppression source of truth
+        // cannot be checked. Flow can safely poll this recoverable state.
+        return NextResponse.json(
+          {
+            success: true,
+            state: "pending",
+            emails: [],
+            code: "memory_revalidation_pending",
+          },
+          { status: 202 },
+        );
+      }
+    }
+    const result = contactOperationRouteResult(operation);
+    return NextResponse.json(result.body, { status: result.status });
+  } catch (error) {
+    console.error("[ContactEnrichmentRoute] Request failed", {
+      errorType: error instanceof Error ? error.name : "unknown",
+    });
+    return NextResponse.json(
+      { success: false, error: "Internal server error" },
+      { status: 500 },
+    );
   }
 }

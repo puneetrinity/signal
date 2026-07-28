@@ -43,6 +43,39 @@ import {
   computeSerpEvidence,
   extractSerpSignals,
 } from '@/lib/search/serp-signals';
+import {
+  buildPublicMarketsForQuery,
+  canApplyPlatformPublicExclusions,
+  mergePublicExclusionIds,
+  type PublicMarket,
+} from './public-memory';
+import {
+  assertPersistableCandidateIds,
+  buildObservedCandidatePublicMarket,
+  ensureCandidateGlobalLink,
+  makeGlobalTemporaryCandidateId,
+  resolvePublicCandidateRoleFamily,
+} from './public-memory-materialization';
+import type {
+  GlobalPoolSearchResult,
+  PublicMarketExclusionResponse,
+  TenantPrivateSearchResult,
+} from './activegraph-client';
+import {
+  attachLocalCandidatesToPublicMemoryOutbox,
+  enqueuePublicMemoryIngestOutbox,
+} from './public-memory-ingest-outbox';
+import {
+  buildTenantPrivateRankingCandidate,
+  makeTenantPrivateTemporaryId,
+  mergeTenantPrivateEvidence,
+} from './tenant-private-memory';
+import {
+  addExpectedGlobalIdentityReceipt,
+  buildExpectedGlobalIdentityReceipts,
+  candidatePublicIdentityKey,
+  expectedGlobalCandidateIdForCandidate,
+} from './public-memory-identity';
 
 import {
   logSourcingRaw,
@@ -52,6 +85,13 @@ import {
 
 const log = createLogger('SourcingOrchestrator');
 const CRUSTDATA_REQUEST_LIMIT = 300;
+
+class PublicMemoryOutboxError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PublicMemoryOutboxError';
+  }
+}
 
 export interface OrchestratorResult {
   candidateCount: number;
@@ -156,6 +196,7 @@ export interface OrchestratorResult {
   roleResolutionMetrics: RoleResolutionMetrics | null;
   locationResolutionMetrics: LocationResolutionMetrics | null;
   sourceMetrics?: SourceMetrics;
+  publicMemory: PublicMemoryTelemetry;
   relaxationLadder?: {
     scope: 'tenant';
     scopeKey: string;
@@ -205,6 +246,54 @@ interface SourceMetrics {
   top20: Record<CandidateSourceType, SourceMetricEntry>;
   top100: Record<CandidateSourceType, SourceMetricEntry>;
   served: Record<CandidateSourceType, SourceMetricEntry>;
+}
+
+type PublicExclusionSource =
+  | 'off'
+  | 'memory_public'
+  | 'memory_public_plus_local'
+  | 'tenant_public'
+  | 'local_public_fallback'
+  | 'unresolved_market';
+
+interface PublicMemoryExclusionTelemetry {
+  marketKeys: string[];
+  source: PublicExclusionSource;
+  count: number;
+  totalMatched: number | null;
+  classifiedMatched: number | null;
+  unclassifiedMatched: number | null;
+  unclassifiedReturned: number | null;
+  truncated: boolean | null;
+}
+
+interface PublicMemoryTelemetry {
+  hydrationEnabled: boolean;
+  platformExclusionConfigured: boolean;
+  platformExclusionActive: boolean;
+  searchSurface: 'off' | 'legacy_v0' | 'public_v1';
+  searchAvailable: boolean | null;
+  vectorReturned: number;
+  resolvedByGlobalLink: number;
+  resolvedByLinkedin: number;
+  temporaryCandidates: number;
+  identityReceiptConflicts: number;
+  privateSearchAvailable: boolean | null;
+  privateRetrieved: number;
+  privateMaterialized: number;
+  privateSkippedNoLinkedin: number;
+  materializedCandidates: number;
+  materializationRaceWins: number;
+  exactExclusion: PublicMemoryExclusionTelemetry;
+  spillExclusion: PublicMemoryExclusionTelemetry | null;
+  ingestQueued: number;
+  ingestPending: number;
+  ingestConfirmed: number;
+  ingestFailed: number;
+  asyncLinksConfirmed: number;
+  asyncLinksFailed: number;
+  linksRetained: number;
+  linkFailures: number;
 }
 
 const CANDIDATE_SOURCE_TYPES: CandidateSourceType[] = ['pool', 'pool_enriched', 'discovered'];
@@ -307,6 +396,48 @@ export async function runSourcingOrchestrator(
 ): Promise<OrchestratorResult> {
   const config = getSourcingConfig();
   const requirements = buildJobRequirements(jobContext);
+  const publicMemory: PublicMemoryTelemetry = {
+    hydrationEnabled: config.publicMemoryHydrationEnabled,
+    platformExclusionConfigured: config.platformExclusionEnabled,
+    // Becomes active only after public hydration answers successfully.
+    // Excluding platform-known people while that retrieval path is unavailable
+    // would hide candidates from both the buy and the served pool.
+    platformExclusionActive: false,
+    searchSurface: config.publicMemoryHydrationEnabled
+      ? 'public_v1'
+      : 'off',
+    searchAvailable: null,
+    vectorReturned: 0,
+    resolvedByGlobalLink: 0,
+    resolvedByLinkedin: 0,
+    temporaryCandidates: 0,
+    identityReceiptConflicts: 0,
+    privateSearchAvailable: null,
+    privateRetrieved: 0,
+    privateMaterialized: 0,
+    privateSkippedNoLinkedin: 0,
+    materializedCandidates: 0,
+    materializationRaceWins: 0,
+    exactExclusion: {
+      marketKeys: [],
+      source: 'off',
+      count: 0,
+      totalMatched: null,
+      classifiedMatched: null,
+      unclassifiedMatched: null,
+      unclassifiedReturned: null,
+      truncated: null,
+    },
+    spillExclusion: null,
+    ingestQueued: 0,
+    ingestPending: 0,
+    ingestConfirmed: 0,
+    ingestFailed: 0,
+    asyncLinksConfirmed: 0,
+    asyncLinksFailed: 0,
+    linksRetained: 0,
+    linkFailures: 0,
+  };
 
   const sendProgressCallback = async (event: string, eventData: any = {}) => {
     try {
@@ -357,13 +488,27 @@ export async function runSourcingOrchestrator(
 
   // Hoisted from section 2.5: the two-layer read below needs the vector search
   // before hydration; 2.5 reuses the prefetched result (one Memory call/run).
-  const { generateTagsFromJD, searchHomePool, searchGlobalPool, HOME_POOL_LIMIT, HOME_POOL_ENABLED } = await import(
-    './activegraph-client'
-  );
+  const {
+    generateTagsFromJD,
+    searchHomePool,
+    searchGlobalPool,
+    searchPublicGlobalPool,
+    searchTenantPrivateCandidates,
+    resolvePublicIdentities,
+    getPublicMarketExclusions,
+    HOME_POOL_LIMIT,
+    HOME_POOL_ENABLED,
+  } = await import('./activegraph-client');
+  const publicHydrationEnabled = config.publicMemoryHydrationEnabled;
+  const homePoolReadEnabled = publicHydrationEnabled || HOME_POOL_ENABLED;
+  if (!publicHydrationEnabled && HOME_POOL_ENABLED) {
+    publicMemory.searchSurface = 'legacy_v0';
+  }
 
   const poolSelect = {
     id: true,
     linkedinId: true,
+    linkedinUrl: true,
     headlineHint: true,
     seniorityHint: true,
     locationHint: true,
@@ -401,6 +546,7 @@ export async function runSourcingOrchestrator(
   let fallbackHydrateUsed = false;
   let freshSurvivorRefreshes = 0;
   let prefetchedVectorResults: Awaited<ReturnType<typeof searchGlobalPool>> = null;
+  const prefetchedLocalIdByGlobalId = new Map<string, string>();
 
   const fetchPoolByIds = (ids: string[]) =>
     prisma.candidate.findMany({ where: { tenantId, id: { in: ids } }, select: poolSelect });
@@ -431,11 +577,53 @@ export async function runSourcingOrchestrator(
       }
     }
 
-    if (HOME_POOL_ENABLED) {
+    if (homePoolReadEnabled) {
       try {
-        prefetchedVectorResults = await searchGlobalPool(requirements, tenantId, HOME_POOL_LIMIT, requestId);
+        if (publicHydrationEnabled) {
+          const response = await searchPublicGlobalPool(
+            requirements,
+            tenantId,
+            HOME_POOL_LIMIT,
+            requestId,
+          );
+          publicMemory.searchAvailable = response !== null;
+          publicMemory.vectorReturned = response?.results.length ?? 0;
+          prefetchedVectorResults = response?.results ?? null;
+        } else {
+          prefetchedVectorResults = await searchGlobalPool(
+            requirements,
+            tenantId,
+            HOME_POOL_LIMIT,
+            requestId,
+          );
+          publicMemory.searchAvailable = prefetchedVectorResults !== null;
+          publicMemory.vectorReturned = prefetchedVectorResults?.length ?? 0;
+        }
       } catch (err) {
         log.error({ err, requestId }, 'Global pool vector search threw');
+        publicMemory.searchAvailable = false;
+      }
+    }
+
+    if (publicHydrationEnabled && prefetchedVectorResults?.length) {
+      const globalCandidateIds = Array.from(
+        new Set(prefetchedVectorResults.map((result) => result.id)),
+      );
+      const links = await prisma.candidateGlobalLink.findMany({
+        where: {
+          tenantId,
+          globalCandidateId: { in: globalCandidateIds },
+        },
+        select: {
+          globalCandidateId: true,
+          candidateId: true,
+        },
+      });
+      for (const link of links) {
+        prefetchedLocalIdByGlobalId.set(
+          link.globalCandidateId,
+          link.candidateId,
+        );
       }
     }
 
@@ -443,6 +631,7 @@ export async function runSourcingOrchestrator(
       slimPool,
       slimBySlug: buildLayer1SlugIndex(slimPool),
       vectorResults: prefetchedVectorResults,
+      resolvedVectorIdByGlobalId: prefetchedLocalIdByGlobalId,
       recentK: config.poolRecentK,
       fallbackHydrateCap: config.poolFallbackHydrateCap,
     });
@@ -533,48 +722,129 @@ export async function runSourcingOrchestrator(
   // 2. Rank pool candidates
   const poolForRanking: CandidateForRanking[] = poolRows.map((r) => toRankingCandidate(r));
   const poolForRankingById = new Map(poolForRanking.map((r) => [r.id, r]));
+  const publicTemporaryCandidateById = new Map<
+    string,
+    GlobalPoolSearchResult
+  >();
+  const tenantPrivateCandidateByTemporaryId = new Map<
+    string,
+    {
+      result: TenantPrivateSearchResult;
+      linkedinUrl: string;
+      linkedinId: string;
+    }
+  >();
+  const tenantPrivateGlobalIdByRankingId = new Map<string, string>();
+  const publicGlobalIdByIdentity = new Map<string, string>();
+  const conflictedPublicIdentityKeys = new Set<string>();
 
   // 2.5 ActiveGraph Home Pool Search — vector search over the platform pool
-  // (#29 slice 5) with tag search as fallback for older Memory deploys.
+  // (#29 slice 5). Legacy mode retains tag fallback. Public-v1 never falls
+  // back to the tenant tag endpoint because that would silently change the
+  // requested evidence surface.
   let addedFromHome = 0;
-  let homeSearchMode: 'vector' | 'tags' | 'off' = 'off';
-  if (HOME_POOL_ENABLED) {
-    // Primary: vector search. Returns hydrated crustdata blobs + verified
-    // skills_normalized (resume/extraction-derived), which flow into the
-    // ranker's snapshot path — the #31 skill socket.
+  let homeSearchMode:
+    | 'public_vector'
+    | 'public_unavailable'
+    | 'vector'
+    | 'tags'
+    | 'off' = 'off';
+  if (homePoolReadEnabled) {
     let vectorResults: Awaited<ReturnType<typeof searchGlobalPool>> = null;
     if (config.twoLayerPoolEnabled) {
-      // Two-layer mode already ran the vector search to select Layer 2 —
-      // reuse it here so the merge below still attaches Memory's verified
-      // snapshot/blob onto the hydrated entries.
       vectorResults = prefetchedVectorResults;
     } else {
       try {
-        vectorResults = await searchGlobalPool(requirements, tenantId, HOME_POOL_LIMIT, requestId);
+        if (publicHydrationEnabled) {
+          const response = await searchPublicGlobalPool(
+            requirements,
+            tenantId,
+            HOME_POOL_LIMIT,
+            requestId,
+          );
+          publicMemory.searchAvailable = response !== null;
+          publicMemory.vectorReturned = response?.results.length ?? 0;
+          vectorResults = response?.results ?? null;
+        } else {
+          vectorResults = await searchGlobalPool(
+            requirements,
+            tenantId,
+            HOME_POOL_LIMIT,
+            requestId,
+          );
+          publicMemory.searchAvailable = vectorResults !== null;
+          publicMemory.vectorReturned = vectorResults?.length ?? 0;
+        }
       } catch (err) {
         log.error({ err, requestId }, 'Global pool vector search threw');
+        publicMemory.searchAvailable = false;
       }
     }
 
     if (vectorResults !== null) {
-      homeSearchMode = 'vector';
+      homeSearchMode = publicHydrationEnabled ? 'public_vector' : 'vector';
       let skippedNoProfile = 0;
       let skippedNoLocalId = 0;
-      // Resolve pool results to Signal-LOCAL candidate cuids. Memory's stored
-      // signal_candidate_id is whatever id Signal sent at ingest time (a
-      // LinkedIn-URL id for Crustdata candidates), NOT a Signal DB cuid —
-      // persisting with a non-cuid id collides on unique(linkedinUrl) and then
-      // fails the jobSourcingCandidate FK (job 140 failure). Every same-tenant
-      // pool candidate exists locally, so look them up by url/slug.
+      if (publicHydrationEnabled) {
+        const receipts = buildExpectedGlobalIdentityReceipts(vectorResults);
+        for (const [key, globalCandidateId] of receipts.expectedByIdentity) {
+          publicGlobalIdByIdentity.set(key, globalCandidateId);
+        }
+        for (const key of receipts.conflictedIdentityKeys) {
+          conflictedPublicIdentityKeys.add(key);
+        }
+        publicMemory.identityReceiptConflicts =
+          conflictedPublicIdentityKeys.size;
+      }
+      const globalCandidateIds = Array.from(
+        new Set(vectorResults.map((result) => result.id)),
+      );
+      const localIdByGlobalId = new Map(prefetchedLocalIdByGlobalId);
+      if (publicHydrationEnabled && !config.twoLayerPoolEnabled) {
+        const links = await prisma.candidateGlobalLink.findMany({
+          where: {
+            tenantId,
+            globalCandidateId: { in: globalCandidateIds },
+          },
+          select: {
+            globalCandidateId: true,
+            candidateId: true,
+          },
+        });
+        for (const link of links) {
+          localIdByGlobalId.set(link.globalCandidateId, link.candidateId);
+        }
+      }
+
       const urls = vectorResults.map((g) => g.linkedin_url).filter((u): u is string => !!u);
       const slugs = vectorResults.map((g) => g.linkedin_id).filter((s): s is string => !!s);
-      const localRows = urls.length || slugs.length
+      const linkedLocalIds = Array.from(new Set(localIdByGlobalId.values()));
+      const localRows = urls.length || slugs.length || linkedLocalIds.length
         ? await prisma.candidate.findMany({
             where: {
               tenantId,
               OR: [
-                ...(urls.length ? [{ linkedinUrl: { in: urls } }] : []),
-                ...(slugs.length ? [{ linkedinId: { in: slugs } }] : []),
+                ...(linkedLocalIds.length ? [{ id: { in: linkedLocalIds } }] : []),
+                ...(urls.length
+                  ? [
+                      {
+                        linkedinUrl: {
+                          in: urls,
+                          mode: Prisma.QueryMode.insensitive,
+                        },
+                      },
+                    ]
+                  : []),
+                ...(slugs.length
+                  ? [
+                      {
+                        linkedinId: {
+                          in: slugs,
+                          mode: Prisma.QueryMode.insensitive,
+                        },
+                      },
+                    ]
+                  : []),
               ],
             },
             select: { id: true, linkedinId: true, linkedinUrl: true },
@@ -588,12 +858,64 @@ export async function runSourcingOrchestrator(
           if (slug) localBySlug.set(slug.toLowerCase(), c.id);
         }
       }
+      const linkedinResolvedLinks: Array<{
+        candidateId: string;
+        globalCandidateId: string;
+      }> = [];
       for (const gc of vectorResults) {
         const slug = (gc.linkedin_id || (gc.linkedin_url ? extractLinkedInIdFromUrl(gc.linkedin_url) : null) || '').toLowerCase();
-        const localId = slug ? localBySlug.get(slug) ?? null : null;
+        const linkedLocalId = publicHydrationEnabled
+          ? localIdByGlobalId.get(gc.id) ?? null
+          : null;
+        const localId = linkedLocalId ?? (slug ? localBySlug.get(slug) ?? null : null);
+        if (linkedLocalId) {
+          publicMemory.resolvedByGlobalLink++;
+        } else if (localId) {
+          publicMemory.resolvedByLinkedin++;
+          if (publicHydrationEnabled) {
+            linkedinResolvedLinks.push({
+              candidateId: localId,
+              globalCandidateId: gc.id,
+            });
+          }
+        }
         if (!localId) {
-          // Not in this tenant's Signal DB (cross-tenant public row) — cannot
-          // persist without a local candidate row; deferred to #12.
+          if (
+            publicHydrationEnabled &&
+            gc.evidence_surface === 'public' &&
+            gc.crustdata_profile
+          ) {
+            const temporaryId = makeGlobalTemporaryCandidateId(gc.id);
+            const mappedCandidate: CandidateForRanking = {
+              id: temporaryId,
+              headlineHint:
+                gc.headline ??
+                gc.crustdata_profile.basic_profile?.headline ??
+                null,
+              seniorityHint: gc.seniority_band,
+              locationHint:
+                gc.location_city ??
+                gc.crustdata_profile.basic_profile?.location?.full_location ??
+                null,
+              searchTitle:
+                gc.crustdata_profile.basic_profile?.current_title ?? null,
+              searchSnippet: null,
+              enrichmentStatus: 'completed',
+              lastEnrichedAt: null,
+              crustdata: gc.crustdata_profile,
+              semanticSimilarity: gc.similarity,
+              // Public profile skills are not verified candidate evidence.
+              // The ranker uses its neutral text fallback until this tenant
+              // has its own verified snapshot.
+              snapshot: null,
+            };
+            poolForRanking.push(mappedCandidate);
+            poolForRankingById.set(temporaryId, mappedCandidate);
+            publicTemporaryCandidateById.set(temporaryId, gc);
+            publicMemory.temporaryCandidates++;
+            addedFromHome++;
+            continue;
+          }
           skippedNoLocalId++;
           continue;
         }
@@ -605,11 +927,16 @@ export async function runSourcingOrchestrator(
               gc.similarity,
             );
           }
-          // Candidate is already in the ranking pool from Signal's own DB —
-          // MERGE Memory's verified signals instead of skipping, or the
-          // resume-derived skills never reach the ranker (job 142: test
-          // candidates ranked on the neutral prior despite verified skills).
-          if (!alreadyPooled.snapshot && (gc.skills_normalized?.length || gc.role_family || gc.seniority_band)) {
+          // Legacy rows can carry tenant-private verified skills. Public-v1
+          // rows never create a snapshot from public profile evidence.
+          const carriesTenantPrivateEvidence = !publicHydrationEnabled;
+          if (
+            carriesTenantPrivateEvidence &&
+            !alreadyPooled.snapshot &&
+            (gc.skills_normalized?.length ||
+              gc.role_family ||
+              gc.seniority_band)
+          ) {
             const now = new Date();
             alreadyPooled.snapshot = {
               skillsNormalized: gc.skills_normalized ?? [],
@@ -642,24 +969,48 @@ export async function runSourcingOrchestrator(
           lastEnrichedAt: now,
           crustdata: gc.crustdata_profile,
           semanticSimilarity: gc.similarity,
-          snapshot: {
-            skillsNormalized: gc.skills_normalized ?? [],
-            roleType: gc.role_family,
-            seniorityBand: gc.seniority_band,
-            location: gc.location_city,
-            computedAt: now,
-            staleAfter: new Date(now.getTime() + 24 * 60 * 60 * 1000),
-          },
+          snapshot: publicHydrationEnabled
+            ? null
+            : {
+                skillsNormalized: gc.skills_normalized ?? [],
+                roleType: gc.role_family,
+                seniorityBand: gc.seniority_band,
+                location: gc.location_city,
+                computedAt: now,
+                staleAfter: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+              },
         };
         poolForRanking.push(mappedCandidate);
         poolForRankingById.set(mappedCandidate.id, mappedCandidate);
         addedFromHome++;
       }
+      for (let index = 0; index < linkedinResolvedLinks.length; index += 20) {
+        const outcomes = await Promise.allSettled(
+          linkedinResolvedLinks
+            .slice(index, index + 20)
+            .map((entry) =>
+              ensureCandidateGlobalLink({
+                tenantId,
+                candidateId: entry.candidateId,
+                globalCandidateId: entry.globalCandidateId,
+                matchMethod: 'linkedin_id_exact',
+                linkConfidence: 1,
+              }),
+            ),
+        );
+        for (const outcome of outcomes) {
+          if (outcome.status === 'fulfilled') {
+            publicMemory.linksRetained++;
+          } else {
+            publicMemory.linkFailures++;
+          }
+        }
+      }
       log.info(
         { requestId, found: vectorResults.length, added: addedFromHome, skippedNoProfile, skippedNoLocalId },
         'Global pool vector search merged'
       );
-    } else {
+    } else if (!publicHydrationEnabled) {
       // Fallback: legacy tag search.
       homeSearchMode = 'tags';
       const homeTags = generateTagsFromJD(requirements);
@@ -693,11 +1044,335 @@ export async function runSourcingOrchestrator(
           addedFromHome++;
         }
       }
+    } else {
+      homeSearchMode = 'public_unavailable';
+      log.warn(
+        { requestId },
+        'Public Memory vector search unavailable; continuing with the separate tenant-private tag lane',
+      );
+    }
+
+    if (publicHydrationEnabled) {
+      let privateResponse: Awaited<
+        ReturnType<typeof searchTenantPrivateCandidates>
+      > = null;
+      try {
+        privateResponse = await searchTenantPrivateCandidates(
+          requirements,
+          tenantId,
+          HOME_POOL_LIMIT,
+          requestId,
+        );
+      } catch (error) {
+        log.error(
+          { requestId, err: String(error) },
+          'Tenant-private Memory search threw',
+        );
+      }
+      publicMemory.privateSearchAvailable = privateResponse !== null;
+      publicMemory.privateRetrieved = privateResponse?.results.length ?? 0;
+
+      if (privateResponse?.results.length) {
+        const prepared = privateResponse.results.flatMap((result) => {
+          const candidate = buildTenantPrivateRankingCandidate(result);
+          if (!candidate) {
+            publicMemory.privateSkippedNoLinkedin++;
+            return [];
+          }
+          return [{ result, ...candidate }];
+        });
+        const linkedinUrls = prepared.map(
+          (candidate) => candidate.anchor.linkedinUrl,
+        );
+        const linkedinIds = prepared.map(
+          (candidate) => candidate.anchor.linkedinId,
+        );
+        const privateRows =
+          linkedinUrls.length || linkedinIds.length
+            ? await prisma.candidate.findMany({
+                where: {
+                  tenantId,
+                  OR: [
+                    ...(linkedinUrls.length
+                      ? [
+                          {
+                            linkedinUrl: {
+                              in: linkedinUrls,
+                              mode: Prisma.QueryMode.insensitive,
+                            },
+                          },
+                        ]
+                      : []),
+                    ...(linkedinIds.length
+                      ? [
+                          {
+                            linkedinId: {
+                              in: linkedinIds,
+                              mode: Prisma.QueryMode.insensitive,
+                            },
+                          },
+                        ]
+                      : []),
+                  ],
+                },
+                select: poolSelect,
+              })
+            : [];
+        const privateRowBySlug = new Map<string, (typeof privateRows)[number]>();
+        for (const row of privateRows) {
+          privateRowBySlug.set(row.linkedinId.toLowerCase(), row);
+          if (row.linkedinUrl) {
+            const slug = extractLinkedInIdFromUrl(row.linkedinUrl);
+            if (slug) privateRowBySlug.set(slug.toLowerCase(), row);
+          }
+        }
+
+        for (const candidate of prepared) {
+          const slugKey = candidate.anchor.linkedinId.toLowerCase();
+          const localRow = privateRowBySlug.get(slugKey);
+          const rankingId =
+            localRow?.id ??
+            makeTenantPrivateTemporaryId(candidate.result.candidateId);
+          const existing = poolForRankingById.get(rankingId);
+          if (existing) {
+            mergeTenantPrivateEvidence(existing, candidate.result);
+          } else if (localRow) {
+            const mapped = mergeTenantPrivateEvidence(
+              toRankingCandidate(localRow),
+              candidate.result,
+            );
+            poolForRanking.push(mapped);
+            poolForRankingById.set(mapped.id, mapped);
+            addedFromHome++;
+          } else {
+            poolForRanking.push(candidate.rankingCandidate);
+            poolForRankingById.set(
+              candidate.rankingCandidate.id,
+              candidate.rankingCandidate,
+            );
+            tenantPrivateCandidateByTemporaryId.set(
+              candidate.rankingCandidate.id,
+              {
+                result: candidate.result,
+                linkedinUrl: candidate.anchor.linkedinUrl,
+                linkedinId: candidate.anchor.linkedinId,
+              },
+            );
+            addedFromHome++;
+          }
+          if (candidate.result.globalCandidateId) {
+            tenantPrivateGlobalIdByRankingId.set(
+              rankingId,
+              candidate.result.globalCandidateId,
+            );
+          }
+        }
+      }
     }
   } else {
-    log.info({ requestId }, 'ActiveGraph home pool disabled (SOURCE_HOME_POOL_ENABLED=false)');
+    log.info(
+      { requestId },
+      'ActiveGraph home pool disabled (legacy and public hydration flags are false)',
+    );
   }
+  publicMemory.platformExclusionActive =
+    canApplyPlatformPublicExclusions({
+      excludeKnownEnabled: config.excludeKnownEnabled,
+      publicMemoryHydrationEnabled:
+        config.publicMemoryHydrationEnabled,
+      platformExclusionEnabled: config.platformExclusionEnabled,
+      publicSearchAvailable: publicMemory.searchAvailable,
+    });
   log.info({ requestId, addedFromHome, homeSearchMode, totalPool: poolForRanking.length }, 'Merged ActiveGraph candidates into ranking pool');
+
+  const materializedPublicLocalIds = new Set<string>();
+  const materializedPrivateLocalIds = new Set<string>();
+  const materializeServedPublicCandidates = async (
+    candidateIds: string[],
+  ): Promise<Map<string, string>> => {
+    const temporaryIds = Array.from(
+      new Set(
+        candidateIds.filter((candidateId) =>
+          publicTemporaryCandidateById.has(candidateId),
+        ),
+      ),
+    );
+    if (temporaryIds.length === 0) return new Map();
+
+    const profiles = temporaryIds.map((temporaryId) => {
+      const result = publicTemporaryCandidateById.get(temporaryId);
+      const rankedCandidate = poolForRankingById.get(temporaryId);
+      const publicProfile =
+        rankedCandidate?.crustdata ?? result?.crustdata_profile ?? null;
+      if (!result || !publicProfile) {
+        throw new Error(
+          `Public Memory candidate ${temporaryId} has no public profile`,
+        );
+      }
+      const linkedinUrl =
+        result.linkedin_url ??
+        publicProfile.social_handles
+          ?.professional_network_identifier?.profile_url ??
+        null;
+      const linkedinId =
+        result.linkedin_id ??
+        (linkedinUrl ? extractLinkedInIdFromUrl(linkedinUrl) : null);
+      if (!linkedinUrl || !linkedinId) {
+        throw new Error(
+          `Public Memory candidate ${temporaryId} has no LinkedIn anchor`,
+        );
+      }
+      return {
+        temporaryId,
+        globalCandidateId: result.id,
+        profile: {
+          title:
+            publicProfile.basic_profile?.current_title ??
+            rankedCandidate?.searchTitle ??
+            result.headline ??
+            '',
+          snippet:
+            rankedCandidate?.searchSnippet ?? result.headline ?? '',
+          linkedinUrl,
+          linkedinId,
+          canonicalLinkedinId: linkedinId,
+          name:
+            result.name ??
+            publicProfile.basic_profile?.name ??
+            undefined,
+          headline:
+            rankedCandidate?.headlineHint ??
+            result.headline ??
+            publicProfile.basic_profile?.headline ??
+            undefined,
+          location:
+            rankedCandidate?.locationHint ??
+            publicProfile.basic_profile?.location?.full_location ??
+            result.location_city ??
+            undefined,
+          crustdata: publicProfile,
+          providerMeta: {
+            publicMemory: {
+              surface: 'public_v1',
+              globalCandidateId: result.id,
+            },
+          },
+        },
+      };
+    });
+
+    const { upsertDiscoveredCandidates } = await import(
+      './upsert-candidates'
+    );
+    const candidateMap = await upsertDiscoveredCandidates(
+      tenantId,
+      profiles.map((entry) => entry.profile),
+      'public_memory_hydration',
+      'activegraph_public',
+    );
+    const materializedByTemporaryId = new Map<string, string>();
+    for (const entry of profiles) {
+      const candidateId = candidateMap.get(entry.profile.canonicalLinkedinId);
+      if (!candidateId) {
+        throw new Error(
+          `Failed to materialize public Memory candidate ${entry.temporaryId}`,
+        );
+      }
+      const link = await ensureCandidateGlobalLink({
+        tenantId,
+        candidateId,
+        globalCandidateId: entry.globalCandidateId,
+        matchMethod: 'global_id_exact',
+      });
+      materializedByTemporaryId.set(entry.temporaryId, link.candidateId);
+      materializedPublicLocalIds.add(link.candidateId);
+      publicMemory.materializedCandidates++;
+      if (link.raceResolved) publicMemory.materializationRaceWins++;
+      publicMemory.linksRetained++;
+    }
+    return materializedByTemporaryId;
+  };
+
+  const materializeServedTenantPrivateCandidates = async (
+    candidateIds: string[],
+  ): Promise<Map<string, string>> => {
+    const uniqueCandidateIds = Array.from(new Set(candidateIds));
+    const temporaryEntries = uniqueCandidateIds.flatMap((candidateId) => {
+      const entry = tenantPrivateCandidateByTemporaryId.get(candidateId);
+      return entry ? [{ temporaryId: candidateId, ...entry }] : [];
+    });
+    const replacements = new Map<string, string>();
+
+    if (temporaryEntries.length > 0) {
+      const { upsertDiscoveredCandidates } = await import(
+        './upsert-candidates'
+      );
+      const profiles = temporaryEntries.map((entry) => ({
+        title: entry.result.headline ?? '',
+        snippet: '',
+        linkedinUrl: entry.linkedinUrl,
+        linkedinId: entry.linkedinId,
+        canonicalLinkedinId: entry.linkedinId,
+        name: entry.result.displayName ?? undefined,
+        headline: entry.result.headline ?? undefined,
+        location: entry.result.locationRaw ?? undefined,
+        providerMeta: {
+          activegraphPrivate: {
+            evidenceSurface: 'tenant_private_v1',
+            sourceCandidateId: entry.result.candidateId,
+            globalCandidateId: entry.result.globalCandidateId,
+          },
+        },
+      }));
+      const candidateMap = await upsertDiscoveredCandidates(
+        tenantId,
+        profiles,
+        'tenant_private_memory',
+        'activegraph_private',
+        {
+          captureSource: 'activegraph_private',
+          preserveExistingProvenance: true,
+        },
+      );
+      for (const entry of temporaryEntries) {
+        const candidateId = candidateMap.get(entry.linkedinId);
+        if (!candidateId) {
+          throw new Error(
+            `Failed to materialize tenant-private Memory candidate ${entry.temporaryId}`,
+          );
+        }
+        replacements.set(entry.temporaryId, candidateId);
+        materializedPrivateLocalIds.add(candidateId);
+        publicMemory.privateMaterialized++;
+        const rankingCandidate = poolForRankingById.get(entry.temporaryId);
+        if (rankingCandidate) {
+          poolForRankingById.set(candidateId, rankingCandidate);
+        }
+      }
+    }
+
+    for (const originalCandidateId of uniqueCandidateIds) {
+      const candidateId =
+        replacements.get(originalCandidateId) ?? originalCandidateId;
+      const globalCandidateId =
+        tenantPrivateGlobalIdByRankingId.get(originalCandidateId);
+      if (!globalCandidateId) continue;
+      const link = await ensureCandidateGlobalLink({
+        tenantId,
+        candidateId,
+        globalCandidateId,
+        matchMethod: 'tenant_private_global_id',
+        linkConfidence: 1,
+      });
+      if (link.candidateId !== candidateId) {
+        replacements.set(originalCandidateId, link.candidateId);
+      }
+      materializedPrivateLocalIds.add(link.candidateId);
+      publicMemory.linksRetained++;
+      if (link.raceResolved) publicMemory.materializationRaceWins++;
+    }
+    return replacements;
+  };
 
   const hasLocationConstraint = Boolean(requirements.location?.trim());
   const requestedCountryCode = config.countryGuardEnabled && hasLocationConstraint
@@ -1146,30 +1821,234 @@ export async function runSourcingOrchestrator(
           // FRESH-known people (updatedAt within excludeKnownFreshDays) means
           // 9 credits buy NEW people, while stale-known people deliberately
           // cycle back in and get their blobs refreshed (Stage-1 convergence).
-          let excludePersonIds: number[] = [];
-          if (config.excludeKnownEnabled) {
-            try {
-              const cutoff = new Date(Date.now() - config.excludeKnownFreshDays * 24 * 60 * 60 * 1000);
-              const rows = await prisma.$queryRaw<{ pid: string | null }[]>`
-                SELECT ("searchMeta"->'crustdata'->>'crustdata_person_id') AS pid
-                FROM candidates
-                WHERE "tenantId" = ${tenantId}
-                  AND "updatedAt" > ${cutoff}
-                  AND ("searchMeta"->'crustdata'->>'crustdata_person_id') IS NOT NULL
-                ORDER BY "updatedAt" DESC
-                LIMIT ${config.excludeKnownMax}
-              `;
-              excludePersonIds = rows
-                .map((r) => Number(r.pid))
-                .filter((n) => Number.isFinite(n));
-              log.info(
-                { requestId, excludedKnown: excludePersonIds.length, freshDays: config.excludeKnownFreshDays },
-                'Excluding fresh-known people from Crustdata query'
-              );
-            } catch (exclErr) {
-              log.warn({ requestId, err: String(exclErr) }, 'Exclusion-list query failed — sourcing without exclusion');
+          let cachedLocalPublicExclusions: number[] | null = null;
+          const loadLocalPublicExclusions = async (): Promise<number[]> => {
+            if (cachedLocalPublicExclusions) {
+              return cachedLocalPublicExclusions;
             }
-          }
+            const cutoff = new Date(
+              Date.now() -
+                config.excludeKnownFreshDays * 24 * 60 * 60 * 1000,
+            );
+            const rows = await prisma.$queryRaw<{ pid: string | null }[]>`
+              SELECT ("searchMeta"->'crustdata'->>'crustdata_person_id') AS pid
+              FROM candidates
+              WHERE "tenantId" = ${tenantId}
+                AND (
+                  ("captureSource" = 'sourcing' AND "searchProvider" = 'crustdata')
+                  OR "searchProvider" = 'activegraph_public'
+                )
+                AND "updatedAt" > ${cutoff}
+                AND ("searchMeta"->'crustdata'->>'crustdata_person_id') IS NOT NULL
+              ORDER BY "updatedAt" DESC
+              LIMIT ${config.excludeKnownMax}
+            `;
+            cachedLocalPublicExclusions = rows
+              .map((row) => Number(row.pid))
+              .filter(
+                (personId) =>
+                  Number.isSafeInteger(personId) && personId > 0,
+              );
+            return cachedLocalPublicExclusions;
+          };
+          const loadMarketDeliveryLagExclusions = async (
+            marketKeys: string[],
+          ): Promise<number[]> => {
+            if (marketKeys.length === 0) return [];
+            const cutoff = new Date(
+              Date.now() -
+                config.excludeKnownFreshDays * 24 * 60 * 60 * 1000,
+            );
+            const rows = await prisma.$queryRaw<{ pid: string | null }[]>`
+              SELECT DISTINCT
+                COALESCE(
+                  outbox."payload"->'candidate'->'crustdata'
+                    ->>'crustdata_person_id',
+                  outbox."payload"->'deliveryLag'
+                    ->>'crustdataPersonId'
+                ) AS pid
+              FROM "public_memory_ingest_outbox" AS outbox
+              WHERE outbox."status" IN ('pending', 'processing', 'succeeded')
+                AND outbox."updatedAt" > ${cutoff}
+                AND (
+                  COALESCE(
+                    outbox."payload"->'options'->'publicMarket'
+                      ->>'coarseMarketKey',
+                    outbox."payload"->'deliveryLag'
+                      ->>'coarseMarketKey'
+                  )
+                ) = ANY(${marketKeys}::text[])
+                AND COALESCE(
+                  outbox."payload"->'candidate'->'crustdata'
+                    ->>'crustdata_person_id',
+                  outbox."payload"->'deliveryLag'
+                    ->>'crustdataPersonId'
+                ) IS NOT NULL
+              ORDER BY pid
+              LIMIT ${config.excludeKnownMax}
+            `;
+            return rows
+              .map((row) => Number(row.pid))
+              .filter(
+                (personId) =>
+                  Number.isSafeInteger(personId) && personId > 0,
+              );
+          };
+
+          const resolvePublicExclusions = async (
+            markets: PublicMarket[],
+          ): Promise<{
+            ids: number[];
+            telemetry: PublicMemoryExclusionTelemetry;
+            memory: PublicMarketExclusionResponse[];
+          }> => {
+            const marketKeys = markets.map((market) => market.coarseMarketKey);
+            if (!config.excludeKnownEnabled) {
+              return {
+                ids: [],
+                memory: [],
+                telemetry: {
+                  marketKeys,
+                  source: 'off',
+                  count: 0,
+                  totalMatched: null,
+                  classifiedMatched: null,
+                  unclassifiedMatched: null,
+                  unclassifiedReturned: null,
+                  truncated: null,
+                },
+              };
+            }
+
+            if (
+              publicMemory.platformExclusionActive &&
+              markets.length > 0
+            ) {
+              const memory: PublicMarketExclusionResponse[] = [];
+              for (const market of markets) {
+                const response = await getPublicMarketExclusions(
+                  tenantId,
+                  market,
+                  config.excludeKnownFreshDays,
+                  config.excludeKnownMax,
+                  requestId,
+                );
+                if (!response) {
+                  memory.length = 0;
+                  break;
+                }
+                memory.push(response);
+              }
+              if (memory.length === markets.length) {
+                const localLagIds =
+                  await loadMarketDeliveryLagExclusions(marketKeys);
+                const memoryIds = memory.flatMap(
+                  (response) => response.crustdataPersonIds,
+                );
+                const ids = mergePublicExclusionIds(
+                  memoryIds,
+                  localLagIds,
+                  config.excludeKnownMax,
+                );
+                return {
+                  ids,
+                  memory,
+                  telemetry: {
+                    marketKeys,
+                    source:
+                      localLagIds.length > 0
+                        ? 'memory_public_plus_local'
+                        : 'memory_public',
+                    count: ids.length,
+                    totalMatched: memory.reduce(
+                      (total, response) => total + response.totalMatched,
+                      0,
+                    ),
+                    classifiedMatched: memory.reduce(
+                      (total, response) =>
+                        total + response.classifiedMatched,
+                      0,
+                    ),
+                    unclassifiedMatched: memory.reduce(
+                      (total, response) =>
+                        total + response.unclassifiedMatched,
+                      0,
+                    ),
+                    unclassifiedReturned: memory.reduce(
+                      (total, response) =>
+                        total + response.unclassifiedReturned,
+                      0,
+                    ),
+                    truncated: memory.some(
+                      (response) => response.truncated,
+                    ),
+                  },
+                };
+              }
+            }
+
+            try {
+              const ids = await loadLocalPublicExclusions();
+              return {
+                ids,
+                memory: [],
+                telemetry: {
+                  marketKeys,
+                  source: publicMemory.platformExclusionActive
+                    ? (markets.length > 0
+                        ? 'local_public_fallback'
+                        : 'unresolved_market')
+                    : 'tenant_public',
+                  count: ids.length,
+                  totalMatched: null,
+                  classifiedMatched: null,
+                  unclassifiedMatched: null,
+                  unclassifiedReturned: null,
+                  truncated: null,
+                },
+              };
+            } catch (error) {
+              log.warn(
+                { requestId, err: String(error) },
+                'Public exclusion fallback failed; sourcing without exclusions',
+              );
+              return {
+                ids: [],
+                memory: [],
+                telemetry: {
+                  marketKeys,
+                  source: publicMemory.platformExclusionActive
+                    ? (markets.length > 0
+                        ? 'local_public_fallback'
+                        : 'unresolved_market')
+                    : 'tenant_public',
+                  count: 0,
+                  totalMatched: null,
+                  classifiedMatched: null,
+                  unclassifiedMatched: null,
+                  unclassifiedReturned: null,
+                  truncated: null,
+                },
+              };
+            }
+          };
+
+          const exactPublicMarkets = buildPublicMarketsForQuery(requirements);
+          const exactExclusion = await resolvePublicExclusions(
+            exactPublicMarkets,
+          );
+          const excludePersonIds = exactExclusion.ids;
+          publicMemory.exactExclusion = exactExclusion.telemetry;
+          log.info(
+            {
+              requestId,
+              excludedKnown: excludePersonIds.length,
+              freshDays: config.excludeKnownFreshDays,
+              source: exactExclusion.telemetry.source,
+              coarseMarketKeys: exactExclusion.telemetry.marketKeys,
+            },
+            'Excluding fresh public-sourced people from exact Crustdata query',
+          );
 
           const ladderScope = 'tenant' as const;
           const fineQueryFingerprint = buildFineQueryFingerprint(requirements);
@@ -1226,7 +2105,9 @@ export async function runSourcingOrchestrator(
             CRUSTDATA_REQUEST_LIMIT,
           );
           const acquisitionRungByProfile = new Map<object, string>();
-          for (const profile of exactSearch.profiles) acquisitionRungByProfile.set(profile, 'exact');
+          for (const profile of exactSearch.profiles) {
+            acquisitionRungByProfile.set(profile, 'exact');
+          }
 
           let spillSearch: Awaited<ReturnType<typeof searchPeople>> | null = null;
           let spillRung = null as ReturnType<typeof selectSpillRung>;
@@ -1239,10 +2120,19 @@ export async function runSourcingOrchestrator(
           if (ladderEnabled && exactShortfall && remainingCapacity > 0) {
             spillRung = selectSpillRung(ladderRungs, ladderState, true);
             if (spillRung) {
+              const spillPublicMarkets = buildPublicMarketsForQuery(
+                spillRung.requirements,
+              );
+              const spillExclusion = await resolvePublicExclusions(
+                spillPublicMarkets,
+              );
+              publicMemory.spillExclusion = spillExclusion.telemetry;
               const exactPersonIds = exactSearch.profiles
                 .map((profile) => profile.crustdata_person_id)
                 .filter((id): id is number => Number.isFinite(id));
-              const spillExclusionIds = [...new Set([...excludePersonIds, ...exactPersonIds])];
+              const spillExclusionIds = [
+                ...new Set([...spillExclusion.ids, ...exactPersonIds]),
+              ];
               try {
                 spillSearch = await searchPeople(
                   spillRung.requirements,
@@ -1494,13 +2384,31 @@ export async function runSourcingOrchestrator(
                 employerFlat[0]?.company_name
                 ?? currentJobNested?.name
                 ?? null;
+              const searchTitle =
+                (currentJob?.title || currentJob?.name) || headline;
+              const publicCandidateRoleFamily =
+                resolvePublicCandidateRoleFamily({
+                  searchTitle,
+                  headlineHint: headline,
+                  crustdata: p,
+                });
+              const publicMarket = buildObservedCandidatePublicMarket({
+                searchTitle,
+                headlineHint: headline,
+                seniorityHint:
+                  currentJob?.seniority_level ??
+                  currentJobNested?.seniority_level ??
+                  null,
+                locationHint: location,
+                crustdata: p,
+              });
 
               return {
                 // ── CandidateForRanking fields ──────────────────────────
                 id: url,
                 headlineHint: headline,
                 locationHint: location,
-                searchTitle: (currentJob?.title || currentJob?.name) || headline,
+                searchTitle,
                 searchSnippet: searchSnippetText,
                 enrichmentStatus: 'pending',
                 lastEnrichedAt: null as Date | null,
@@ -1520,11 +2428,74 @@ export async function runSourcingOrchestrator(
                 companyHint,
                 profilePictureUrl,
                 crustdata: p,
+                publicCandidateRoleFamily,
+                publicMarket,
                 // Retrieval provenance is diagnostic-only. Ranking below still
                 // receives the original job requirements.
                 acquisitionRung: acquisitionRungByProfile.get(p) ?? 'exact',
               };
-            }).filter((p: any) => p.linkedinUrl);
+            }).filter(
+              (candidate: any) =>
+                extractLinkedInIdFromUrl(candidate.linkedinUrl) !== null,
+            );
+
+            try {
+              const identityLookup = await resolvePublicIdentities(
+                tenantId,
+                mappedForRanking.map((candidate) => candidate.linkedinUrl),
+                requestId,
+              );
+              if (identityLookup) {
+                for (const identity of identityLookup.results) {
+                  const slug = extractLinkedInIdFromUrl(
+                    identity.normalizedLinkedinUrl,
+                  );
+                  if (slug) {
+                    addExpectedGlobalIdentityReceipt(
+                      {
+                        expectedByIdentity: publicGlobalIdByIdentity,
+                        conflictedIdentityKeys:
+                          conflictedPublicIdentityKeys,
+                      },
+                      `li:${slug.toLowerCase()}`,
+                      identity.globalCandidateId,
+                    );
+                  }
+                }
+                publicMemory.identityReceiptConflicts =
+                  conflictedPublicIdentityKeys.size;
+              }
+            } catch (error) {
+              log.warn(
+                { requestId, err: String(error) },
+                'Public identity receipt lookup failed open',
+              );
+            }
+            try {
+              const queued = await enqueuePublicMemoryIngestOutbox({
+                  tenantId,
+                  sourcingRequestId: requestId,
+                  candidates: mappedForRanking.map((candidate) => ({
+                    candidate,
+                    options: {
+                      publicMarket: candidate.publicMarket,
+                      publicCandidateRoleFamily:
+                        candidate.publicCandidateRoleFamily,
+                    },
+                    expectedGlobalCandidateId:
+                      expectedGlobalCandidateIdForCandidate(
+                        candidate,
+                        publicGlobalIdByIdentity,
+                      ),
+                  })),
+                });
+              publicMemory.ingestQueued += queued;
+              publicMemory.ingestPending += queued;
+            } catch {
+              throw new PublicMemoryOutboxError(
+                'Failed to durably queue purchased public profiles',
+              );
+            }
 
 
             // Combine ActiveGraph/Pool candidates with fresh Crustdata candidates
@@ -1537,17 +2508,6 @@ export async function runSourcingOrchestrator(
             // instead of ~100). Both lists carry the raw Crustdata blob with a
             // stable crustdata_person_id — dedupe on that (fallbacks: linkedin
             // slug, then raw id).
-            const identityKey = (c: any): string => {
-              const cd = c?.crustdata || {};
-              if (cd.crustdata_person_id != null) return `cid:${cd.crustdata_person_id}`;
-              const url =
-                c?.linkedinUrl ||
-                cd?.social_handles?.professional_network_identifier?.profile_url ||
-                (typeof c?.id === 'string' && c.id.includes('linkedin.com') ? c.id : null);
-              const slug = url ? extractLinkedInIdFromUrl(url) : null;
-              if (slug) return `li:${slug.toLowerCase()}`;
-              return `id:${c?.id ?? ''}`;
-            };
             // Pool candidates come first so the surviving entry keeps its LOCAL
             // id + DB snapshot linkage — but the FRESH Crustdata blob wins for
             // ranking (Stage-1 freshness): the old rule kept the pool row's
@@ -1558,7 +2518,7 @@ export async function runSourcingOrchestrator(
             const combinedRaw = [...poolForRanking, ...mappedForRanking];
             const seenIdentity = new Set<string>();
             const combinedForRanking = combinedRaw.filter((c: any) => {
-              const key = identityKey(c);
+              const key = candidatePublicIdentityKey(c);
               if (seenIdentity.has(key)) return false;
               seenIdentity.add(key);
               return true;
@@ -1591,15 +2551,29 @@ export async function runSourcingOrchestrator(
             // this run's Crustdata batch, swap in the fresh blob (+picture),
             // keep the pool snapshot, and queue a DB re-upsert so the stored
             // searchMeta converges with what we just ranked.
-            const freshByIdentity = new Map(mappedForRanking.map((m: any) => [identityKey(m), m]));
+            const freshByIdentity = new Map(
+              mappedForRanking.map((candidate: any) => [
+                candidatePublicIdentityKey(candidate),
+                candidate,
+              ]),
+            );
             const poolRefreshProfiles: any[] = [];
             let poolBlobsRefreshed = 0;
             for (const c of combinedForRanking) {
               if (!poolForRankingById.has(c.id)) continue;
-              const fresh = freshByIdentity.get(identityKey(c));
+              const fresh = freshByIdentity.get(
+                candidatePublicIdentityKey(c),
+              );
               if (!fresh || fresh === c || !(fresh as any).crustdata) continue;
               (c as any).crustdata = (fresh as any).crustdata;
               if ((fresh as any).profilePictureUrl) (c as any).profilePictureUrl = (fresh as any).profilePictureUrl;
+              if (publicTemporaryCandidateById.has(c.id)) {
+                // The awaited Memory ingest below refreshes the canonical
+                // public profile. Do not create a tenant row unless this
+                // candidate is served.
+                poolBlobsRefreshed++;
+                continue;
+              }
               // c.snapshot (Memory-verified skills) intentionally untouched.
               // Upsert key = the POOL ROW's own linkedinId (case-preserved): a
               // case-differing fresh slug would miss tenantId_linkedinId and
@@ -1666,15 +2640,18 @@ export async function runSourcingOrchestrator(
             // first and only write the 100 we actually serve (7 batches ≈ 14s).
             const profileByUrl = new Map(mappedForRanking.map((p) => [p.id, p]));
 
-            // ── Ingest all Crustdata profiles to ActiveGraph (Background) ──────────
-            // Bounded concurrency: 300 simultaneous requests would hammer the
-            // service; chunks of 10 keep it civil while staying off the hot path.
-            const { ingestCandidateBatch } = await import('./activegraph-client');
-            ingestCandidateBatch(tenantId, mappedForRanking, requestId).then(successCount => {
-              console.log(`📡 [ORCHESTRATOR] INGESTED ${successCount}/${mappedForRanking.length} TO ACTIVEGRAPH (Async)`);
-            }).catch(err => {
-              console.error(`[activegraph-client] Batch ingest failed:`, err);
-            });
+            const materializedPublicByTemporaryId =
+              await materializeServedPublicCandidates(
+                scored.slice(0, 100).map((candidate) => candidate.candidateId),
+              );
+            const materializedPrivateByCandidateId =
+              await materializeServedTenantPrivateCandidates(
+                scored.slice(0, 100).map((candidate) => candidate.candidateId),
+              );
+            const materializedByTemporaryId = new Map([
+              ...materializedPublicByTemporaryId,
+              ...materializedPrivateByCandidateId,
+            ]);
 
             // Build top-100 profiles for DB write (ranked order already in `scored`)
             const top100Profiles = scored.slice(0, 100).map((sc) => {
@@ -1750,25 +2727,85 @@ export async function runSourcingOrchestrator(
               'crustdata_query',
               'crustdata'
             );
+            const candidateIdByLinkedinId = new Map(
+              Array.from(candidateMap).map(([linkedinId, candidateId]) => [
+                linkedinId.toLowerCase(),
+                candidateId,
+              ]),
+            );
+            const materializedIdByIdentity = new Map<string, string>();
+            for (const [temporaryId, localCandidateId] of materializedByTemporaryId) {
+              const candidate = poolForRankingById.get(temporaryId);
+              if (candidate) {
+                materializedIdByIdentity.set(
+                  candidatePublicIdentityKey(candidate),
+                  localCandidateId,
+                );
+              }
+            }
+            await attachLocalCandidatesToPublicMemoryOutbox(
+              tenantId,
+              mappedForRanking.flatMap((candidate) => {
+                const linkedinId = extractLinkedInIdFromUrl(
+                  candidate.linkedinUrl,
+                )?.toLowerCase();
+                const localCandidateId =
+                  (linkedinId
+                    ? candidateIdByLinkedinId.get(linkedinId)
+                    : undefined) ??
+                  materializedIdByIdentity.get(
+                    candidatePublicIdentityKey(candidate),
+                  );
+                return localCandidateId
+                  ? [{
+                      signalCandidateId: candidate.id,
+                      localCandidateId,
+                    }]
+                  : [];
+              }),
+            );
 
             console.log(`💾 [ORCHESTRATOR] UPSERTED ${candidateMap.size} CANDIDATES TO DB (${poolRefreshProfiles.length} pool-blob refreshes)`);
 
             const allRankedWithIds = scored.slice(0, 100).map((sc) => {
               const profile = profileByUrl.get(sc.candidateId);
               const poolCandidate = poolForRankingById.get(sc.candidateId);
+              const publicResult =
+                publicTemporaryCandidateById.get(sc.candidateId);
+              const privateResult =
+                tenantPrivateCandidateByTemporaryId.get(sc.candidateId);
               
-              const linkedinUrl = profile?.linkedinUrl || poolCandidate?.id || '';
+              const linkedinUrl =
+                profile?.linkedinUrl ||
+                publicResult?.linkedin_url ||
+                publicResult?.crustdata_profile?.social_handles
+                  ?.professional_network_identifier?.profile_url ||
+                privateResult?.linkedinUrl ||
+                '';
               // candidateMap is keyed by the canonical (case-preserved) slug
               // when the person matched an existing pool row — look up with
               // the same key or pool-matched fresh entries drop out here.
               const linkedinId = (profile ? slimMatchByCandidate.get(profile)?.linkedinId : undefined)
                 ?? extractLinkedInIdFromUrl(linkedinUrl);
-              const dbId = profile && linkedinId ? candidateMap.get(linkedinId) : poolCandidate?.id;
+              const upsertedId =
+                profile && linkedinId
+                  ? candidateMap.get(linkedinId)
+                  : undefined;
+              const dbId =
+                upsertedId ??
+                materializedByTemporaryId.get(sc.candidateId) ??
+                (publicResult || privateResult
+                  ? undefined
+                  : poolCandidate?.id);
 
               return {
                 candidateId: dbId || '',
                 linkedinUrl: linkedinUrl,
-                name: profile?.name || '',
+                name:
+                  profile?.name ||
+                  publicResult?.name ||
+                  privateResult?.result.displayName ||
+                  '',
                 headlineHint: profile?.headlineHint || poolCandidate?.headlineHint || '',
                 locationHint: profile?.locationHint || poolCandidate?.locationHint || '',
                 fitScore: sc.fitScore,
@@ -1808,6 +2845,7 @@ export async function runSourcingOrchestrator(
             discovery = { candidates: [], queriesExecuted: 1, queriesBuilt: 1, telemetry: { queryRuns: [] } };
           }
         } catch (err) {
+          if (err instanceof PublicMemoryOutboxError) throw err;
           log.error({ err }, 'Crustdata discovery failed, falling back to Serper');
           console.error('❌ [ORCHESTRATOR] CRUSTDATA FAILED:', err instanceof Error ? err.message : err);
         }
@@ -1836,7 +2874,11 @@ export async function runSourcingOrchestrator(
             // subset — a pool member outside vector top-N re-bought from
             // Crustdata upserts onto its existing row id and must still label
             // as pool. slimById is empty when the flag is off.
-            const isPoolMember = poolForRankingById.has(sc.candidateId) || slimById.has(sc.candidateId);
+            const isPoolMember =
+              poolForRankingById.has(sc.candidateId) ||
+              slimById.has(sc.candidateId) ||
+              materializedPublicLocalIds.has(sc.candidateId) ||
+              materializedPrivateLocalIds.has(sc.candidateId);
             const hasVerifiedSkills = (sc.fitBreakdown as any)?.skillScoreMethod === 'snapshot';
             const sourceType = isPoolMember
               ? (hasVerifiedSkills ? 'pool_enriched' : 'pool')
@@ -1864,11 +2906,19 @@ export async function runSourcingOrchestrator(
           // (keeping the first/best-ranked) before insert so the
           // (sourcingRequestId, candidateId) unique constraint can't fail.
           const seenFinalIds = new Set<string>();
-          const dedupedFinalAssembled = finalAssembled.filter((a) => {
-            if (seenFinalIds.has(a.candidateId)) return false;
-            seenFinalIds.add(a.candidateId);
-            return true;
-          });
+          const dedupedFinalAssembled = finalAssembled
+            .filter((candidate) => {
+              if (seenFinalIds.has(candidate.candidateId)) return false;
+              seenFinalIds.add(candidate.candidateId);
+              return true;
+            })
+            .map((candidate, index) => ({
+              ...candidate,
+              rank: index + 1,
+            }));
+          assertPersistableCandidateIds(
+            dedupedFinalAssembled.map((candidate) => candidate.candidateId),
+          );
           // Delete any existing JobSourcingCandidate records for retry idempotency
           await prisma.$transaction([
             prisma.jobSourcingCandidate.deleteMany({
@@ -1888,12 +2938,12 @@ export async function runSourcingOrchestrator(
             }),
           ]);
 
-          console.log(`💾 [ORCHESTRATOR] PERSISTED ${finalAssembled.length} ENRICHED CANDIDATES TO JOBSOURCINGCANDIDATES!`);
+          console.log(`💾 [ORCHESTRATOR] PERSISTED ${dedupedFinalAssembled.length} ENRICHED CANDIDATES TO JOBSOURCINGCANDIDATES!`);
 
-          const avgFitTopK = finalAssembled.length > 0
-            ? finalAssembled.reduce((sum, c) => sum + (c.fitScore ?? 0), 0) / finalAssembled.length
+          const avgFitTopK = dedupedFinalAssembled.length > 0
+            ? dedupedFinalAssembled.reduce((sum, c) => sum + (c.fitScore ?? 0), 0) / dedupedFinalAssembled.length
             : 0;
-          const strictTopKCount = finalAssembled.filter((candidate) => candidate.matchTier === 'strict_location').length;
+          const strictTopKCount = dedupedFinalAssembled.filter((candidate) => candidate.matchTier === 'strict_location').length;
           const sourceMetrics: SourceMetrics = {
             eligible: summarizeSourceMetrics(eligibleSourceEntries),
             top20: summarizeSourceMetrics(eligibleSourceEntries.slice(0, 20)),
@@ -1907,14 +2957,14 @@ export async function runSourcingOrchestrator(
           const result: OrchestratorResult = {
             discoveredCount: sourceMetrics.served.discovered.count,
             discoveryShortfallRate: 0,
-            candidateCount: finalAssembled.length,
+            candidateCount: dedupedFinalAssembled.length,
             poolCount: dedupedFinalAssembled.filter((a) => a.sourceType === 'pool' || a.sourceType === 'pool_enriched').length,
             queriesExecuted: 1,
             qualityGateTriggered,
             avgFitTopK: Number(avgFitTopK.toFixed(4)),
-            countAboveThreshold: finalAssembled.filter((candidate) => (candidate.fitScore ?? 0) >= config.qualityThreshold).length,
+            countAboveThreshold: dedupedFinalAssembled.filter((candidate) => (candidate.fitScore ?? 0) >= config.qualityThreshold).length,
             strictTopKCount,
-            strictCoverageRate: finalAssembled.length === 0 ? 0 : strictTopKCount / finalAssembled.length,
+            strictCoverageRate: dedupedFinalAssembled.length === 0 ? 0 : strictTopKCount / dedupedFinalAssembled.length,
             effectiveStrategy: 'crustdata_primary',
             executionPath: 'crustdata_primary',
             discoveryReason: 'crustdata_primary',
@@ -1922,7 +2972,7 @@ export async function runSourcingOrchestrator(
             discoveryTelemetry: null,
             snapshotReuseCount: 0,
             snapshotStaleServedCount: 0,
-            strictMatchedCount: finalAssembled.length,
+            strictMatchedCount: dedupedFinalAssembled.length,
             expandedCount: 0,
             expansionReason: null,
             requestedLocation: requirements.location,
@@ -1950,8 +3000,9 @@ export async function runSourcingOrchestrator(
             dynamicQueryBudgetUsed: false,
             minDiscoveryPerRunApplied: 0,
             minDiscoveredInOutputApplied: 0,
-            discoveredPromotedCount: finalAssembled.length,
-            discoveredPromotedInTopCount: finalAssembled.length,
+            discoveredPromotedCount: sourceMetrics.top100.discovered.count,
+            discoveredPromotedInTopCount:
+              sourceMetrics.served.discovered.count,
             unknownLocationPromotedCount: 0,
             discoveredPromotionRejections: { total: 0, locationGate: 0, fitGate: 0, roleGate: 0, confidence: 0, phase: 0, unknownCap: 0 },
             discoveredDeferredFromFrontLoad: 0,
@@ -1981,6 +3032,7 @@ export async function runSourcingOrchestrator(
             roleResolutionMetrics: { totalInputs: 0, cacheHits: 0, groqCalls: 0, groqTokensUsed: 0, durationMs: 0 } as any,
             locationResolutionMetrics: { totalInputs: 0, cacheHits: 0, groqCalls: 0, groqTokensUsed: 0, durationMs: 0 } as any,
             sourceMetrics,
+            publicMemory,
             relaxationLadder,
           };
 
@@ -2726,6 +3778,24 @@ export async function runSourcingOrchestrator(
     : null;
 
   const expandedCount = assembled.length - strictMatchedCount;
+  const legacyPublicMaterializedByTemporaryId =
+    await materializeServedPublicCandidates(
+      assembled.map((candidate) => candidate.candidateId),
+    );
+  const legacyPrivateMaterializedByCandidateId =
+    await materializeServedTenantPrivateCandidates(
+      assembled.map((candidate) => candidate.candidateId),
+    );
+  const legacyMaterializedByTemporaryId = new Map([
+    ...legacyPublicMaterializedByTemporaryId,
+    ...legacyPrivateMaterializedByCandidateId,
+  ]);
+  for (const candidate of assembled) {
+    const localCandidateId = legacyMaterializedByTemporaryId.get(
+      candidate.candidateId,
+    );
+    if (localCandidateId) candidate.candidateId = localCandidateId;
+  }
 
   // Dedupe by candidateId (keep first/best-ranked) so a candidate present in
   // more than one lane can't trip the (sourcingRequestId, candidateId) unique.
@@ -2735,6 +3805,9 @@ export async function runSourcingOrchestrator(
     seenAssembledIds.add(a.candidateId);
     return true;
   });
+  assertPersistableCandidateIds(
+    dedupedAssembled.map((candidate) => candidate.candidateId),
+  );
   // 5. Persist: deleteMany + createMany for retry idempotency
   await prisma.$transaction([
     prisma.jobSourcingCandidate.deleteMany({
@@ -2908,6 +3981,7 @@ export async function runSourcingOrchestrator(
       : null,
     roleResolutionMetrics,
     locationResolutionMetrics,
+    publicMemory,
   };
 
   log.info({ requestId, resolvedTrack: trackDecision?.track ?? null, ...result }, 'Orchestrator complete');

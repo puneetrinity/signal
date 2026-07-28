@@ -29,6 +29,10 @@ export async function upsertDiscoveredCandidates(
   profiles: ProfileSummary[],
   searchQuery: string,
   searchProvider: string,
+  options: {
+    captureSource?: string;
+    preserveExistingProvenance?: boolean;
+  } = {},
 ): Promise<Map<string, string>> {
   const candidateMap = new Map<string, string>();
 
@@ -67,14 +71,20 @@ export async function upsertDiscoveredCandidates(
           });
 
           const updateData: Prisma.CandidateUpdateInput = {
-            searchTitle: result.title,
-            searchSnippet: result.snippet,
-            searchMeta: ({
-              ...(result.providerMeta ?? {}),
-              ...(result.crustdata ? { crustdata: result.crustdata } : {}),
-            }) as Prisma.InputJsonValue,
-            searchProvider,
             updatedAt: new Date(),
+            ...(options.preserveExistingProvenance
+              ? {}
+              : {
+                  searchTitle: result.title,
+                  searchSnippet: result.snippet,
+                  searchMeta: ({
+                    ...(result.providerMeta ?? {}),
+                    ...(result.crustdata
+                      ? { crustdata: result.crustdata }
+                      : {}),
+                  }) as Prisma.InputJsonValue,
+                  searchProvider,
+                }),
           };
           // Only overwrite profilePictureUrl if we don't already have one
           // (enrichment-sourced pictures are higher quality than Crustdata CDN URLs).
@@ -103,7 +113,7 @@ export async function upsertDiscoveredCandidates(
               headlineHint,
               locationHint,
               companyHint,
-              captureSource: 'sourcing',
+              captureSource: options.captureSource ?? 'sourcing',
               searchQuery,
               searchProvider,
               ...(result.profilePictureUrl ? { profilePictureUrl: result.profilePictureUrl } : {}),
@@ -120,4 +130,3 @@ export async function upsertDiscoveredCandidates(
 
   return candidateMap;
 }
-

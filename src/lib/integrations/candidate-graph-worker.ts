@@ -8,6 +8,12 @@
 import { Worker, Job } from 'bullmq';
 import { createHash } from 'crypto';
 import { prisma } from '@/lib/prisma';
+import { ensureCandidateGlobalLink } from '@/lib/sourcing/public-memory-materialization';
+import {
+  assertPublicSourceDetailIsNonPrivate,
+  buildPublicWebDiscoverySourceDetail,
+  isExplicitPublicSourcingProvenance,
+} from '@/lib/sourcing/public-memory-provenance';
 import { createLogger } from '@/lib/logger';
 import { resolveLocationDeterministic } from '@/lib/taxonomy/location-service';
 import { activeKGClient } from './activekg-client';
@@ -27,9 +33,12 @@ type CandidateWithRelations = NonNullable<
   Awaited<ReturnType<typeof loadCandidateWithRelations>>
 >;
 
-async function loadCandidateWithRelations(candidateId: string) {
+async function loadCandidateWithRelations(
+  tenantId: string,
+  candidateId: string,
+) {
   return prisma.candidate.findUnique({
-    where: { id: candidateId },
+    where: { tenantId_id: { tenantId, id: candidateId } },
     include: {
       intelligenceSnapshots: { orderBy: { computedAt: 'desc' }, take: 1 },
       identityCandidates: {
@@ -140,10 +149,13 @@ async function processCandidateGraphSync(
   const { candidateId, tenantId, trigger } = job.data;
 
   // 1. Load candidate with relations
-  const candidate = await loadCandidateWithRelations(candidateId);
+  const candidate = await loadCandidateWithRelations(tenantId, candidateId);
 
   if (!candidate) {
-    log.warn({ candidateId }, 'Candidate not found, skipping');
+    log.warn(
+      { tenantId, candidateId },
+      'Candidate not found for tenant, skipping before Memory access',
+    );
     return;
   }
 
@@ -266,36 +278,47 @@ async function processCandidateGraphSync(
   }
 
   // 5. Attach provenance
+  const isPublicSourcing = isExplicitPublicSourcingProvenance({
+    captureSource: candidate.captureSource,
+    provider: candidate.searchProvider,
+  });
+  const sourceDetail = isPublicSourcing
+    ? buildPublicWebDiscoverySourceDetail(candidate.searchProvider)
+    : {
+        capture_source: candidate.captureSource,
+        ...(candidate.searchProvider
+          ? { provider: candidate.searchProvider.toLowerCase() }
+          : {}),
+      };
+  if (isPublicSourcing) {
+    assertPublicSourceDetailIsNonPrivate(sourceDetail);
+  }
   await activeKGClient.upsertProvenance(tenantId, globalCandidateId, {
     source_type: 'web_discovery',
-    tenant_id: undefined, // public
-    source_detail: {
-      signal_candidate_id: candidate.id,
-      serp_query: candidate.searchQuery,
-      serp_provider: candidate.searchProvider,
-      discovered_at: candidate.createdAt.toISOString(),
-      tenant_id: tenantId,
-    },
+    tenant_id: isPublicSourcing ? undefined : tenantId,
+    source_detail: sourceDetail,
   });
 
-  // 6. Create local link
-  await prisma.candidateGlobalLink.upsert({
-    where: {
-      tenantId_candidateId: { tenantId, candidateId },
-    },
-    create: {
-      tenantId,
-      candidateId,
-      globalCandidateId,
-      linkConfidence: matchConfidence,
-      matchMethod,
-    },
-    update: {
-      globalCandidateId,
-      linkConfidence: matchConfidence,
-      matchMethod,
-    },
+  // 6. Create the local link without ever reassigning an existing identity.
+  // The canonical-link unique constraint arbitrates concurrent workers.
+  const link = await ensureCandidateGlobalLink({
+    tenantId,
+    candidateId,
+    globalCandidateId,
+    matchMethod: matchMethod ?? 'unknown',
+    linkConfidence: matchConfidence,
   });
+  if (link.candidateId !== candidateId) {
+    log.warn(
+      {
+        tenantId,
+        candidateId,
+        canonicalLocalCandidateId: link.candidateId,
+        globalCandidateId,
+      },
+      'Graph sync resolved to an existing local candidate link',
+    );
+  }
 
   log.info(
     {

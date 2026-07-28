@@ -8,14 +8,14 @@
   "scripts": {
     "dev": "next dev",
     "build": "prisma generate && next build",
-    "start": "(npx prisma migrate deploy || echo '[start] Migration failed or not needed, starting server anyway') && next start",
+    "start": "npx prisma migrate deploy && next start",
     "lint": "eslint",
     "postinstall": "prisma generate",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
     "db:seed": "tsx prisma/seed.ts",
     "db:generate": "prisma generate",
-    "worker:sourcing": "tsx src/lib/sourcing/worker.ts",
+    "worker:sourcing": "npx prisma migrate deploy && tsx src/lib/sourcing/worker.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:two-layer": "vitest run src/lib/sourcing/__tests__/two-layer-pool.test.ts"
