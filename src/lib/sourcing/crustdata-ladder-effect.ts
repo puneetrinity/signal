@@ -65,7 +65,9 @@ export async function applyCrustdataLadderObservationOnce(input: {
       }
 
       const lockKey = `tenant|${input.tenantId}|${input.fineQueryFingerprint}`;
-      await transaction.$queryRaw`
+      // $executeRaw, not $queryRaw: pg_advisory_xact_lock returns void, which
+      // $queryRaw cannot deserialize — this killed every post-#40 sourcing run.
+      await transaction.$executeRaw`
         SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))
       `;
       const currentRow = await transaction.sourcingCoverageState.findUnique({

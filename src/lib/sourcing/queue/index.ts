@@ -242,6 +242,25 @@ async function processSourcingJob(
         // public-ingest receipts can settle after the sourcing run itself fails.
       },
     });
+    if (failed.count === 1) {
+      // Persist the failure reason durably — worker logs rotate in seconds
+      // and neither Signal nor Flow stored it anywhere (the job-155 outage
+      // was diagnosed blind for lack of this). jsonb merge preserves the
+      // enqueue-time and async-reconciled diagnostics.
+      await prisma.$executeRaw`
+        UPDATE "job_sourcing_requests"
+        SET "diagnostics" = COALESCE("diagnostics", '{}'::jsonb) || jsonb_build_object(
+          'failure', jsonb_build_object(
+            'error', ${errorMsg}::text,
+            'at', ${new Date().toISOString()}::text,
+            'durationMs', ${durationMs}
+          )
+        )
+        WHERE "id" = ${requestId} AND "tenantId" = ${tenantId}
+      `.catch((persistErr: unknown) => {
+        log.warn({ requestId, err: String(persistErr) }, 'Could not persist failure diagnostics');
+      });
+    }
     if (failed.count !== 1) {
       log.info(
         { jobId: job.id, requestId, executionFence },
