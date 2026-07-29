@@ -56,6 +56,7 @@ function isUniqueConstraintError(error: unknown): boolean {
 }
 
 const MAX_CANDIDATE_WRITE_ATTEMPTS = 5;
+type CandidateWriteClient = Pick<Prisma.TransactionClient, 'candidate'>;
 
 export async function upsertDiscoveredCandidates(
   tenantId: string,
@@ -68,9 +69,12 @@ export async function upsertDiscoveredCandidates(
     providerObservedAt?: Date;
     providerObservedAtByRung?: ReadonlyMap<string, Date>;
     failOnError?: boolean;
+    adoptCaseVariantIdentity?: boolean;
+    db?: CandidateWriteClient;
   } = {},
 ): Promise<Map<string, string>> {
   const candidateMap = new Map<string, string>();
+  const db: CandidateWriteClient = options.db ?? prisma;
 
   const chunkSize = 25;
   for (let i = 0; i < profiles.length; i += chunkSize) {
@@ -121,8 +125,16 @@ export async function upsertDiscoveredCandidates(
             attempt < MAX_CANDIDATE_WRITE_ATTEMPTS;
             attempt += 1
           ) {
-            const existing = await prisma.candidate.findUnique({
-              where: { tenantId_linkedinId: { tenantId, linkedinId } },
+            const existing = await db.candidate.findFirst({
+              where: options.adoptCaseVariantIdentity
+                ? {
+                    tenantId,
+                    linkedinId: {
+                      equals: linkedinId,
+                      mode: 'insensitive',
+                    },
+                  }
+                : { tenantId, linkedinId },
               select: {
                 id: true,
                 nameHint: true,
@@ -147,7 +159,7 @@ export async function upsertDiscoveredCandidates(
 
             if (!existing) {
               try {
-                const created = await prisma.candidate.create({
+                const created = await db.candidate.create({
                   data: {
                     tenantId,
                     linkedinUrl: result.linkedinUrl,
@@ -228,7 +240,7 @@ export async function upsertDiscoveredCandidates(
               updateData.companyHint = companyHint;
             }
 
-            const updated = await prisma.candidate.updateMany({
+            const updated = await db.candidate.updateMany({
               where: {
                 id: existing.id,
                 tenantId,
@@ -243,9 +255,9 @@ export async function upsertDiscoveredCandidates(
           }
 
           if (!candidateId) {
-            // Optimistic-lock exhaustion means another writer (e.g. the
-            // public-ingest outbox worker) is actively landing fresher data
-            // on this row. Skipping mirrors the observation-order rule —
+            // Optimistic-lock exhaustion means another writer is actively
+            // landing fresher data on this row. Skipping mirrors the
+            // observation-order rule —
             // older evidence never overwrites newer — and the acquisition
             // receipt still holds the paid payload for replay. One hot row
             // must not fail a 300-candidate run (job-155 outage, round 2).

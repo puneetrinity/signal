@@ -3,7 +3,7 @@ import type { ProfileSummary } from "@/types/linkedin";
 
 const prismaMock = vi.hoisted(() => ({
   candidate: {
-    findUnique: vi.fn(),
+    findFirst: vi.fn(),
     create: vi.fn(),
     updateMany: vi.fn(),
   },
@@ -54,7 +54,7 @@ describe("candidate provider freshness", () => {
       profilePictureUrl: null,
     };
 
-    prismaMock.candidate.findUnique
+    prismaMock.candidate.findFirst
       .mockResolvedValueOnce({
         ...storedCandidate,
         updatedAt: originalStoredAt,
@@ -93,13 +93,13 @@ describe("candidate provider freshness", () => {
         }),
       }),
     );
-    expect(prismaMock.candidate.findUnique).toHaveBeenCalledTimes(2);
+    expect(prismaMock.candidate.findFirst).toHaveBeenCalledTimes(2);
   });
 
   it("keeps tenant-private provenance while applying observation ordering", async () => {
     const storedAt = new Date("2026-06-01T00:00:00.000Z");
     const acquiredAt = new Date("2026-07-01T00:00:00.000Z");
-    prismaMock.candidate.findUnique.mockResolvedValue({
+    prismaMock.candidate.findFirst.mockResolvedValue({
       id: "candidate-a",
       nameHint: "Example Person",
       headlineHint: "Backend Engineer",
@@ -140,5 +140,52 @@ describe("candidate provider freshness", () => {
     expect(data).not.toHaveProperty("searchMeta");
     expect(data).not.toHaveProperty("searchProvider");
     expect(data).not.toHaveProperty("captureSource");
+  });
+
+  it("adopts a case-variant identity instead of retrying a conflicting create", async () => {
+    const storedAt = new Date("2026-07-01T00:00:00.000Z");
+    prismaMock.candidate.findFirst.mockResolvedValue({
+      id: "candidate-existing",
+      nameHint: "Example Person",
+      headlineHint: "Backend Engineer",
+      locationHint: "Bengaluru",
+      companyHint: null,
+      profilePictureUrl: null,
+      updatedAt: storedAt,
+    });
+    prismaMock.candidate.updateMany.mockResolvedValue({ count: 1 });
+
+    const result = await upsertDiscoveredCandidates(
+      "org_1",
+      [
+        {
+          linkedinUrl: "https://www.linkedin.com/in/example-person",
+          linkedinId: "example-person",
+          canonicalLinkedinId: "example-person",
+          title: "Backend Engineer",
+          snippet: "Python",
+        } as ProfileSummary,
+      ],
+      "public_memory_hydration",
+      "activegraph_public",
+      {
+        failOnError: true,
+        adoptCaseVariantIdentity: true,
+      },
+    );
+
+    expect(result.get("example-person")).toBe("candidate-existing");
+    expect(prismaMock.candidate.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          tenantId: "org_1",
+          linkedinId: {
+            equals: "example-person",
+            mode: "insensitive",
+          },
+        },
+      }),
+    );
+    expect(prismaMock.candidate.create).not.toHaveBeenCalled();
   });
 });

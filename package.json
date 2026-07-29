@@ -18,6 +18,7 @@
     "worker:sourcing": "npx prisma migrate deploy && tsx src/lib/sourcing/worker.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:postgres": "RUN_SIGNAL_POSTGRES_INTEGRATION=1 vitest run src/lib/sourcing/__tests__/materialization-postgres.integration.test.ts --no-file-parallelism",
     "test:two-layer": "vitest run src/lib/sourcing/__tests__/two-layer-pool.test.ts"
   },
   "dependencies": {
