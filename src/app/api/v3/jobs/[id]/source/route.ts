@@ -5,17 +5,22 @@
  * Scope: jobs:source
  */
 
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { verifyServiceJWT } from '@/lib/auth/service-jwt';
 import { requireScope } from '@/lib/auth/service-scopes';
+import { createLogger } from '@/lib/logger';
 import { prisma } from '@/lib/prisma';
 import { toJsonValue } from '@/lib/prisma/json';
 import { getSourcingQueue } from '@/lib/sourcing/queue/producer';
 import { buildJobRequirements, type SourcingJobContextInput } from '@/lib/sourcing/jd-digest';
 import { resolveTrack } from '@/lib/sourcing/track-resolver';
+import { releaseAbandonedCrustdataReceiptPayloads } from '@/lib/sourcing/crustdata-acquisition';
+import { decideSourcingRetry } from '@/lib/sourcing/request-retry';
 import type { SourcingJobData } from '@/lib/sourcing/types';
+
+const log = createLogger('SourcingSourceRoute');
 
 const bodySchema = z.object({
   jobContext: z.object({
@@ -53,6 +58,37 @@ function computeJobContextHash(jobContext: Record<string, unknown>): string {
   return createHash('sha256').update(sorted).digest('hex');
 }
 
+async function enqueueSourcingAttempt(jobData: SourcingJobData): Promise<void> {
+  try {
+    await getSourcingQueue().add('source', jobData, {
+      jobId: `${jobData.requestId}-${jobData.executionAttemptId}`,
+    });
+  } catch (error) {
+    // Queue submission is not transactional with the request row. Mark only
+    // this still-queued attempt failed so the caller can retry the same paid
+    // generation. If Redis accepted the job before reporting an error, its
+    // execution fence becomes stale after the retry.
+    await prisma.jobSourcingRequest
+      .updateMany({
+        where: {
+          id: jobData.requestId,
+          tenantId: jobData.tenantId,
+          acquisitionGeneration: jobData.acquisitionGeneration,
+          executionAttemptId: jobData.executionAttemptId,
+          status: 'queued',
+        },
+        data: { status: 'failed' },
+      })
+      .catch((resetError) => {
+        log.error(
+          { requestId: jobData.requestId, error: resetError },
+          'Failed to mark an unqueued sourcing attempt retryable',
+        );
+      });
+    throw error;
+  }
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -78,6 +114,7 @@ export async function POST(
   const { id: externalJobId } = await params;
   const tenantId = auth.context.tenantId;
   const jobContextHash = computeJobContextHash(body.jobContext as Record<string, unknown>);
+  const executionAttemptId = randomUUID();
 
   // Resolve track (runs for both new requests and retries — fast deterministic path)
   const jobContext = body.jobContext as SourcingJobContextInput;
@@ -105,7 +142,12 @@ export async function POST(
 
   if (existing) {
     // Allow re-queue for terminal failure states, or if refresh is explicitly requested
-    const retryable = existing.status === 'failed' || body.jobContext.refresh === true || body.jobContext.forceSourcing === true;
+    const { retryable, startsNewAcquisition } = decideSourcingRetry({
+      status: existing.status,
+      callbackStatus: existing.callbackStatus,
+      refreshRequested: body.jobContext.refresh === true,
+      forceSourcingRequested: body.jobContext.forceSourcing === true,
+    });
     if (!retryable) {
       // Return persisted trackDecision, not freshly computed one, for consistency with GET /results
       const existingDiag = existing.diagnostics as Record<string, unknown> | null;
@@ -115,13 +157,39 @@ export async function POST(
         requestId: existing.id,
         status: existing.status,
         idempotent: true,
+        acquisitionGeneration: existing.acquisitionGeneration,
+        executionAttemptId: existing.executionAttemptId,
         trackDecision: persistedTrackDecision,
       });
     }
 
     // Reset failed request and re-enqueue — persist trackDecision before enqueue
-    await prisma.jobSourcingRequest.update({
-      where: { id: existing.id },
+    const existingDiagnostics = existing.diagnostics as Record<
+      string,
+      unknown
+    > | null;
+    const retryDiagnostics = {
+      trackDecision,
+      ...(!startsNewAcquisition && existingDiagnostics?.publicMemory
+        ? { publicMemory: existingDiagnostics.publicMemory }
+        : {}),
+      ...(!startsNewAcquisition &&
+      existingDiagnostics?.crustdataAcquisition
+        ? {
+            crustdataAcquisition:
+              existingDiagnostics.crustdataAcquisition,
+          }
+        : {}),
+    };
+    const reset = await prisma.jobSourcingRequest.updateMany({
+      where: {
+        id: existing.id,
+        status: existing.status,
+        acquisitionGeneration: existing.acquisitionGeneration,
+        executionAttemptId: existing.executionAttemptId,
+        processingLeaseId: existing.processingLeaseId,
+        callbackStatus: existing.callbackStatus,
+      },
       data: {
         status: 'queued',
         completedAt: null,
@@ -132,24 +200,74 @@ export async function POST(
         resultCount: null,
         qualityGateTriggered: false,
         queriesExecuted: 0,
-        diagnostics: toJsonValue({ trackDecision }),
+        diagnostics: toJsonValue(retryDiagnostics),
         jobContext: body.jobContext,
+        callbackUrl: body.callbackUrl,
+        executionAttemptId,
+        processingLeaseId: null,
+        // A failed/downstream retry keeps the paid acquisition generation and
+        // reuses its receipts. The retry decision marks only an explicit new
+        // sourcing run for another always-on Crustdata buy.
+        ...(startsNewAcquisition
+          ? { acquisitionGeneration: { increment: 1 } }
+          : {}),
       },
     });
 
-    // Remove stale BullMQ job (completed/failed jobs linger per retention settings)
-    const queue = getSourcingQueue();
-    const staleJob = await queue.getJob(existing.id);
-    if (staleJob) await staleJob.remove();
+    if (reset.count !== 1) {
+      const current = await prisma.jobSourcingRequest.findUnique({
+        where: { id: existing.id },
+      });
+      const currentDiagnostics = current?.diagnostics as Record<
+        string,
+        unknown
+      > | null;
+      return NextResponse.json({
+        success: true,
+        requestId: existing.id,
+        status: current?.status ?? existing.status,
+        idempotent: true,
+        acquisitionGeneration:
+          current?.acquisitionGeneration ??
+          existing.acquisitionGeneration,
+        executionAttemptId:
+          current?.executionAttemptId ??
+          existing.executionAttemptId,
+        trackDecision: currentDiagnostics?.trackDecision ?? null,
+      });
+    }
+
+    const retriedRequest = await prisma.jobSourcingRequest.findUniqueOrThrow({
+      where: { id: existing.id },
+      select: { acquisitionGeneration: true },
+    });
+    if (startsNewAcquisition) {
+      await releaseAbandonedCrustdataReceiptPayloads(
+        tenantId,
+        existing.id,
+        existing.acquisitionGeneration,
+      ).catch((error) => {
+        log.warn(
+          {
+            requestId: existing.id,
+            acquisitionGeneration: existing.acquisitionGeneration,
+            error,
+          },
+          'Failed to release the explicitly abandoned Crustdata generation',
+        );
+      });
+    }
 
     const jobData: SourcingJobData = {
       requestId: existing.id,
       tenantId,
       externalJobId,
       callbackUrl: body.callbackUrl,
+      acquisitionGeneration: retriedRequest.acquisitionGeneration,
+      executionAttemptId,
       resolvedTrack: trackDecision,
     };
-    await queue.add('source', jobData, { jobId: existing.id });
+    await enqueueSourcingAttempt(jobData);
 
     return NextResponse.json(
       {
@@ -158,6 +276,8 @@ export async function POST(
         status: 'queued',
         idempotent: false,
         retried: true,
+        acquisitionGeneration: retriedRequest.acquisitionGeneration,
+        executionAttemptId,
         trackDecision: trackDecisionSummary,
       },
       { status: 202 },
@@ -174,6 +294,7 @@ export async function POST(
       callbackUrl: body.callbackUrl,
       status: 'queued',
       diagnostics: toJsonValue({ trackDecision }),
+      executionAttemptId,
     },
   });
 
@@ -183,9 +304,11 @@ export async function POST(
     tenantId,
     externalJobId,
     callbackUrl: body.callbackUrl,
+    acquisitionGeneration: req.acquisitionGeneration,
+    executionAttemptId,
     resolvedTrack: trackDecision,
   };
-  await getSourcingQueue().add('source', jobData, { jobId: req.id });
+  await enqueueSourcingAttempt(jobData);
 
   return NextResponse.json(
     {
@@ -193,9 +316,10 @@ export async function POST(
       requestId: req.id,
       status: 'queued',
       idempotent: false,
+      acquisitionGeneration: req.acquisitionGeneration,
+      executionAttemptId,
       trackDecision: trackDecisionSummary,
     },
     { status: 202 },
   );
 }
-

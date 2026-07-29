@@ -2,14 +2,22 @@ import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import type { CandidateForRanking } from "./ranking-new";
-import type {
-  CandidateIngestOptions,
-  CandidateIngestResult,
+import {
+  isConfirmedCandidateIngestResult,
+  type CandidateIngestOptions,
+  type CandidateIngestResult,
 } from "./activegraph-client";
 import {
   projectPublicCrustdataProfile,
   redactPublicContactText,
 } from "./public-profile-redaction";
+
+type SerializedCandidateIngestOptions = Omit<
+  CandidateIngestOptions,
+  "profileObservedAt"
+> & {
+  profileObservedAt?: string;
+};
 
 export interface PublicMemoryOutboxPayload {
   expectedGlobalCandidateId: string | null;
@@ -35,7 +43,7 @@ export interface PublicMemoryOutboxPayload {
       staleAfter: string;
     } | null;
   };
-  options: CandidateIngestOptions;
+  options: SerializedCandidateIngestOptions;
 }
 
 export interface PublicMemoryOutboxEnqueueInput {
@@ -130,6 +138,30 @@ function serializeCandidate(
   };
 }
 
+function serializeIngestOptions(
+  options: CandidateIngestOptions,
+): SerializedCandidateIngestOptions {
+  const { profileObservedAt, ...rest } = options;
+  return {
+    ...rest,
+    ...(profileObservedAt
+      ? { profileObservedAt: profileObservedAt.toISOString() }
+      : {}),
+  };
+}
+
+export function hydrateOutboxIngestOptions(
+  options: SerializedCandidateIngestOptions,
+): CandidateIngestOptions {
+  const { profileObservedAt, ...rest } = options;
+  return {
+    ...rest,
+    ...(profileObservedAt
+      ? { profileObservedAt: new Date(profileObservedAt) }
+      : {}),
+  };
+}
+
 export function hydrateOutboxCandidate(
   payload: PublicMemoryOutboxPayload,
 ): PublicMemoryOutboxEnqueueInput["candidate"] {
@@ -169,7 +201,7 @@ export async function enqueuePublicMemoryIngestOutbox({
       payload: {
         expectedGlobalCandidateId: expectedGlobalCandidateId ?? null,
         candidate: serializeCandidate(candidate),
-        options,
+        options: serializeIngestOptions(options),
       },
     }),
   );
@@ -367,7 +399,15 @@ export class PrismaPublicMemoryOutboxStore implements PublicMemoryOutboxStore {
     result: CandidateIngestResult;
     now: Date;
   }): Promise<boolean> {
-    if (!result.success || !result.globalCandidateId) return false;
+    if (
+      !isConfirmedCandidateIngestResult(
+        result,
+        null,
+        row.signalCandidateId,
+      )
+    ) {
+      return false;
+    }
     return prisma.$transaction(async (tx) => {
       const updated = await tx.$executeRaw`
         UPDATE "public_memory_ingest_outbox"

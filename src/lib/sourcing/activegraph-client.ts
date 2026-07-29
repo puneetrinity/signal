@@ -251,6 +251,36 @@ export function chunkPublicIdentityUrls(
   return chunks;
 }
 
+interface ActiveGraphCandidateResolveResponse {
+  candidate_id?: unknown;
+  global_candidate_id?: unknown;
+  resolution_status?: unknown;
+  source_record_id?: unknown;
+}
+
+export function isDurableActiveGraphCandidateResolve(
+  value: unknown,
+): value is ActiveGraphCandidateResolveResponse & {
+  candidate_id: string;
+  global_candidate_id: string;
+  resolution_status: 'created' | 'matched';
+  source_record_id: string;
+} {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const response = value as ActiveGraphCandidateResolveResponse;
+  return (
+    (response.resolution_status === 'created' ||
+      response.resolution_status === 'matched') &&
+    typeof response.candidate_id === 'string' &&
+    response.candidate_id.trim().length > 0 &&
+    normalizeGlobalCandidateId(response.global_candidate_id) !== null &&
+    typeof response.source_record_id === 'string' &&
+    response.source_record_id.trim().length > 0
+  );
+}
+
 /**
  * Builds the query text for vector pool search. Mirrors Memory's
  * build_candidate_embedding_text shape (name/headline/role/seniority,
@@ -912,6 +942,8 @@ export async function searchHomePool(
 export interface CandidateIngestOptions {
   publicMarket?: PublicMarket | null;
   publicCandidateRoleFamily?: RoleFamily | null;
+  profileObservedAt?: Date;
+  acquisitionGeneration?: number;
 }
 
 export interface CandidateIngestResult {
@@ -919,8 +951,34 @@ export interface CandidateIngestResult {
   signalCandidateId: string;
   memoryCandidateId: string | null;
   globalCandidateId: string | null;
+  sourceRecordId: string | null;
   resolutionStatus: string | null;
   errorCode?: string | null;
+}
+
+export function isConfirmedCandidateIngestResult(
+  result: CandidateIngestResult | null | undefined,
+  expectedGlobalCandidateId: string | null = null,
+  expectedSignalCandidateId: string | null = null,
+): result is CandidateIngestResult & {
+  success: true;
+  memoryCandidateId: string;
+  globalCandidateId: string;
+  sourceRecordId: string;
+} {
+  return Boolean(
+    result?.success &&
+      (result.resolutionStatus === 'created' ||
+        result.resolutionStatus === 'matched') &&
+      result.memoryCandidateId?.trim() &&
+      normalizeGlobalCandidateId(result.globalCandidateId) !== null &&
+      result.sourceRecordId?.trim() &&
+      result.sourceRecordId === result.signalCandidateId &&
+      (!expectedSignalCandidateId ||
+        result.signalCandidateId === expectedSignalCandidateId) &&
+      (!expectedGlobalCandidateId ||
+        result.globalCandidateId === expectedGlobalCandidateId),
+  );
 }
 
 type IngestableCandidate = CandidateForRanking & {
@@ -928,19 +986,17 @@ type IngestableCandidate = CandidateForRanking & {
   name?: string;
 };
 
-export async function ingestCandidateWithResult(
+export function buildActiveGraphCandidatePayload(
   tenantId: string,
   candidate: IngestableCandidate,
   tags: string[],
   requestId?: string,
   options: CandidateIngestOptions = {},
-): Promise<CandidateIngestResult> {
-  // Extract standard identifier format from ID (which is the LinkedIn URL)
+): Record<string, unknown> {
   let linkedinUrl = candidate.linkedinUrl || candidate.id;
   if (!linkedinUrl.startsWith('http')) {
     linkedinUrl = `https://www.linkedin.com/in/${linkedinUrl}`;
   }
-
   const sourceMetadata = {
     public_memory_surface: 'public_v1',
     ...(options.publicCandidateRoleFamily
@@ -953,7 +1009,7 @@ export async function ingestCandidateWithResult(
       ? { public_market: toActiveGraphPublicMarket(options.publicMarket) }
       : {}),
   };
-  const payload = {
+  return {
     signal_candidate_id: candidate.id,
     source_record_type: 'sourced_candidate',
     linkedinUrl,
@@ -970,7 +1026,25 @@ export async function ingestCandidateWithResult(
     tenant_id: tenantId,
     crustdata: projectPublicCrustdataProfile(candidate.crustdata),
     source_metadata: sourceMetadata,
+    profile_observed_at: options.profileObservedAt?.toISOString(),
+    acquisition_generation: options.acquisitionGeneration,
   };
+}
+
+export async function ingestCandidateWithResult(
+  tenantId: string,
+  candidate: IngestableCandidate,
+  tags: string[],
+  requestId?: string,
+  options: CandidateIngestOptions = {},
+): Promise<CandidateIngestResult> {
+  const payload = buildActiveGraphCandidatePayload(
+    tenantId,
+    candidate,
+    tags,
+    requestId,
+    options,
+  );
 
   const token = await signActiveGraphJWT(tenantId, 'kg:write', requestId);
   let response: Response;
@@ -996,6 +1070,7 @@ export async function ingestCandidateWithResult(
       signalCandidateId: candidate.id,
       memoryCandidateId: null,
       globalCandidateId: null,
+      sourceRecordId: null,
       resolutionStatus: null,
       errorCode: 'transport',
     };
@@ -1018,6 +1093,7 @@ export async function ingestCandidateWithResult(
       signalCandidateId: candidate.id,
       memoryCandidateId: null,
       globalCandidateId: null,
+      sourceRecordId: null,
       resolutionStatus: null,
       errorCode: `http_${response.status}`,
     };
@@ -1027,28 +1103,58 @@ export async function ingestCandidateWithResult(
     candidate_id?: unknown;
     global_candidate_id?: unknown;
     resolution_status?: unknown;
+    source_record_id?: unknown;
   } | null;
-  if (!data || typeof data.resolution_status !== 'string') {
+  if (!isDurableActiveGraphCandidateResolve(data)) {
     log.error(
-      { requestId, candidateId: candidate.id },
-      'ActiveGraph candidate ingest returned an invalid contract',
+      {
+        requestId,
+        tenantId,
+        candidateId: candidate.id,
+        resolutionStatus:
+          data && typeof data.resolution_status === 'string'
+            ? data.resolution_status
+            : null,
+      },
+      'ActiveGraph candidate ingest was not durably resolved',
     );
     return {
       success: false,
       signalCandidateId: candidate.id,
       memoryCandidateId: null,
       globalCandidateId: null,
-      resolutionStatus: null,
+      sourceRecordId: null,
+      resolutionStatus:
+        data && typeof data.resolution_status === 'string'
+          ? data.resolution_status
+          : null,
       errorCode: 'invalid_contract',
     };
   }
-  const success =
-    data.resolution_status === 'created' ||
-    data.resolution_status === 'matched';
+  if (data.source_record_id !== candidate.id) {
+    log.error(
+      {
+        requestId,
+        tenantId,
+        candidateId: candidate.id,
+        sourceRecordId: data.source_record_id,
+      },
+      'ActiveGraph candidate ingest resolved a different source record',
+    );
+    return {
+      success: false,
+      signalCandidateId: candidate.id,
+      memoryCandidateId: null,
+      globalCandidateId: null,
+      sourceRecordId: null,
+      resolutionStatus: data.resolution_status,
+      errorCode: 'invalid_contract',
+    };
+  }
   const globalCandidateId = normalizeGlobalCandidateId(
     data.global_candidate_id,
   );
-  if (success && !globalCandidateId) {
+  if (!globalCandidateId) {
     log.error(
       { requestId, candidateId: candidate.id },
       'ActiveGraph candidate ingest returned an invalid canonical ID',
@@ -1058,17 +1164,18 @@ export async function ingestCandidateWithResult(
       signalCandidateId: candidate.id,
       memoryCandidateId: null,
       globalCandidateId: null,
+      sourceRecordId: null,
       resolutionStatus: data.resolution_status,
       errorCode: 'invalid_contract',
     };
   }
 
   return {
-    success,
+    success: true,
     signalCandidateId: candidate.id,
-    memoryCandidateId:
-      typeof data.candidate_id === 'string' ? data.candidate_id : null,
+    memoryCandidateId: data.candidate_id as string,
     globalCandidateId,
+    sourceRecordId: data.source_record_id as string,
     resolutionStatus: data.resolution_status,
     errorCode: null,
   };
@@ -1127,6 +1234,7 @@ export async function ingestCandidateBatchWithResults(
             signalCandidateId: candidate.id,
             memoryCandidateId: null,
             globalCandidateId: null,
+            sourceRecordId: null,
             resolutionStatus: null,
             errorCode: 'unexpected',
           };

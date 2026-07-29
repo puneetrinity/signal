@@ -24,6 +24,39 @@ function extractLinkedInId(url: string): string | null {
   }
 }
 
+export function resolveProviderObservedAt(
+  existingUpdatedAt: Date | null | undefined,
+  providerObservedAt: Date | undefined,
+  now = new Date(),
+): Date {
+  const observedAt = providerObservedAt ?? now;
+  return existingUpdatedAt && existingUpdatedAt > observedAt
+    ? existingUpdatedAt
+    : observedAt;
+}
+
+export function providerObservationIsOlder(
+  existingUpdatedAt: Date | null | undefined,
+  providerObservedAt: Date | undefined,
+): boolean {
+  return Boolean(
+    providerObservedAt &&
+      existingUpdatedAt &&
+      existingUpdatedAt > providerObservedAt,
+  );
+}
+
+function isUniqueConstraintError(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      error.code === 'P2002',
+  );
+}
+
+const MAX_CANDIDATE_WRITE_ATTEMPTS = 5;
+
 export async function upsertDiscoveredCandidates(
   tenantId: string,
   profiles: ProfileSummary[],
@@ -32,6 +65,9 @@ export async function upsertDiscoveredCandidates(
   options: {
     captureSource?: string;
     preserveExistingProvenance?: boolean;
+    providerObservedAt?: Date;
+    providerObservedAtByRung?: ReadonlyMap<string, Date>;
+    failOnError?: boolean;
   } = {},
 ): Promise<Map<string, string>> {
   const candidateMap = new Map<string, string>();
@@ -39,7 +75,7 @@ export async function upsertDiscoveredCandidates(
   const chunkSize = 25;
   for (let i = 0; i < profiles.length; i += chunkSize) {
     const chunk = profiles.slice(i, i + chunkSize);
-    await Promise.all(
+    const outcomes = await Promise.allSettled(
       chunk.map(async (result) => {
         const linkedinId = result.canonicalLinkedinId || extractLinkedInId(result.linkedinUrl);
         if (!linkedinId) return;
@@ -59,73 +95,170 @@ export async function upsertDiscoveredCandidates(
         }
 
         try {
-          const existing = await prisma.candidate.findUnique({
-            where: { tenantId_linkedinId: { tenantId, linkedinId } },
-            select: {
-              nameHint: true,
-              headlineHint: true,
-              locationHint: true,
-              companyHint: true,
-              profilePictureUrl: true,
-            },
-          });
+          const sourcingMetadata = (
+            result.providerMeta as
+              | { sourcing?: { ladderRung?: string } }
+              | undefined
+          )?.sourcing;
+          const rungObservedAt = sourcingMetadata?.ladderRung
+            ? options?.providerObservedAtByRung?.get(
+                sourcingMetadata.ladderRung,
+              )
+            : undefined;
+          const providerObservedAt =
+            rungObservedAt ?? options?.providerObservedAt ?? new Date();
+          const hasExplicitProviderObservation = Boolean(
+            rungObservedAt ?? options?.providerObservedAt,
+          );
+          let candidateId: string | null = null;
 
-          const updateData: Prisma.CandidateUpdateInput = {
-            updatedAt: new Date(),
-            ...(options.preserveExistingProvenance
-              ? {}
-              : {
-                  searchTitle: result.title,
-                  searchSnippet: result.snippet,
-                  searchMeta: ({
-                    ...(result.providerMeta ?? {}),
-                    ...(result.crustdata
-                      ? { crustdata: result.crustdata }
+          // Optimistic compare-and-swap makes provider observation ordering
+          // atomic. If another run updates this person between our read and
+          // write, the timestamp predicate fails and we re-read before deciding
+          // whether the older receipt is still allowed to write.
+          for (
+            let attempt = 0;
+            attempt < MAX_CANDIDATE_WRITE_ATTEMPTS;
+            attempt += 1
+          ) {
+            const existing = await prisma.candidate.findUnique({
+              where: { tenantId_linkedinId: { tenantId, linkedinId } },
+              select: {
+                id: true,
+                nameHint: true,
+                headlineHint: true,
+                locationHint: true,
+                companyHint: true,
+                profilePictureUrl: true,
+                updatedAt: true,
+              },
+            });
+
+            if (
+              existing &&
+              providerObservationIsOlder(
+                existing.updatedAt,
+                providerObservedAt,
+              )
+            ) {
+              candidateId = existing.id;
+              break;
+            }
+
+            if (!existing) {
+              try {
+                const created = await prisma.candidate.create({
+                  data: {
+                    tenantId,
+                    linkedinUrl: result.linkedinUrl,
+                    linkedinId,
+                    searchTitle: result.title,
+                    searchSnippet: result.snippet,
+                    searchMeta: ({
+                      ...(result.providerMeta ?? {}),
+                      ...(result.crustdata
+                        ? { crustdata: result.crustdata }
+                        : {}),
+                    }) as Prisma.InputJsonValue,
+                    nameHint,
+                    headlineHint,
+                    locationHint,
+                    companyHint,
+                    captureSource: options.captureSource ?? 'sourcing',
+                    searchQuery,
+                    searchProvider,
+                    ...(hasExplicitProviderObservation
+                      ? {
+                          createdAt: providerObservedAt,
+                          updatedAt: providerObservedAt,
+                        }
                       : {}),
-                  }) as Prisma.InputJsonValue,
-                  searchProvider,
-                }),
-          };
-          // Only overwrite profilePictureUrl if we don't already have one
-          // (enrichment-sourced pictures are higher quality than Crustdata CDN URLs).
-          if (result.profilePictureUrl && (!existing || !existing.profilePictureUrl)) {
-            updateData.profilePictureUrl = result.profilePictureUrl;
+                    ...(result.profilePictureUrl
+                      ? { profilePictureUrl: result.profilePictureUrl }
+                      : {}),
+                  },
+                  select: { id: true },
+                });
+                candidateId = created.id;
+                break;
+              } catch (error) {
+                if (isUniqueConstraintError(error)) continue;
+                throw error;
+              }
+            }
+
+            const updateData: Prisma.CandidateUpdateManyMutationInput = {
+              ...(options.preserveExistingProvenance
+                ? {}
+                : {
+                    searchTitle: result.title,
+                    searchSnippet: result.snippet,
+                    searchMeta: ({
+                      ...(result.providerMeta ?? {}),
+                      ...(result.crustdata
+                        ? { crustdata: result.crustdata }
+                        : {}),
+                    }) as Prisma.InputJsonValue,
+                    searchProvider,
+                  }),
+              updatedAt: resolveProviderObservedAt(
+                existing.updatedAt,
+                providerObservedAt,
+              ),
+            };
+            // Only overwrite profilePictureUrl if we don't already have one
+            // (enrichment-sourced pictures are higher quality than Crustdata CDN URLs).
+            if (result.profilePictureUrl && !existing.profilePictureUrl) {
+              updateData.profilePictureUrl = result.profilePictureUrl;
+            }
+            if (shouldReplaceHint(existing.nameHint, nameHint)) {
+              updateData.nameHint = nameHint;
+            }
+            if (shouldReplaceHint(existing.headlineHint, headlineHint)) {
+              updateData.headlineHint = headlineHint;
+            }
+            if (
+              shouldReplaceLocationHint(existing.locationHint, locationHint)
+            ) {
+              updateData.locationHint = locationHint;
+            }
+            if (
+              shouldReplaceCompanyHint(existing.companyHint, companyHint)
+            ) {
+              updateData.companyHint = companyHint;
+            }
+
+            const updated = await prisma.candidate.updateMany({
+              where: {
+                id: existing.id,
+                tenantId,
+                updatedAt: existing.updatedAt,
+              },
+              data: updateData,
+            });
+            if (updated.count === 1) {
+              candidateId = existing.id;
+              break;
+            }
           }
-          if (shouldReplaceHint(existing?.nameHint ?? null, nameHint)) updateData.nameHint = nameHint;
-          if (shouldReplaceHint(existing?.headlineHint ?? null, headlineHint)) updateData.headlineHint = headlineHint;
-          if (shouldReplaceLocationHint(existing?.locationHint ?? null, locationHint)) updateData.locationHint = locationHint;
-          if (shouldReplaceCompanyHint(existing?.companyHint ?? null, companyHint)) updateData.companyHint = companyHint;
 
-          const candidate = await prisma.candidate.upsert({
-            where: { tenantId_linkedinId: { tenantId, linkedinId } },
-            update: updateData,
-            create: {
-              tenantId,
-              linkedinUrl: result.linkedinUrl,
-              linkedinId,
-              searchTitle: result.title,
-              searchSnippet: result.snippet,
-              searchMeta: ({
-                ...(result.providerMeta ?? {}),
-                ...(result.crustdata ? { crustdata: result.crustdata } : {}),
-              }) as Prisma.InputJsonValue,
-              nameHint,
-              headlineHint,
-              locationHint,
-              companyHint,
-              captureSource: options.captureSource ?? 'sourcing',
-              searchQuery,
-              searchProvider,
-              ...(result.profilePictureUrl ? { profilePictureUrl: result.profilePictureUrl } : {}),
-            },
-          });
-
-          candidateMap.set(linkedinId, candidate.id);
+          if (!candidateId) {
+            throw new Error(
+              `Candidate ${linkedinId} changed repeatedly during provider observation write`,
+            );
+          }
+          candidateMap.set(linkedinId, candidateId);
         } catch (error) {
           console.error(`[sourcing] Failed to upsert candidate ${linkedinId}:`, error);
+          if (options?.failOnError) throw error;
         }
       })
     );
+    const failed = outcomes.find(
+      (outcome): outcome is PromiseRejectedResult =>
+        outcome.status === 'rejected',
+    );
+    if (failed) throw failed.reason;
   }
 
   return candidateMap;

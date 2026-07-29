@@ -52,6 +52,8 @@ export interface SourcingJobData {
   tenantId: string;
   externalJobId: string;
   callbackUrl: string;
+  acquisitionGeneration: number;
+  executionAttemptId: string;
   resolvedTrack?: TrackDecision;
 }
 
@@ -67,6 +69,8 @@ export interface SourcingCallbackPayload {
   version: 1;
   requestId: string;
   externalJobId: string;
+  acquisitionGeneration?: number;
+  executionAttemptId?: string;
   status: 'complete' | 'partial' | 'failed';
   candidateCount: number;
   error?: string;
