@@ -5,6 +5,7 @@ import {
   isForbiddenCandidateForeignKey,
   makeGlobalTemporaryCandidateId,
   parseGlobalTemporaryCandidateId,
+  publicMaterializationLinkedinAnchorsAgree,
   resolvePublicCandidateRoleFamily,
 } from '../public-memory-materialization';
 
@@ -30,6 +31,39 @@ describe('public Memory materialization guards', () => {
         `global:${globalCandidateId}`,
       ]),
     ).toThrow(/Refusing to persist unresolved candidate IDs/);
+  });
+
+  it('requires the public LinkedIn URL and ID to identify the same person', () => {
+    expect(
+      publicMaterializationLinkedinAnchorsAgree({
+        linkedinUrl: 'https://www.linkedin.com/in/Alice',
+        canonicalLinkedinId: 'alice',
+      }),
+    ).toBe(true);
+    expect(
+      publicMaterializationLinkedinAnchorsAgree({
+        linkedinUrl: 'https://www.linkedin.com/pub/Alice',
+        canonicalLinkedinId: 'alice',
+      }),
+    ).toBe(true);
+    expect(
+      publicMaterializationLinkedinAnchorsAgree({
+        linkedinUrl: 'https://www.linkedin.com/in/bob',
+        canonicalLinkedinId: 'alice',
+      }),
+    ).toBe(false);
+    expect(
+      publicMaterializationLinkedinAnchorsAgree({
+        linkedinUrl: 'https://evillinkedin.com/in/alice',
+        canonicalLinkedinId: 'alice',
+      }),
+    ).toBe(false);
+    expect(
+      publicMaterializationLinkedinAnchorsAgree({
+        linkedinUrl: 'ftp://www.linkedin.com/in/alice',
+        canonicalLinkedinId: 'alice',
+      }),
+    ).toBe(false);
   });
 
   it('derives public role evidence from the candidate, never the job', () => {

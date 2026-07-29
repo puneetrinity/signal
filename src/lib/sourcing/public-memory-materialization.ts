@@ -1,10 +1,13 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/prisma';
 import { resolveRoleDeterministic, type RoleFamily } from '@/lib/taxonomy/role-service';
+import type { ProfileSummary } from '@/types/linkedin';
 import type { CrustdataProfileResponse } from './crustdata-client';
+import { extractLinkedInIdFromUrl } from './discovery';
 import { buildObservedPublicMarket, type PublicMarket } from './public-memory';
 import { normalizeGlobalCandidateId } from './global-candidate-id';
 import { isTenantPrivateTemporaryId } from './tenant-private-memory';
+import { upsertDiscoveredCandidates } from './upsert-candidates';
 
 const GLOBAL_TEMP_PREFIX = 'global:';
 
@@ -18,6 +21,52 @@ export interface CandidateGlobalLinkResult {
   candidateId: string;
   created: boolean;
   raceResolved: boolean;
+}
+
+export type PublicMemoryMaterializationFailureCode =
+  | 'missing_public_profile'
+  | 'missing_linkedin_anchor'
+  | 'linkedin_anchor_mismatch'
+  | 'candidate_upsert_failed'
+  | 'candidate_upsert_skipped'
+  | 'global_link_failed';
+
+export interface PublicMemoryMaterializationFailure {
+  globalCandidateId: string | null;
+  code: PublicMemoryMaterializationFailureCode;
+}
+
+export interface PublicMemoryMaterializationEntry {
+  temporaryId: string;
+  globalCandidateId: string;
+  profile: ProfileSummary & { canonicalLinkedinId: string };
+}
+
+export interface PublicMemoryMaterializationResult {
+  materializedByTemporaryId: Map<string, string>;
+  failures: PublicMemoryMaterializationFailure[];
+  raceWins: number;
+}
+
+const MATERIALIZATION_CONCURRENCY = 10;
+export const MAX_MATERIALIZATION_FAILURE_DETAILS = 20;
+type CandidateGlobalLinkClient = Pick<
+  Prisma.TransactionClient,
+  'candidate' | 'candidateGlobalLink'
+>;
+
+class MaterializationRaceWinner extends Error {
+  constructor(readonly candidateId: string) {
+    super('Another local candidate already owns this Memory identity');
+    this.name = 'MaterializationRaceWinner';
+  }
+}
+
+class MaterializationStageError extends Error {
+  constructor(readonly stage: 'upsert' | 'link') {
+    super(`Public Memory materialization ${stage} failed`);
+    this.name = 'MaterializationStageError';
+  }
 }
 
 export function makeGlobalTemporaryCandidateId(globalCandidateId: string): string {
@@ -52,6 +101,196 @@ export function assertPersistableCandidateIds(candidateIds: string[]): void {
       `Refusing to persist unresolved candidate IDs: ${invalid.slice(0, 5).join(', ')}`,
     );
   }
+}
+
+export function publicMaterializationLinkedinAnchorsAgree(
+  profile: Pick<ProfileSummary, 'linkedinUrl'> & {
+    canonicalLinkedinId: string;
+  },
+): boolean {
+  const urlLinkedinId = extractLinkedInIdFromUrl(profile.linkedinUrl);
+  return Boolean(
+    urlLinkedinId &&
+      urlLinkedinId.toLowerCase() ===
+        profile.canonicalLinkedinId.trim().toLowerCase(),
+  );
+}
+
+export function applyCandidateMaterializationResults<
+  T extends { candidateId: string },
+>({
+  candidates,
+  replacements,
+  publicTemporaryCandidateIds,
+}: {
+  candidates: T[];
+  replacements: ReadonlyMap<string, string>;
+  publicTemporaryCandidateIds: ReadonlySet<string>;
+}): {
+  candidates: T[];
+  skippedTemporaryCandidateIds: string[];
+} {
+  const resolved: T[] = [];
+  const skippedTemporaryCandidateIds: string[] = [];
+  for (const candidate of candidates) {
+    const replacement = replacements.get(candidate.candidateId);
+    if (replacement) {
+      resolved.push({ ...candidate, candidateId: replacement });
+      continue;
+    }
+    if (publicTemporaryCandidateIds.has(candidate.candidateId)) {
+      skippedTemporaryCandidateIds.push(candidate.candidateId);
+      continue;
+    }
+    resolved.push(candidate);
+  }
+  return { candidates: resolved, skippedTemporaryCandidateIds };
+}
+
+export async function materializePublicMemoryCandidates({
+  tenantId,
+  entries,
+}: {
+  tenantId: string;
+  entries: PublicMemoryMaterializationEntry[];
+}): Promise<PublicMemoryMaterializationResult> {
+  const outcomes: Array<
+    | {
+        temporaryId: string;
+        candidateId: string;
+        raceResolved: boolean;
+      }
+    | { failure: PublicMemoryMaterializationFailure }
+  > = [];
+
+  for (
+    let offset = 0;
+    offset < entries.length;
+    offset += MATERIALIZATION_CONCURRENCY
+  ) {
+    const chunk = entries.slice(
+      offset,
+      offset + MATERIALIZATION_CONCURRENCY,
+    );
+    outcomes.push(
+      ...(await Promise.all(
+        chunk.map(async (entry) => {
+          if (!publicMaterializationLinkedinAnchorsAgree(entry.profile)) {
+            return {
+              failure: {
+                globalCandidateId:
+                  normalizeGlobalCandidateId(entry.globalCandidateId),
+                code: 'linkedin_anchor_mismatch' as const,
+              },
+            };
+          }
+
+          try {
+            const link = await prisma.$transaction(
+              async (transaction) => {
+                let candidateMap: Map<string, string>;
+                try {
+                  candidateMap = await upsertDiscoveredCandidates(
+                    tenantId,
+                    [entry.profile],
+                    'public_memory_hydration',
+                    'activegraph_public',
+                    {
+                      failOnError: true,
+                      adoptCaseVariantIdentity: true,
+                      db: transaction,
+                    },
+                  );
+                } catch {
+                  throw new MaterializationStageError('upsert');
+                }
+                const candidateId = candidateMap.get(
+                  entry.profile.canonicalLinkedinId,
+                );
+                if (!candidateId) return null;
+                try {
+                  const linked = await ensureCandidateGlobalLink({
+                    tenantId,
+                    candidateId,
+                    globalCandidateId: entry.globalCandidateId,
+                    matchMethod: 'global_id_exact',
+                    db: transaction,
+                  });
+                  if (linked.candidateId !== candidateId) {
+                    throw new MaterializationRaceWinner(
+                      linked.candidateId,
+                    );
+                  }
+                  return linked;
+                } catch (error) {
+                  if (error instanceof MaterializationRaceWinner) {
+                    throw error;
+                  }
+                  throw new MaterializationStageError('link');
+                }
+              },
+            );
+            if (!link) {
+              return {
+                failure: {
+                  globalCandidateId:
+                    normalizeGlobalCandidateId(
+                      entry.globalCandidateId,
+                    ),
+                  code: 'candidate_upsert_skipped' as const,
+                },
+              };
+            }
+            return {
+              temporaryId: entry.temporaryId,
+              candidateId: link.candidateId,
+              raceResolved: link.raceResolved,
+            };
+          } catch (error) {
+            if (error instanceof MaterializationRaceWinner) {
+              return {
+                temporaryId: entry.temporaryId,
+                candidateId: error.candidateId,
+                raceResolved: true,
+              };
+            }
+            return {
+              failure: {
+                globalCandidateId:
+                  normalizeGlobalCandidateId(entry.globalCandidateId),
+                code:
+                  error instanceof MaterializationStageError &&
+                  error.stage === 'link'
+                    ? ('global_link_failed' as const)
+                    : ('candidate_upsert_failed' as const),
+              },
+            };
+          }
+        }),
+      )),
+    );
+  }
+
+  const materializedByTemporaryId = new Map<string, string>();
+  const failures: PublicMemoryMaterializationFailure[] = [];
+  let raceWins = 0;
+  for (const outcome of outcomes) {
+    if ('failure' in outcome) {
+      failures.push(outcome.failure);
+      continue;
+    }
+    materializedByTemporaryId.set(
+      outcome.temporaryId,
+      outcome.candidateId,
+    );
+    if (outcome.raceResolved) raceWins++;
+  }
+  failures.sort((left, right) =>
+    `${left.globalCandidateId}:${left.code}`.localeCompare(
+      `${right.globalCandidateId}:${right.code}`,
+    ),
+  );
+  return { materializedByTemporaryId, failures, raceWins };
 }
 
 export function resolvePublicCandidateRoleFamily(
@@ -131,19 +370,21 @@ export async function ensureCandidateGlobalLink({
   globalCandidateId,
   matchMethod,
   linkConfidence,
+  db = prisma,
 }: {
   tenantId: string;
   candidateId: string;
   globalCandidateId: string;
   matchMethod: string;
   linkConfidence?: number | null;
+  db?: CandidateGlobalLinkClient;
 }): Promise<CandidateGlobalLinkResult> {
   const canonicalGlobalCandidateId =
     normalizeGlobalCandidateId(globalCandidateId);
   if (!canonicalGlobalCandidateId) {
     throw new Error(`Invalid Memory global candidate UUID: ${globalCandidateId}`);
   }
-  const tenantCandidate = await prisma.candidate.findFirst({
+  const tenantCandidate = await db.candidate.findFirst({
     where: { id: candidateId, tenantId },
     select: { id: true },
   });
@@ -153,7 +394,7 @@ export async function ensureCandidateGlobalLink({
     );
   }
 
-  const linkedByGlobal = await prisma.candidateGlobalLink.findUnique({
+  const linkedByGlobal = await db.candidateGlobalLink.findUnique({
     where: {
       tenantId_globalCandidateId: {
         tenantId,
@@ -164,7 +405,7 @@ export async function ensureCandidateGlobalLink({
   });
   if (linkedByGlobal) {
     if (linkedByGlobal.candidateId === candidateId) {
-      await prisma.candidateGlobalLink.update({
+      await db.candidateGlobalLink.update({
         where: {
           tenantId_globalCandidateId: {
             tenantId,
@@ -184,7 +425,7 @@ export async function ensureCandidateGlobalLink({
     };
   }
 
-  const linkedByCandidate = await prisma.candidateGlobalLink.findUnique({
+  const linkedByCandidate = await db.candidateGlobalLink.findUnique({
     where: { candidateId },
     select: {
       tenantId: true,
@@ -196,7 +437,7 @@ export async function ensureCandidateGlobalLink({
       linkedByCandidate.tenantId === tenantId &&
       linkedByCandidate.globalCandidateId === canonicalGlobalCandidateId
     ) {
-      await prisma.candidateGlobalLink.update({
+      await db.candidateGlobalLink.update({
         where: { candidateId },
         data: {
           matchMethod,
@@ -211,7 +452,7 @@ export async function ensureCandidateGlobalLink({
   }
 
   try {
-    await prisma.candidateGlobalLink.create({
+    await db.candidateGlobalLink.create({
       data: {
         tenantId,
         candidateId,
@@ -224,7 +465,7 @@ export async function ensureCandidateGlobalLink({
   } catch (error) {
     if (!isUniqueViolation(error)) throw error;
 
-    const raceWinner = await prisma.candidateGlobalLink.findUnique({
+    const raceWinner = await db.candidateGlobalLink.findUnique({
       where: {
         tenantId_globalCandidateId: {
           tenantId,
@@ -241,7 +482,7 @@ export async function ensureCandidateGlobalLink({
       };
     }
 
-    const candidateWinner = await prisma.candidateGlobalLink.findUnique({
+    const candidateWinner = await db.candidateGlobalLink.findUnique({
       where: { candidateId },
       select: {
         tenantId: true,

@@ -56,11 +56,17 @@ import {
   type PublicMarket,
 } from './public-memory';
 import {
+  applyCandidateMaterializationResults,
   assertPersistableCandidateIds,
   buildObservedCandidatePublicMarket,
   ensureCandidateGlobalLink,
+  materializePublicMemoryCandidates,
   makeGlobalTemporaryCandidateId,
+  MAX_MATERIALIZATION_FAILURE_DETAILS,
+  parseGlobalTemporaryCandidateId,
   resolvePublicCandidateRoleFamily,
+  type PublicMemoryMaterializationEntry,
+  type PublicMemoryMaterializationFailure,
 } from './public-memory-materialization';
 import type {
   GlobalPoolSearchResult,
@@ -82,6 +88,7 @@ import {
   candidatePublicIdentityKey,
   expectedGlobalCandidateIdForCandidate,
 } from './public-memory-identity';
+import { persistSourcingCandidatesForRequest } from './sourcing-candidate-persistence';
 
 import {
   logSourcingRaw,
@@ -341,6 +348,8 @@ interface PublicMemoryTelemetry {
   privateSkippedNoLinkedin: number;
   materializedCandidates: number;
   materializationRaceWins: number;
+  materializationFailures: number;
+  materializationFailureDetails: PublicMemoryMaterializationFailure[];
   exactExclusion: PublicMemoryExclusionTelemetry;
   spillExclusion: PublicMemoryExclusionTelemetry | null;
   ingestQueued: number;
@@ -478,6 +487,8 @@ export async function runSourcingOrchestrator(
     privateSkippedNoLinkedin: 0,
     materializedCandidates: 0,
     materializationRaceWins: 0,
+    materializationFailures: 0,
+    materializationFailureDetails: [],
     exactExclusion: {
       marketKeys: [],
       source: 'off',
@@ -518,34 +529,17 @@ export async function runSourcingOrchestrator(
   };
   const persistSourcingCandidates = async (
     data: Prisma.JobSourcingCandidateCreateManyInput[],
-  ): Promise<void> => {
-    await prisma.$transaction(async (transaction) => {
-      if (executionFence) {
-        // Lock the request row while replacing its candidate set. A stalled
-        // BullMQ delivery can take over by changing processingLeaseId, but it
-        // cannot do so between this fence check and the candidate commit.
-        const current = await transaction.$queryRaw<Array<{ id: string }>>`
-          SELECT "id"
-          FROM "job_sourcing_requests"
-          WHERE "id" = ${requestId}
-            AND "tenantId" = ${tenantId}
-            AND "acquisition_generation" = ${acquisitionGeneration}
-            AND "execution_attempt_id" = ${executionAttemptId}
-            AND "processing_lease_id" = ${processingLeaseId}
-            AND "status" = 'processing'
-          FOR UPDATE
-        `;
-        if (current.length !== 1) {
-          throw new Error('Sourcing execution was superseded');
-        }
-      }
-
-      await transaction.jobSourcingCandidate.deleteMany({
-        where: { sourcingRequestId: requestId },
-      });
-      await transaction.jobSourcingCandidate.createMany({ data });
+  ): Promise<void> =>
+    persistSourcingCandidatesForRequest({
+      requestId,
+      tenantId,
+      data,
+      executionFence,
+      materializationDiagnostics: {
+        failureCount: publicMemory.materializationFailures,
+        failures: publicMemory.materializationFailureDetails,
+      },
     });
-  };
 
   const sendProgressCallback = async (event: string, eventData: any = {}) => {
     try {
@@ -1323,15 +1317,20 @@ export async function runSourcingOrchestrator(
     );
     if (temporaryIds.length === 0) return new Map();
 
-    const profiles = temporaryIds.map((temporaryId) => {
+    const entries: PublicMemoryMaterializationEntry[] = [];
+    const preparationFailures: PublicMemoryMaterializationFailure[] = [];
+    for (const temporaryId of temporaryIds) {
       const result = publicTemporaryCandidateById.get(temporaryId);
       const rankedCandidate = poolForRankingById.get(temporaryId);
       const publicProfile =
         rankedCandidate?.crustdata ?? result?.crustdata_profile ?? null;
       if (!result || !publicProfile) {
-        throw new Error(
-          `Public Memory candidate ${temporaryId} has no public profile`,
-        );
+        preparationFailures.push({
+          globalCandidateId:
+            result?.id ?? parseGlobalTemporaryCandidateId(temporaryId),
+          code: 'missing_public_profile',
+        });
+        continue;
       }
       const linkedinUrl =
         result.linkedin_url ??
@@ -1342,11 +1341,13 @@ export async function runSourcingOrchestrator(
         result.linkedin_id ??
         (linkedinUrl ? extractLinkedInIdFromUrl(linkedinUrl) : null);
       if (!linkedinUrl || !linkedinId) {
-        throw new Error(
-          `Public Memory candidate ${temporaryId} has no LinkedIn anchor`,
-        );
+        preparationFailures.push({
+          globalCandidateId: result.id,
+          code: 'missing_linkedin_anchor',
+        });
+        continue;
       }
-      return {
+      entries.push({
         temporaryId,
         globalCandidateId: result.id,
         profile: {
@@ -1382,39 +1383,58 @@ export async function runSourcingOrchestrator(
             },
           },
         },
-      };
-    });
+      });
+    }
 
-    const { upsertDiscoveredCandidates } = await import(
-      './upsert-candidates'
-    );
-    const candidateMap = await upsertDiscoveredCandidates(
+    const materialization = await materializePublicMemoryCandidates({
       tenantId,
-      profiles.map((entry) => entry.profile),
-      'public_memory_hydration',
-      'activegraph_public',
-    );
-    const materializedByTemporaryId = new Map<string, string>();
-    for (const entry of profiles) {
-      const candidateId = candidateMap.get(entry.profile.canonicalLinkedinId);
-      if (!candidateId) {
-        throw new Error(
-          `Failed to materialize public Memory candidate ${entry.temporaryId}`,
+      entries,
+    });
+    const failures = [
+      ...preparationFailures,
+      ...materialization.failures,
+    ];
+    for (
+      const candidateId of
+      materialization.materializedByTemporaryId.values()
+    ) {
+      materializedPublicLocalIds.add(candidateId);
+    }
+    publicMemory.materializedCandidates +=
+      materialization.materializedByTemporaryId.size;
+    publicMemory.materializationRaceWins += materialization.raceWins;
+    publicMemory.linksRetained +=
+      materialization.materializedByTemporaryId.size;
+    publicMemory.linkFailures += failures.filter(
+      (failure) => failure.code === 'global_link_failed',
+    ).length;
+
+    if (failures.length > 0) {
+      publicMemory.materializationFailures += failures.length;
+      const remainingDetailCapacity =
+        MAX_MATERIALIZATION_FAILURE_DETAILS -
+        publicMemory.materializationFailureDetails.length;
+      if (remainingDetailCapacity > 0) {
+        publicMemory.materializationFailureDetails.push(
+          ...failures.slice(0, remainingDetailCapacity),
         );
       }
-      const link = await ensureCandidateGlobalLink({
-        tenantId,
-        candidateId,
-        globalCandidateId: entry.globalCandidateId,
-        matchMethod: 'global_id_exact',
-      });
-      materializedByTemporaryId.set(entry.temporaryId, link.candidateId);
-      materializedPublicLocalIds.add(link.candidateId);
-      publicMemory.materializedCandidates++;
-      if (link.raceResolved) publicMemory.materializationRaceWins++;
-      publicMemory.linksRetained++;
+      log.warn(
+        {
+          requestId,
+          failureCount: failures.length,
+          failureCodes: failures.reduce<Record<string, number>>(
+            (counts, failure) => ({
+              ...counts,
+              [failure.code]: (counts[failure.code] ?? 0) + 1,
+            }),
+            {},
+          ),
+        },
+        'Skipped public Memory candidates that could not be materialized',
+      );
     }
-    return materializedByTemporaryId;
+    return materialization.materializedByTemporaryId;
   };
 
   const materializeServedTenantPrivateCandidates = async (
@@ -3134,7 +3154,7 @@ export async function runSourcingOrchestrator(
 
             console.log(`💾 [ORCHESTRATOR] UPSERTED ${candidateMap.size} CANDIDATES TO DB (${poolRefreshProfiles.length} pool-blob refreshes)`);
 
-            const allRankedWithIds = scored.slice(0, 100).map((sc) => {
+            const rankedWithCandidateIds = scored.slice(0, 100).map((sc) => {
               const profile = profileByUrl.get(sc.candidateId);
               const poolCandidate = poolForRankingById.get(sc.candidateId);
               const publicResult =
@@ -3166,7 +3186,9 @@ export async function runSourcingOrchestrator(
                   : poolCandidate?.id);
 
               return {
-                candidateId: dbId || '',
+                candidateId:
+                  dbId ??
+                  (publicResult ? sc.candidateId : ''),
                 linkedinUrl: linkedinUrl,
                 name:
                   profile?.name ||
@@ -3180,7 +3202,15 @@ export async function runSourcingOrchestrator(
                 locationMatchType: sc.locationMatchType,
                 fitBreakdown: sc.fitBreakdown,
               };
-            }).filter((c) => c.candidateId);
+            }).filter((candidate) => candidate.candidateId);
+            const allRankedWithIds =
+              applyCandidateMaterializationResults({
+                candidates: rankedWithCandidateIds,
+                replacements: materializedByTemporaryId,
+                publicTemporaryCandidateIds: new Set(
+                  publicTemporaryCandidateById.keys(),
+                ),
+              }).candidates;
 
             crustdataPrimaryList = allRankedWithIds;
             crustdataReserveList = []; // reserve never served — skip DB write
@@ -4192,11 +4222,23 @@ export async function runSourcingOrchestrator(
     ...legacyPublicMaterializedByTemporaryId,
     ...legacyPrivateMaterializedByCandidateId,
   ]);
-  for (const candidate of assembled) {
-    const localCandidateId = legacyMaterializedByTemporaryId.get(
-      candidate.candidateId,
+  const legacyMaterialization = applyCandidateMaterializationResults({
+    candidates: assembled,
+    replacements: legacyMaterializedByTemporaryId,
+    publicTemporaryCandidateIds: new Set(
+      publicTemporaryCandidateById.keys(),
+    ),
+  });
+  if (
+    legacyMaterialization.skippedTemporaryCandidateIds.length > 0 ||
+    legacyMaterializedByTemporaryId.size > 0
+  ) {
+    assembled.splice(
+      0,
+      assembled.length,
+      ...legacyMaterialization.candidates,
     );
-    if (localCandidateId) candidate.candidateId = localCandidateId;
+    renumberRanks();
   }
 
   // Dedupe by candidateId (keep first/best-ranked) so a candidate present in
