@@ -120,6 +120,37 @@ describe("public Memory ingest outbox enqueue", () => {
     expect(rows[0]?.payload.candidate.crustdata.contact).toBeUndefined();
   });
 
+  it("round-trips the paid observation time and acquisition generation", async () => {
+    const observedAt = new Date("2026-07-27T01:02:03.000Z");
+    const timed = input("alice");
+    timed.options = {
+      profileObservedAt: observedAt,
+      acquisitionGeneration: 4,
+    };
+    const {
+      enqueuePublicMemoryIngestOutbox,
+      hydrateOutboxIngestOptions,
+    } = await import("../public-memory-ingest-outbox");
+
+    await enqueuePublicMemoryIngestOutbox({
+      tenantId: "org_1",
+      sourcingRequestId: "request-1",
+      candidates: [timed],
+    });
+
+    const rows = JSON.parse(String(executeRaw.mock.calls[0]?.[1]));
+    expect(rows[0]?.payload.options).toEqual({
+      profileObservedAt: observedAt.toISOString(),
+      acquisitionGeneration: 4,
+    });
+    expect(
+      hydrateOutboxIngestOptions(rows[0].payload.options),
+    ).toEqual({
+      profileObservedAt: observedAt,
+      acquisitionGeneration: 4,
+    });
+  });
+
   it("refuses contradictory canonical receipts for one identity", async () => {
     const { dedupePublicMemoryOutboxInputs } = await import(
       "../public-memory-ingest-outbox"

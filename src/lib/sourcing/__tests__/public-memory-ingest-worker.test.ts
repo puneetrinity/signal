@@ -9,6 +9,9 @@ import type {
   PublicMemoryOutboxStore,
 } from '../public-memory-ingest-outbox';
 
+const GLOBAL_ONE = '11111111-1111-4111-8111-111111111111';
+const GLOBAL_TWO = '22222222-2222-4222-8222-222222222222';
+
 function payload(
   expectedGlobalCandidateId: string | null = null,
 ): PublicMemoryOutboxPayload {
@@ -50,12 +53,14 @@ function row(
 function ingestResult(
   globalCandidateId: string | null,
   success = true,
+  signalCandidateId = 'signal',
 ): CandidateIngestResult {
   return {
     success,
-    signalCandidateId: 'signal',
+    signalCandidateId,
     memoryCandidateId: success ? 'memory' : null,
     globalCandidateId,
+    sourceRecordId: success ? signalCandidateId : null,
     resolutionStatus: success ? 'matched' : null,
     errorCode: success ? null : 'resolve_failed',
   };
@@ -108,7 +113,9 @@ class FakeStore implements PublicMemoryOutboxStore {
 describe('public Memory ingest worker', () => {
   it('claims a row once across concurrent worker cycles', async () => {
     const store = new FakeStore([row('one')]);
-    const ingest = vi.fn().mockResolvedValue(ingestResult('global-1'));
+    const ingest = vi
+      .fn()
+      .mockResolvedValue(ingestResult(GLOBAL_ONE, true, 'signal-one'));
 
     const summaries = await Promise.all([
       runPublicMemoryIngestCycle({ store, ingest }),
@@ -124,7 +131,9 @@ describe('public Memory ingest worker', () => {
     const store = new FakeStore([
       { ...row('expired'), attempts: 4, leaseToken: 'replacement-lease' },
     ]);
-    const ingest = vi.fn().mockResolvedValue(ingestResult('global-2'));
+    const ingest = vi
+      .fn()
+      .mockResolvedValue(ingestResult(GLOBAL_TWO, true, 'signal-expired'));
 
     const summary = await runPublicMemoryIngestCycle({ store, ingest });
 
@@ -136,8 +145,10 @@ describe('public Memory ingest worker', () => {
     const store = new FakeStore([row('bad'), row('good')]);
     const ingest = vi
       .fn()
-      .mockResolvedValueOnce(ingestResult(null, false))
-      .mockResolvedValueOnce(ingestResult('global-good'));
+      .mockResolvedValueOnce(ingestResult(null, false, 'signal-bad'))
+      .mockResolvedValueOnce(
+        ingestResult(GLOBAL_ONE, true, 'signal-good'),
+      );
 
     const summary = await runPublicMemoryIngestCycle({
       store,
@@ -155,7 +166,11 @@ describe('public Memory ingest worker', () => {
 
     const summary = await runPublicMemoryIngestCycle({
       store,
-      ingest: vi.fn().mockResolvedValue(ingestResult(null)),
+      ingest: vi
+        .fn()
+        .mockResolvedValue(
+          ingestResult(null, true, 'signal-missing-global'),
+        ),
     });
 
     expect(summary.confirmed).toBe(0);
@@ -164,11 +179,15 @@ describe('public Memory ingest worker', () => {
   });
 
   it('dead-letters a resolve result that conflicts with the hydrated UUID', async () => {
-    const store = new FakeStore([row('mismatch', 'global-expected')]);
+    const store = new FakeStore([row('mismatch', GLOBAL_ONE)]);
 
     const summary = await runPublicMemoryIngestCycle({
       store,
-      ingest: vi.fn().mockResolvedValue(ingestResult('global-other')),
+      ingest: vi
+        .fn()
+        .mockResolvedValue(
+          ingestResult(GLOBAL_TWO, true, 'signal-mismatch'),
+        ),
     });
 
     expect(summary.confirmed).toBe(0);
@@ -180,5 +199,26 @@ describe('public Memory ingest worker', () => {
         terminal: true,
       },
     ]);
+  });
+
+  it('does not ACK a result without a durable source record', async () => {
+    const store = new FakeStore([row('missing-source')]);
+    const result = {
+      ...ingestResult(
+        GLOBAL_ONE,
+        true,
+        'signal-missing-source',
+      ),
+      sourceRecordId: null,
+    };
+
+    const summary = await runPublicMemoryIngestCycle({
+      store,
+      ingest: vi.fn().mockResolvedValue(result),
+    });
+
+    expect(summary.confirmed).toBe(0);
+    expect(store.acknowledged).toEqual([]);
+    expect(store.failures[0]?.id).toBe('missing-source');
   });
 });

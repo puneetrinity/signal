@@ -1812,30 +1812,61 @@ model SourcingCoverageState {
 }
 
 model JobSourcingRequest {
-  id                   String    @id @default(cuid())
-  tenantId             String
-  externalJobId        String
-  jobContextHash       String
-  jobContext           Json
-  callbackUrl          String
-  status               String    @default("queued")
-  requestedAt          DateTime  @default(now())
-  completedAt          DateTime?
-  callbackAttempts     Int       @default(0)
-  lastCallbackError    String?   @db.Text
-  callbackStatus       String?   @map("callback_status")
-  callbackSentAt       DateTime? @map("callback_sent_at")
-  resultCount          Int?
-  qualityGateTriggered Boolean   @default(false) @map("quality_gate_triggered")
-  queriesExecuted      Int       @default(0) @map("queries_executed")
-  diagnostics          Json?
-  lastRerankedAt       DateTime? @map("last_reranked_at")
+  id                    String    @id @default(cuid())
+  tenantId              String
+  externalJobId         String
+  jobContextHash        String
+  jobContext            Json
+  callbackUrl           String
+  status                String    @default("queued")
+  requestedAt           DateTime  @default(now())
+  completedAt           DateTime?
+  callbackAttempts      Int       @default(0)
+  lastCallbackError     String?   @db.Text
+  callbackStatus        String?   @map("callback_status")
+  callbackSentAt        DateTime? @map("callback_sent_at")
+  resultCount           Int?
+  qualityGateTriggered  Boolean   @default(false) @map("quality_gate_triggered")
+  queriesExecuted       Int       @default(0) @map("queries_executed")
+  diagnostics           Json?
+  lastRerankedAt        DateTime? @map("last_reranked_at")
+  acquisitionGeneration Int       @default(1) @map("acquisition_generation")
+  executionAttemptId    String?   @map("execution_attempt_id")
+  processingLeaseId     String?   @map("processing_lease_id")
 
-  candidates JobSourcingCandidate[]
+  candidates        JobSourcingCandidate[]
+  crustdataReceipts CrustdataAcquisitionReceipt[]
 
   @@unique([tenantId, externalJobId, jobContextHash])
+  @@unique([id, tenantId])
   @@index([tenantId, status])
   @@map("job_sourcing_requests")
+}
+
+model CrustdataAcquisitionReceipt {
+  id                    String    @id @default(cuid())
+  tenantId              String
+  sourcingRequestId     String
+  acquisitionGeneration Int
+  slot                  String
+  status                String    @default("started")
+  requestFingerprint    String
+  requestInput          Json
+  requestMetadata       Json
+  result                Json?
+  error                 String?   @db.Text
+  startedAt             DateTime  @default(now())
+  completedAt           DateTime?
+  effectsAppliedAt      DateTime?
+  effectMetadata        Json?
+  memoryIngestedAt      DateTime? @map("memory_ingested_at")
+  memoryIngestMetadata  Json?     @map("memory_ingest_metadata")
+  updatedAt             DateTime  @updatedAt
+
+  sourcingRequest JobSourcingRequest @relation(fields: [sourcingRequestId, tenantId], references: [id, tenantId], onDelete: Cascade)
+
+  @@unique([tenantId, sourcingRequestId, acquisitionGeneration, slot], map: "crustdata_receipts_request_generation_slot_key")
+  @@map("crustdata_acquisition_receipts")
 }
 
 model JobSourcingCandidate {

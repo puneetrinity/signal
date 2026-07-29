@@ -425,6 +425,7 @@ describe("ActiveGraph public Memory contracts", () => {
         candidate_id: "memory-tenant-candidate-1",
         global_candidate_id: GLOBAL_ID,
         resolution_status: "matched",
+        source_record_id: "signal-candidate-1",
       }),
     );
     vi.stubGlobal("fetch", fetchMock);
@@ -446,6 +447,7 @@ describe("ActiveGraph public Memory contracts", () => {
       signalCandidateId: "signal-candidate-1",
       memoryCandidateId: "memory-tenant-candidate-1",
       globalCandidateId: GLOBAL_ID,
+      sourceRecordId: "signal-candidate-1",
       resolutionStatus: "matched",
       errorCode: null,
     });
@@ -476,6 +478,7 @@ describe("ActiveGraph public Memory contracts", () => {
         candidate_id: "memory-tenant-candidate-1",
         global_candidate_id: GLOBAL_ID,
         resolution_status: "created",
+        source_record_id: "signal-candidate-1",
       }),
     );
     vi.stubGlobal("fetch", fetchMock);
@@ -489,6 +492,27 @@ describe("ActiveGraph public Memory contracts", () => {
     });
   });
 
+  it("rejects an ingest response for a different source record", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      okJson({
+        candidate_id: "memory-tenant-candidate-1",
+        global_candidate_id: GLOBAL_ID,
+        resolution_status: "matched",
+        source_record_id: "another-signal-candidate",
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { ingestCandidateWithResult } = await import("../activegraph-client");
+
+    await expect(
+      ingestCandidateWithResult("org_1", candidate, ["python"], "req-mismatch"),
+    ).resolves.toMatchObject({
+      success: false,
+      signalCandidateId: "signal-candidate-1",
+      errorCode: "invalid_contract",
+    });
+  });
+
   it("rejects malformed canonical IDs from ingest and identity lookup", async () => {
     const fetchMock = vi
       .fn()
@@ -497,6 +521,7 @@ describe("ActiveGraph public Memory contracts", () => {
           candidate_id: "memory-tenant-candidate-1",
           global_candidate_id: "not-a-uuid",
           resolution_status: "matched",
+          source_record_id: "signal-candidate-1",
         }),
       )
       .mockResolvedValueOnce(

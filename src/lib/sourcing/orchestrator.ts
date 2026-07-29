@@ -19,11 +19,17 @@ import {
   buildFineQueryFingerprint,
   buildRelaxationRungs,
   isProviderShortfall,
-  nextActiveRungId,
-  nextShortfallStreak,
   selectSpillRung,
   type RelaxationState,
 } from './relaxation-ladder';
+import {
+  acquireCrustdataSearchForRequest,
+  CrustdataAcquisitionSafetyError,
+  findCrustdataAcquisitionReceipt,
+  markCrustdataReceiptMemoryIngested,
+  type AcquiredCrustdataSearch,
+} from './crustdata-acquisition';
+import { applyCrustdataLadderObservationOnce } from './crustdata-ladder-effect';
 import {
   resolveRoleDeterministic,
   resolveRolesBatch,
@@ -220,6 +226,25 @@ export interface OrchestratorResult {
     } | null;
     error: string | null;
   } | null;
+  crustdataAcquisition?: {
+    generation: number;
+    exact: {
+      receiptId: string;
+      reused: boolean;
+      requestFingerprint: string;
+      requestFingerprintMatched: boolean;
+      acquiredAt: string;
+      memoryIngestReused: boolean;
+    };
+    spill: {
+      receiptId: string;
+      reused: boolean;
+      requestFingerprint: string;
+      requestFingerprintMatched: boolean;
+      acquiredAt: string;
+      memoryIngestReused: boolean;
+    } | null;
+  } | null;
 }
 
 interface AssembledCandidate {
@@ -265,6 +290,38 @@ interface PublicMemoryExclusionTelemetry {
   unclassifiedMatched: number | null;
   unclassifiedReturned: number | null;
   truncated: boolean | null;
+}
+
+function parseReceiptPublicExclusionTelemetry(
+  value: Record<string, unknown> | undefined,
+): PublicMemoryExclusionTelemetry | null {
+  if (!value) return null;
+  const nullableNumber = (entry: unknown): boolean =>
+    entry === null || typeof entry === 'number';
+  const validSources = new Set<PublicExclusionSource>([
+    'off',
+    'memory_public',
+    'memory_public_plus_local',
+    'tenant_public',
+    'local_public_fallback',
+    'unresolved_market',
+  ]);
+  if (
+    !Array.isArray(value.marketKeys) ||
+    !value.marketKeys.every((key) => typeof key === 'string') ||
+    typeof value.source !== 'string' ||
+    !validSources.has(value.source as PublicExclusionSource) ||
+    typeof value.count !== 'number' ||
+    !nullableNumber(value.totalMatched) ||
+    !nullableNumber(value.classifiedMatched) ||
+    !nullableNumber(value.unclassifiedMatched) ||
+    !nullableNumber(value.unclassifiedReturned) ||
+    (value.truncated !== null &&
+      typeof value.truncated !== 'boolean')
+  ) {
+    return null;
+  }
+  return value as unknown as PublicMemoryExclusionTelemetry;
 }
 
 interface PublicMemoryTelemetry {
@@ -393,6 +450,9 @@ export async function runSourcingOrchestrator(
   tenantId: string,
   jobContext: SourcingJobContextInput,
   trackDecision?: TrackDecision,
+  acquisitionGeneration = 1,
+  executionAttemptId?: string,
+  processingLeaseId?: string,
 ): Promise<OrchestratorResult> {
   const config = getSourcingConfig();
   const requirements = buildJobRequirements(jobContext);
@@ -438,24 +498,88 @@ export async function runSourcingOrchestrator(
     linksRetained: 0,
     linkFailures: 0,
   };
+  const executionFence = executionAttemptId && processingLeaseId
+    ? { acquisitionGeneration, executionAttemptId, processingLeaseId }
+    : undefined;
+  const assertCurrentExecution = async (): Promise<void> => {
+    if (!executionFence) return;
+    const current = await prisma.jobSourcingRequest.count({
+      where: {
+        id: requestId,
+        tenantId,
+        acquisitionGeneration,
+        executionAttemptId,
+        processingLeaseId,
+      },
+    });
+    if (current !== 1) {
+      throw new Error('Sourcing execution was superseded');
+    }
+  };
+  const persistSourcingCandidates = async (
+    data: Prisma.JobSourcingCandidateCreateManyInput[],
+  ): Promise<void> => {
+    await prisma.$transaction(async (transaction) => {
+      if (executionFence) {
+        // Lock the request row while replacing its candidate set. A stalled
+        // BullMQ delivery can take over by changing processingLeaseId, but it
+        // cannot do so between this fence check and the candidate commit.
+        const current = await transaction.$queryRaw<Array<{ id: string }>>`
+          SELECT "id"
+          FROM "job_sourcing_requests"
+          WHERE "id" = ${requestId}
+            AND "tenantId" = ${tenantId}
+            AND "acquisition_generation" = ${acquisitionGeneration}
+            AND "execution_attempt_id" = ${executionAttemptId}
+            AND "processing_lease_id" = ${processingLeaseId}
+            AND "status" = 'processing'
+          FOR UPDATE
+        `;
+        if (current.length !== 1) {
+          throw new Error('Sourcing execution was superseded');
+        }
+      }
+
+      await transaction.jobSourcingCandidate.deleteMany({
+        where: { sourcingRequestId: requestId },
+      });
+      await transaction.jobSourcingCandidate.createMany({ data });
+    });
+  };
 
   const sendProgressCallback = async (event: string, eventData: any = {}) => {
     try {
       const r = await prisma.jobSourcingRequest.findUnique({
         where: { id: requestId },
-        select: { callbackUrl: true, externalJobId: true }
+        select: {
+          callbackUrl: true,
+          externalJobId: true,
+          acquisitionGeneration: true,
+          executionAttemptId: true,
+          processingLeaseId: true,
+        }
       });
+      if (
+        executionFence &&
+        (r?.acquisitionGeneration !== acquisitionGeneration ||
+          r.executionAttemptId !== executionAttemptId ||
+          r.processingLeaseId !== processingLeaseId)
+      ) {
+        return;
+      }
       if (r?.callbackUrl) {
         const { deliverCallback } = await import('./callback');
         await deliverCallback(requestId, tenantId, r.callbackUrl, {
           version: 1,
           requestId,
           externalJobId: r.externalJobId,
+          acquisitionGeneration,
+          executionAttemptId,
           status: 'partial',
           candidateCount: 0,
           event: event as any,
           candidateData: eventData
-        }, false);
+        }, false, executionFence);
       }
     } catch (err) {
       log.error({ err, event }, 'Failed to send progress callback');
@@ -1808,12 +1932,13 @@ export async function runSourcingOrchestrator(
         let crustdataReserveList: any[] = [];
         let eligibleSourceEntries: Array<{ sourceType: CandidateSourceType; fitScore: number | null }> = [];
         let relaxationLadder: OrchestratorResult['relaxationLadder'] = null;
+        let crustdataAcquisition: OrchestratorResult['crustdataAcquisition'] = null;
+        let exactAcquisition: AcquiredCrustdataSearch | null = null;
 
         try {
           console.log('\n' + '🔍'.repeat(20));
           console.log('🚀 [ORCHESTRATOR] INITIATING PRIMARY DISCOVERY (CRUSTDATA /person/search, 300 profiles → rank locally → top 100)');
           await sendProgressCallback('crustdata_fetching');
-          const { searchPeople } = await import('./crustdata-client');
 
           // ── Stage-2 exclusion: don't re-buy people refreshed recently. ─────
           // /person/search returns the lowest-person_id slice, so without this
@@ -2058,9 +2183,6 @@ export async function runSourcingOrchestrator(
             deriveCountryCodeFromLocationText,
             config.relaxationMaxRungs,
           );
-          const stateStaleBefore = new Date(
-            Date.now() - config.relaxationStateTtlHours * 60 * 60 * 1000,
-          );
           let ladderEnabled = config.relaxationLadderEnabled;
           let ladderError: string | null = null;
           let ladderState: RelaxationState | null = null;
@@ -2095,11 +2217,32 @@ export async function runSourcingOrchestrator(
             }
           }
 
-          const exactSearch = await searchPeople(
+          await assertCurrentExecution();
+          exactAcquisition = await acquireCrustdataSearchForRequest({
+            tenantId,
+            sourcingRequestId: requestId,
+            acquisitionGeneration,
+            slot: 'exact',
             requirements,
-            CRUSTDATA_REQUEST_LIMIT,
-            { excludePersonIds },
-          );
+            limit: CRUSTDATA_REQUEST_LIMIT,
+            excludePersonIds,
+            metadata: {
+              rungId: 'exact',
+              rungDescription: 'exact job segment',
+              submittedExclusionCount: excludePersonIds.length,
+              publicExclusionTelemetry: {
+                ...exactExclusion.telemetry,
+              },
+            },
+          });
+          const exactReceiptExclusion =
+            parseReceiptPublicExclusionTelemetry(
+              exactAcquisition.metadata.publicExclusionTelemetry,
+            );
+          if (exactAcquisition.reused && exactReceiptExclusion) {
+            publicMemory.exactExclusion = exactReceiptExclusion;
+          }
+          const exactSearch = exactAcquisition.result;
           const exactShortfall = isProviderShortfall(
             exactSearch.providerTotal,
             CRUSTDATA_REQUEST_LIMIT,
@@ -2109,63 +2252,135 @@ export async function runSourcingOrchestrator(
             acquisitionRungByProfile.set(profile, 'exact');
           }
 
-          let spillSearch: Awaited<ReturnType<typeof searchPeople>> | null = null;
-          let spillRung = null as ReturnType<typeof selectSpillRung>;
+          let spillSearch: typeof exactSearch | null = null;
+          let spillAcquisition: AcquiredCrustdataSearch | null = null;
+          let spillRungId: string | null = null;
+          let spillRungDescription: string | null = null;
           let spillNextActiveRung: string | null = null;
-          let spillShortfallStreak: number | null = null;
           const remainingCapacity = Math.max(0, CRUSTDATA_REQUEST_LIMIT - exactSearch.rawReturnedCount);
+          const existingSpillReceipt = await findCrustdataAcquisitionReceipt(
+            tenantId,
+            requestId,
+            acquisitionGeneration,
+            'spill',
+          );
 
           // Capacity-fill only: one adjacent query may use exact's unfilled
           // capacity. It never cascades to a second, broader market in-run.
-          if (ladderEnabled && exactShortfall && remainingCapacity > 0) {
-            spillRung = selectSpillRung(ladderRungs, ladderState, true);
-            if (spillRung) {
-              const spillPublicMarkets = buildPublicMarketsForQuery(
-                spillRung.requirements,
-              );
-              const spillExclusion = await resolvePublicExclusions(
-                spillPublicMarkets,
-              );
-              publicMemory.spillExclusion = spillExclusion.telemetry;
+          if (
+            existingSpillReceipt ||
+            (ladderEnabled && exactShortfall && remainingCapacity > 0)
+          ) {
+            const selectedSpillRung = selectSpillRung(
+              ladderRungs,
+              ladderState,
+              ladderEnabled,
+            );
+            if (selectedSpillRung || existingSpillReceipt) {
               const exactPersonIds = exactSearch.profiles
                 .map((profile) => profile.crustdata_person_id)
                 .filter((id): id is number => Number.isFinite(id));
+              const spillExclusion = selectedSpillRung
+                ? await resolvePublicExclusions(
+                    buildPublicMarketsForQuery(
+                      selectedSpillRung.requirements,
+                    ),
+                  )
+                : null;
+              if (spillExclusion) {
+                publicMemory.spillExclusion = spillExclusion.telemetry;
+              }
               const spillExclusionIds = [
-                ...new Set([...spillExclusion.ids, ...exactPersonIds]),
+                ...new Set([
+                  ...(spillExclusion?.ids ?? []),
+                  ...exactPersonIds,
+                ]),
               ];
               try {
-                spillSearch = await searchPeople(
-                  spillRung.requirements,
-                  remainingCapacity,
-                  { excludePersonIds: spillExclusionIds },
-                );
+                await assertCurrentExecution();
+                spillAcquisition = await acquireCrustdataSearchForRequest({
+                  tenantId,
+                  sourcingRequestId: requestId,
+                  acquisitionGeneration,
+                  slot: 'spill',
+                  requirements: selectedSpillRung?.requirements ?? requirements,
+                  limit: Math.max(1, remainingCapacity),
+                  excludePersonIds: spillExclusionIds,
+                  metadata: {
+                    rungId: selectedSpillRung?.id ?? 'unknown',
+                    rungDescription:
+                      selectedSpillRung?.description ?? 'previous spill query',
+                    submittedExclusionCount: spillExclusionIds.length,
+                    ...(spillExclusion
+                      ? {
+                          publicExclusionTelemetry:
+                            { ...spillExclusion.telemetry },
+                        }
+                      : {}),
+                  },
+                  reuseOnly: Boolean(existingSpillReceipt),
+                });
+                spillSearch = spillAcquisition.result;
+                spillRungId = spillAcquisition.metadata.rungId;
+                spillRungDescription =
+                  spillAcquisition.metadata.rungDescription;
+                const spillReceiptExclusion =
+                  parseReceiptPublicExclusionTelemetry(
+                    spillAcquisition.metadata.publicExclusionTelemetry,
+                  );
+                if (spillAcquisition.reused && spillReceiptExclusion) {
+                  publicMemory.spillExclusion = spillReceiptExclusion;
+                }
                 for (const profile of spillSearch.profiles) {
-                  acquisitionRungByProfile.set(profile, spillRung.id);
+                  acquisitionRungByProfile.set(profile, spillRungId);
                 }
-                spillShortfallStreak = nextShortfallStreak(
-                  ladderState,
-                  spillSearch.providerTotal,
-                  remainingCapacity,
-                  stateStaleBefore,
-                );
-                spillNextActiveRung = spillRung.id;
-                if (spillShortfallStreak >= config.relaxationDepletionRuns) {
-                  const advanced = nextActiveRungId(ladderRungs, spillRung.id);
-                  if (advanced !== spillRung.id) {
-                    spillNextActiveRung = advanced;
-                    spillShortfallStreak = 0;
-                  }
-                }
+                spillNextActiveRung = spillRungId;
               } catch (error) {
+                if (error instanceof CrustdataAcquisitionSafetyError) {
+                  throw error;
+                }
                 ladderError = error instanceof Error ? error.message : String(error);
                 log.warn(
-                  { requestId, rung: spillRung.id, err: ladderError },
+                  {
+                    requestId,
+                    rung: selectedSpillRung?.id ?? 'receipt',
+                    err: ladderError,
+                  },
                   'Adjacent ladder query failed; continuing with exact results only',
                 );
-                spillRung = null;
+                spillRungId = null;
+                spillRungDescription = null;
               }
             }
           }
+
+          crustdataAcquisition = {
+            generation: acquisitionGeneration,
+            exact: {
+              receiptId: exactAcquisition.receiptId,
+              reused: exactAcquisition.reused,
+              requestFingerprint: exactAcquisition.requestFingerprint,
+              requestFingerprintMatched:
+                exactAcquisition.requestFingerprintMatched,
+              acquiredAt: exactAcquisition.acquiredAt.toISOString(),
+              memoryIngestReused: Boolean(
+                exactAcquisition.memoryIngestedAt,
+              ),
+            },
+            spill: spillAcquisition
+              ? {
+                  receiptId: spillAcquisition.receiptId,
+                  reused: spillAcquisition.reused,
+                  requestFingerprint: spillAcquisition.requestFingerprint,
+                  requestFingerprintMatched:
+                    spillAcquisition.requestFingerprintMatched,
+                  acquiredAt: spillAcquisition.acquiredAt.toISOString(),
+                  memoryIngestReused: Boolean(
+                    spillAcquisition.memoryIngestedAt,
+                  ),
+                }
+              : null,
+          };
 
           const crustProfiles = [...exactSearch.profiles, ...(spillSearch?.profiles ?? [])];
           relaxationLadder = {
@@ -2173,72 +2388,69 @@ export async function runSourcingOrchestrator(
             scopeKey: tenantId,
             fineQueryFingerprint,
             enabled: ladderEnabled,
-            submittedExclusionCount: excludePersonIds.length,
+            submittedExclusionCount:
+              exactAcquisition.metadata.submittedExclusionCount,
             exact: {
               requestedLimit: CRUSTDATA_REQUEST_LIMIT,
               providerTotal: exactSearch.providerTotal,
               rawReturnedCount: exactSearch.rawReturnedCount,
               shortfall: exactShortfall,
             },
-            spill: spillSearch && spillRung ? {
-              rung: spillRung.id,
-              description: spillRung.description,
+            spill: spillSearch && spillRungId ? {
+              rung: spillRungId,
+              description: spillRungDescription ?? spillRungId,
               requestedLimit: spillSearch.requestedLimit,
               providerTotal: spillSearch.providerTotal,
               rawReturnedCount: spillSearch.rawReturnedCount,
               shortfall: isProviderShortfall(spillSearch.providerTotal, spillSearch.requestedLimit),
-              nextActiveRung: spillNextActiveRung ?? spillRung.id,
+              nextActiveRung: spillNextActiveRung ?? spillRungId,
             } : null,
             error: ladderError,
           };
 
           if (ladderEnabled) {
             try {
-              const now = new Date();
-              await prisma.sourcingCoverageState.upsert({
-                where: {
-                  scope_scopeKey_queryFingerprint: {
-                    scope: ladderScope,
-                    scopeKey: tenantId,
-                    queryFingerprint: fineQueryFingerprint,
-                  },
-                },
-                create: {
-                  scope: ladderScope,
-                  scopeKey: tenantId,
-                  queryFingerprint: fineQueryFingerprint,
-                  activeRung: spillNextActiveRung,
-                  shortfallStreak: spillShortfallStreak ?? 0,
-                  lastExactProviderTotal: exactSearch.providerTotal,
-                  lastExactRequestedLimit: CRUSTDATA_REQUEST_LIMIT,
-                  lastProviderTotal: spillSearch?.providerTotal ?? null,
-                  lastRequestedLimit: spillSearch?.requestedLimit ?? 0,
-                  lastRawReturnedCount: spillSearch?.rawReturnedCount ?? 0,
-                  lastSpillObservedAt: spillSearch ? now : null,
-                  lastSubmittedExclusionCount: excludePersonIds.length,
-                  lastObservedAt: now,
-                },
-                update: {
-                  ...(spillSearch && spillRung ? {
-                    activeRung: spillNextActiveRung,
-                    shortfallStreak: spillShortfallStreak ?? 0,
-                    lastProviderTotal: spillSearch.providerTotal,
-                    lastRequestedLimit: spillSearch.requestedLimit,
-                    lastRawReturnedCount: spillSearch.rawReturnedCount,
-                    lastSpillObservedAt: now,
-                  } : {}),
-                  lastExactProviderTotal: exactSearch.providerTotal,
-                  lastExactRequestedLimit: CRUSTDATA_REQUEST_LIMIT,
-                  lastSubmittedExclusionCount: excludePersonIds.length,
-                  lastObservedAt: now,
-                },
-              });
+              const effectReceiptId =
+                spillAcquisition?.receiptId ?? exactAcquisition.receiptId;
+              const effectObservedAt =
+                spillAcquisition?.acquiredAt ?? exactAcquisition.acquiredAt;
+              const effectResult =
+                await applyCrustdataLadderObservationOnce({
+                  tenantId,
+                  requestId,
+                  acquisitionGeneration,
+                  executionAttemptId,
+                  processingLeaseId,
+                  receiptId: effectReceiptId,
+                  fineQueryFingerprint,
+                  rungs: ladderRungs,
+                  exactSearch,
+                  exactSubmittedExclusionCount:
+                    exactAcquisition.metadata.submittedExclusionCount,
+                  spillSearch,
+                  spillRungId,
+                  observedAt: effectObservedAt,
+                  stateStaleBefore: new Date(
+                    effectObservedAt.getTime() -
+                      config.relaxationStateTtlHours * 60 * 60 * 1000,
+                  ),
+                  depletionRuns: config.relaxationDepletionRuns,
+                });
+              spillNextActiveRung = effectResult.metadata.activeRung;
+              if (relaxationLadder?.spill && spillNextActiveRung) {
+                relaxationLadder.spill.nextActiveRung =
+                  spillNextActiveRung;
+              }
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
               if (relaxationLadder) relaxationLadder.error = relaxationLadder.error ?? message;
-              log.warn({ requestId, err: message }, 'Failed to persist ladder state');
+              throw new CrustdataAcquisitionSafetyError(
+                'receipt_persistence_failed',
+                `Crustdata ladder observation could not be persisted for replay: ${message}`,
+              );
             }
           }
+          await assertCurrentExecution();
           crustDataSucceeded = true;
 
           if (crustProfiles.length > 0) {
@@ -2438,6 +2650,12 @@ export async function runSourcingOrchestrator(
               (candidate: any) =>
                 extractLinkedInIdFromUrl(candidate.linkedinUrl) !== null,
             );
+            if (mappedForRanking.length !== crustProfiles.length) {
+              throw new CrustdataAcquisitionSafetyError(
+                'memory_ingest_failed',
+                `Only ${mappedForRanking.length}/${crustProfiles.length} paid profiles had a durable public identity`,
+              );
+            }
 
             try {
               const identityLookup = await resolvePublicIdentities(
@@ -2472,22 +2690,37 @@ export async function runSourcingOrchestrator(
               );
             }
             try {
+              await assertCurrentExecution();
               const queued = await enqueuePublicMemoryIngestOutbox({
                   tenantId,
                   sourcingRequestId: requestId,
-                  candidates: mappedForRanking.map((candidate) => ({
-                    candidate,
-                    options: {
-                      publicMarket: candidate.publicMarket,
-                      publicCandidateRoleFamily:
-                        candidate.publicCandidateRoleFamily,
-                    },
-                    expectedGlobalCandidateId:
-                      expectedGlobalCandidateIdForCandidate(
-                        candidate,
-                        publicGlobalIdByIdentity,
-                      ),
-                  })),
+                  candidates: mappedForRanking.map((candidate) => {
+                    const acquisition =
+                      candidate.acquisitionRung === 'exact'
+                        ? exactAcquisition
+                        : spillAcquisition;
+                    if (!acquisition) {
+                      throw new CrustdataAcquisitionSafetyError(
+                        'memory_ingest_failed',
+                        `No acquisition receipt matched rung ${candidate.acquisitionRung}`,
+                      );
+                    }
+                    return {
+                      candidate,
+                      options: {
+                        publicMarket: candidate.publicMarket,
+                        publicCandidateRoleFamily:
+                          candidate.publicCandidateRoleFamily,
+                        profileObservedAt: acquisition.acquiredAt,
+                        acquisitionGeneration,
+                      },
+                      expectedGlobalCandidateId:
+                        expectedGlobalCandidateIdForCandidate(
+                          candidate,
+                          publicGlobalIdByIdentity,
+                        ),
+                    };
+                  }),
                 });
               publicMemory.ingestQueued += queued;
               publicMemory.ingestPending += queued;
@@ -2597,6 +2830,13 @@ export async function runSourcingOrchestrator(
                   companyHint: (fresh as any).companyHint ?? undefined,
                   profilePictureUrl: (fresh as any).profilePictureUrl ?? undefined,
                   crustdata: (fresh as any).crustdata,
+                  providerMeta: {
+                    sourcing: {
+                      ladderRung:
+                        fresh.acquisitionRung ?? 'exact',
+                      fineQueryFingerprint,
+                    },
+                  },
                 });
               }
               poolBlobsRefreshed++;
@@ -2639,6 +2879,117 @@ export async function runSourcingOrchestrator(
             // batches × ~2s Railway RTT = ~40s wasted. Now we rank in-memory
             // first and only write the 100 we actually serve (7 batches ≈ 14s).
             const profileByUrl = new Map(mappedForRanking.map((p) => [p.id, p]));
+
+            // ── Durably ingest all paid profiles into Memory ───────────────
+            // A callback may release the large provider receipt only after
+            // every profile is present in Memory. Failed internal writes are
+            // safe to retry and always retain the provider observation time.
+            const {
+              ingestCandidateBatchWithResults,
+              isConfirmedCandidateIngestResult,
+            } = await import('./activegraph-client');
+            const ingestReceiptProfiles = async (
+              acquisition: AcquiredCrustdataSearch,
+              profiles: typeof mappedForRanking,
+            ): Promise<boolean> => {
+              const currentReceipt = await findCrustdataAcquisitionReceipt(
+                tenantId,
+                requestId,
+                acquisitionGeneration,
+                acquisition.metadata.rungId === 'exact' ? 'exact' : 'spill',
+              );
+              if (currentReceipt?.memoryIngestedAt) return true;
+
+              await assertCurrentExecution();
+              const publicOptionsByCandidateId = new Map(
+                profiles.map((profile) => [
+                  profile.id,
+                  {
+                    publicMarket: profile.publicMarket,
+                    publicCandidateRoleFamily:
+                      profile.publicCandidateRoleFamily,
+                  },
+                ]),
+              );
+              const results = await ingestCandidateBatchWithResults(
+                tenantId,
+                profiles,
+                requestId,
+                10,
+                (candidate) => {
+                  const publicOptions =
+                    publicOptionsByCandidateId.get(candidate.id);
+                  return {
+                    publicMarket: publicOptions?.publicMarket,
+                    publicCandidateRoleFamily:
+                      publicOptions?.publicCandidateRoleFamily,
+                    profileObservedAt: acquisition.acquiredAt,
+                    acquisitionGeneration,
+                  };
+                },
+              );
+              for (let index = 0; index < profiles.length; index += 1) {
+                const candidate = profiles[index];
+                const result = results[index];
+                const expectedGlobalCandidateId =
+                  expectedGlobalCandidateIdForCandidate(
+                    candidate,
+                    publicGlobalIdByIdentity,
+                  );
+                if (!isConfirmedCandidateIngestResult(
+                  result,
+                  expectedGlobalCandidateId,
+                  candidate.id,
+                )) {
+                  throw new CrustdataAcquisitionSafetyError(
+                    'memory_ingest_failed',
+                    `Memory did not durably confirm ${candidate.id} from the ${acquisition.metadata.rungId} receipt`,
+                  );
+                }
+              }
+              await markCrustdataReceiptMemoryIngested(
+                tenantId,
+                acquisition.receiptId,
+                {
+                  candidateCount: results.length,
+                  profileObservedAt:
+                    acquisition.acquiredAt.toISOString(),
+                  acquisitionGeneration,
+                },
+              );
+              return false;
+            };
+
+            const exactProfiles = mappedForRanking.filter(
+              (profile) => profile.acquisitionRung === 'exact',
+            );
+            const exactMemoryIngestReused = await ingestReceiptProfiles(
+              exactAcquisition,
+              exactProfiles,
+            );
+            if (crustdataAcquisition?.exact) {
+              crustdataAcquisition.exact.memoryIngestReused =
+                exactMemoryIngestReused;
+            }
+            if (spillAcquisition) {
+              const spillProfiles = mappedForRanking.filter(
+                (profile) =>
+                  profile.acquisitionRung ===
+                  spillAcquisition.metadata.rungId,
+              );
+              const spillMemoryIngestReused =
+                await ingestReceiptProfiles(
+                  spillAcquisition,
+                  spillProfiles,
+                );
+              if (crustdataAcquisition?.spill) {
+                crustdataAcquisition.spill.memoryIngestReused =
+                  spillMemoryIngestReused;
+              }
+            }
+            console.log(
+              `📡 [ORCHESTRATOR] MEMORY INGEST CONFIRMED FOR ${mappedForRanking.length} PAID PROFILES`,
+            );
 
             const materializedPublicByTemporaryId =
               await materializeServedPublicCandidates(
@@ -2721,11 +3072,27 @@ export async function runSourcingOrchestrator(
             // DB copy converges with the fresh data we just ranked (Stage-1:
             // "what ranking sees equals what the store holds"). No id churn:
             // upsert keys on (tenantId, linkedinId), the existing row wins.
+            await assertCurrentExecution();
             const candidateMap = await upsertDiscoveredCandidates(
               tenantId,
               [...top100Profiles, ...poolRefreshProfiles],
               'crustdata_query',
-              'crustdata'
+              'crustdata',
+              {
+                providerObservedAt: exactAcquisition.acquiredAt,
+                providerObservedAtByRung: new Map([
+                  ['exact', exactAcquisition.acquiredAt],
+                  ...(spillAcquisition
+                    ? ([
+                        [
+                          spillAcquisition.metadata.rungId,
+                          spillAcquisition.acquiredAt,
+                        ],
+                      ] as Array<[string, Date]>)
+                    : []),
+                ]),
+                failOnError: true,
+              },
             );
             const candidateIdByLinkedinId = new Map(
               Array.from(candidateMap).map(([linkedinId, candidateId]) => [
@@ -2841,11 +3208,49 @@ export async function runSourcingOrchestrator(
             };
             console.log(`✅ [ORCHESTRATOR] MAPPED ${discovered.length} CANDIDATES FROM CRUSTDATA`);
           } else {
+            const exactMemoryIngestApplied =
+              await markCrustdataReceiptMemoryIngested(
+                tenantId,
+                exactAcquisition.receiptId,
+                {
+                  candidateCount: 0,
+                  profileObservedAt:
+                    exactAcquisition.acquiredAt.toISOString(),
+                  acquisitionGeneration,
+                },
+              );
+            if (crustdataAcquisition?.exact) {
+              crustdataAcquisition.exact.memoryIngestReused =
+                !exactMemoryIngestApplied;
+            }
+            if (spillAcquisition) {
+              const spillMemoryIngestApplied =
+                await markCrustdataReceiptMemoryIngested(
+                  tenantId,
+                  spillAcquisition.receiptId,
+                  {
+                    candidateCount: 0,
+                    profileObservedAt:
+                      spillAcquisition.acquiredAt.toISOString(),
+                    acquisitionGeneration,
+                  },
+                );
+              if (crustdataAcquisition?.spill) {
+                crustdataAcquisition.spill.memoryIngestReused =
+                  !spillMemoryIngestApplied;
+              }
+            }
             console.log('⚠️ [ORCHESTRATOR] CRUSTDATA RETURNED 0 RESULTS');
             discovery = { candidates: [], queriesExecuted: 1, queriesBuilt: 1, telemetry: { queryRuns: [] } };
           }
         } catch (err) {
-          if (err instanceof PublicMemoryOutboxError) throw err;
+          if (
+            err instanceof PublicMemoryOutboxError ||
+            err instanceof CrustdataAcquisitionSafetyError ||
+            exactAcquisition
+          ) {
+            throw err;
+          }
           log.error({ err }, 'Crustdata discovery failed, falling back to Serper');
           console.error('❌ [ORCHESTRATOR] CRUSTDATA FAILED:', err instanceof Error ? err.message : err);
         }
@@ -2919,24 +3324,20 @@ export async function runSourcingOrchestrator(
           assertPersistableCandidateIds(
             dedupedFinalAssembled.map((candidate) => candidate.candidateId),
           );
-          // Delete any existing JobSourcingCandidate records for retry idempotency
-          await prisma.$transaction([
-            prisma.jobSourcingCandidate.deleteMany({
-              where: { sourcingRequestId: requestId },
-            }),
-            prisma.jobSourcingCandidate.createMany({
-              data: dedupedFinalAssembled.map((a) => ({
-                tenantId,
-                sourcingRequestId: requestId,
-                candidateId: a.candidateId,
-                fitScore: a.fitScore,
-                fitBreakdown: a.fitBreakdown
-                  ? toJsonValue({ ...a.fitBreakdown, matchTier: a.matchTier, locationMatchType: a.locationMatchType, dataConfidence: a.dataConfidence })
-                  : toJsonValue({ matchTier: a.matchTier, locationMatchType: a.locationMatchType, dataConfidence: a.dataConfidence }),
-                sourceType: a.sourceType, enrichmentStatus: 'pending', rank: a.rank,
-              })),
-            }),
-          ]);
+          // Replace the request result under the processor lease so a late
+          // stalled delivery cannot overwrite the current candidate set.
+          await persistSourcingCandidates(
+            dedupedFinalAssembled.map((a) => ({
+              tenantId,
+              sourcingRequestId: requestId,
+              candidateId: a.candidateId,
+              fitScore: a.fitScore,
+              fitBreakdown: a.fitBreakdown
+                ? toJsonValue({ ...a.fitBreakdown, matchTier: a.matchTier, locationMatchType: a.locationMatchType, dataConfidence: a.dataConfidence })
+                : toJsonValue({ matchTier: a.matchTier, locationMatchType: a.locationMatchType, dataConfidence: a.dataConfidence }),
+              sourceType: a.sourceType, enrichmentStatus: 'pending', rank: a.rank,
+            })),
+          );
 
           console.log(`💾 [ORCHESTRATOR] PERSISTED ${dedupedFinalAssembled.length} ENRICHED CANDIDATES TO JOBSOURCINGCANDIDATES!`);
 
@@ -3034,6 +3435,7 @@ export async function runSourcingOrchestrator(
             sourceMetrics,
             publicMemory,
             relaxationLadder,
+            crustdataAcquisition,
           };
 
           log.info({ requestId, resolvedTrack: trackDecision?.track ?? null, ...result }, 'Orchestrator complete via Crustdata direct sync pathway');
@@ -3808,26 +4210,21 @@ export async function runSourcingOrchestrator(
   assertPersistableCandidateIds(
     dedupedAssembled.map((candidate) => candidate.candidateId),
   );
-  // 5. Persist: deleteMany + createMany for retry idempotency
-  await prisma.$transaction([
-    prisma.jobSourcingCandidate.deleteMany({
-      where: { sourcingRequestId: requestId },
-    }),
-    prisma.jobSourcingCandidate.createMany({
-      data: dedupedAssembled.map((a) => ({
-        tenantId,
-        sourcingRequestId: requestId,
-        candidateId: a.candidateId,
-        fitScore: a.fitScore,
-        fitBreakdown: a.fitBreakdown
-          ? toJsonValue({ ...a.fitBreakdown, matchTier: a.matchTier, locationMatchType: a.locationMatchType, dataConfidence: a.dataConfidence })
-          : a.matchTier
-            ? toJsonValue({ matchTier: a.matchTier, locationMatchType: a.locationMatchType, dataConfidence: a.dataConfidence })
-            : Prisma.JsonNull,
-        sourceType: a.sourceType, enrichmentStatus: 'pending', rank: a.rank,
-      })),
-    }),
-  ]);
+  // 5. Persist under the processor lease for retry/stall idempotency.
+  await persistSourcingCandidates(
+    dedupedAssembled.map((a) => ({
+      tenantId,
+      sourcingRequestId: requestId,
+      candidateId: a.candidateId,
+      fitScore: a.fitScore,
+      fitBreakdown: a.fitBreakdown
+        ? toJsonValue({ ...a.fitBreakdown, matchTier: a.matchTier, locationMatchType: a.locationMatchType, dataConfidence: a.dataConfidence })
+        : a.matchTier
+          ? toJsonValue({ matchTier: a.matchTier, locationMatchType: a.locationMatchType, dataConfidence: a.dataConfidence })
+          : Prisma.JsonNull,
+      sourceType: a.sourceType, enrichmentStatus: 'pending', rank: a.rank,
+    })),
+  );
 
 
   const discoveryShortfallRate = discoveryTarget > 0

@@ -2,10 +2,12 @@ import { createLogger } from '@/lib/logger';
 import {
   generateTagsFromCandidate,
   ingestCandidateWithResult,
+  isConfirmedCandidateIngestResult,
   type CandidateIngestResult,
 } from './activegraph-client';
 import {
   hydrateOutboxCandidate,
+  hydrateOutboxIngestOptions,
   compactPublicMemoryOutboxPayloads,
   PrismaPublicMemoryOutboxStore,
   reconcilePublicMemoryOutboxDiagnostics,
@@ -61,8 +63,7 @@ async function processRow({
     const expectedGlobalCandidateId =
       row.payload.expectedGlobalCandidateId;
     if (
-      result.success &&
-      result.globalCandidateId &&
+      isConfirmedCandidateIngestResult(result) &&
       expectedGlobalCandidateId &&
       result.globalCandidateId !== expectedGlobalCandidateId
     ) {
@@ -75,7 +76,13 @@ async function processRow({
       });
       return false;
     }
-    if (result.success && result.globalCandidateId) {
+    if (
+      isConfirmedCandidateIngestResult(
+        result,
+        expectedGlobalCandidateId,
+        row.signalCandidateId,
+      )
+    ) {
       return store.acknowledge({ row, result, now: now() });
     }
     await store.fail({
@@ -122,7 +129,7 @@ export async function runPublicMemoryIngestCycle(
       candidate,
       generateTagsFromCandidate(candidate),
       row.sourcingRequestId ?? undefined,
-      row.payload.options,
+      hydrateOutboxIngestOptions(row.payload.options),
     );
   };
   const ingest = options.ingest ?? defaultIngest;
