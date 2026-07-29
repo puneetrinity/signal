@@ -243,9 +243,16 @@ export async function upsertDiscoveredCandidates(
           }
 
           if (!candidateId) {
-            throw new Error(
-              `Candidate ${linkedinId} changed repeatedly during provider observation write`,
+            // Optimistic-lock exhaustion means another writer (e.g. the
+            // public-ingest outbox worker) is actively landing fresher data
+            // on this row. Skipping mirrors the observation-order rule —
+            // older evidence never overwrites newer — and the acquisition
+            // receipt still holds the paid payload for replay. One hot row
+            // must not fail a 300-candidate run (job-155 outage, round 2).
+            console.warn(
+              `[sourcing] Skipping ${linkedinId}: row contended past ${MAX_CANDIDATE_WRITE_ATTEMPTS} attempts (fresher writer wins)`,
             );
+            return;
           }
           candidateMap.set(linkedinId, candidateId);
         } catch (error) {
