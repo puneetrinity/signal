@@ -195,14 +195,13 @@ Important runtime behavior:
   - penalized post-rank
   - capped in top-20
   - capped again in final assembly
-- Rerank/rescore use the same pre-resolved role/location path as initial assembly
+- Explicit rescore uses the same pre-resolved role/location path as initial assembly
 - Currentness is **not** wired into ranking yet; it remains eval/audit-only until explicitly integrated
 
 Primary code paths:
 
-- `src/lib/sourcing/ranking.ts`
+- `src/lib/sourcing/ranking-new.ts`
 - `src/lib/sourcing/orchestrator.ts`
-- `src/lib/sourcing/rerank.ts`
 - `src/lib/sourcing/rescore.ts`
 - `src/lib/sourcing/top20-guards.ts`
 

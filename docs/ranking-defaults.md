@@ -78,7 +78,7 @@ Source: `src/lib/sourcing/config.ts:148-226`
 | Tech skill min | 0.10 | `SOURCE_TECH_TOP20_SKILL_MIN` | Below → violation |
 | Unknown-location cap | 10% tech / 15% non-tech | — | Limits unknown-location in top-20 |
 
-Source: `src/lib/sourcing/config.ts:229-232`, `orchestrator.ts:1336`, `rerank.ts:244`
+Source: `src/lib/sourcing/config.ts`, `orchestrator.ts`, and `top20-guards.ts`
 
 ### Tech best_matches admission
 
@@ -86,7 +86,7 @@ Strict tech candidates are demoted to expanded_location if **either**:
 - `fitScore < bestMatchesMinFitScore` (0.60)
 - `skillScore < techTop20SkillMin` (0.10)
 
-This applies in initial assembly (`orchestrator.ts:1045`) and rerank (`rerank.ts:232`).
+This applies in the sourcing orchestrator's final assembly.
 
 ### Currentness-gated location matching
 
