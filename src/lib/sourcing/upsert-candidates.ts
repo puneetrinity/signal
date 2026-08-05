@@ -194,7 +194,12 @@ export async function upsertDiscoveredCandidates(
                 candidateId = created.id;
                 break;
               } catch (error) {
-                if (isUniqueConstraintError(error)) continue;
+                if (isUniqueConstraintError(error)) {
+                  // A uniqueness error aborts an interactive PostgreSQL
+                  // transaction. Its owner must roll back before retrying.
+                  if (options.db) throw error;
+                  continue;
+                }
                 throw error;
               }
             }
@@ -262,14 +267,14 @@ export async function upsertDiscoveredCandidates(
             // receipt still holds the paid payload for replay. One hot row
             // must not fail a 300-candidate run (job-155 outage, round 2).
             console.warn(
-              `[sourcing] Skipping ${linkedinId}: row contended past ${MAX_CANDIDATE_WRITE_ATTEMPTS} attempts (fresher writer wins)`,
+              `[sourcing] Skipping candidate: row contended past ${MAX_CANDIDATE_WRITE_ATTEMPTS} attempts (fresher writer wins)`,
             );
             return;
           }
           candidateMap.set(linkedinId, candidateId);
         } catch (error) {
-          console.error(`[sourcing] Failed to upsert candidate ${linkedinId}:`, error);
           if (options?.failOnError) throw error;
+          console.error('[sourcing] Failed to upsert candidate:', error);
         }
       })
     );
