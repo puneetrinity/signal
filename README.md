@@ -100,9 +100,15 @@ REDIS_URL=""
 
 4. **Set up database**
 ```bash
-npx prisma generate
-npx prisma db push
+SIGNAL_BOOTSTRAP_EMPTY_DATABASE=1 npm run db:bootstrap-empty
+npm run db:generate
 ```
+
+The bootstrap command only accepts a genuinely empty database. Existing
+databases use `npx prisma migrate deploy`. See
+[`docs/DATABASE_BOOTSTRAP.md`](docs/DATABASE_BOOTSTRAP.md) for staging,
+recovery, and failure procedures. Never use schema push against a shared or
+production database.
 
 5. **Run the development server**
 ```bash
@@ -165,7 +171,9 @@ Signal v2 follows a privacy-respecting architecture:
    - `SEARCH_PROVIDER="brave"`
    - `PARSER_PROVIDER="groq"`
    - `USE_NEW_DISCOVERY="true"`
-5. Deploy
+5. For a genuinely empty database, run the one-time guarded bootstrap from
+   `docs/DATABASE_BOOTSTRAP.md`
+6. Deploy; normal service starts run `prisma migrate deploy`
 
 ### Environment Variables
 

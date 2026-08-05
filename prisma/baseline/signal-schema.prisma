@@ -1,0 +1,675 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Person {
+  id            String  @id @default(cuid())
+  linkedinUrl   String  @unique
+  linkedinId    String  @unique // LinkedIn username (e.g., "katcook1")
+  linkedinNumId String? // Numeric LinkedIn ID
+
+  // Basic Info
+  firstName String
+  lastName  String
+  fullName  String  @db.Text
+  headline  String? @db.Text // Position/title (called "position" in API)
+  about     String? @db.Text
+
+  // Location
+  location    String? // General location
+  city        String?
+  countryCode String? // ISO country code (e.g., "US")
+
+  // Profile Media
+  profilePicUrl String?
+  bannerImage   String?
+  defaultAvatar Boolean @default(false)
+
+  // Current Company
+  currentCompany   String? // Company name
+  currentCompanyId String? // Company LinkedIn ID
+
+  // Rich Data (JSON fields)
+  experience Json? // Array of Experience objects
+  education  Json? // Array of Education objects
+  languages  Json? // Array of Language objects
+
+  // Social Stats
+  connections Int?
+  followers   Int?
+
+  // Metadata
+  searchCount Int      @default(0) // How many times searched
+  lastViewed  DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Flags
+  memorializedAccount Boolean @default(false)
+
+  // Relations
+  researches Research[]
+
+  @@index([fullName])
+  @@index([firstName, lastName])
+  @@index([lastViewed])
+  @@index([linkedinId])
+  @@index([currentCompany])
+  @@index([location])
+  @@index([updatedAt])
+  @@map("people")
+}
+
+model Search {
+  id          String   @id @default(cuid())
+  query       String   @db.Text
+  results     Json // Array of person IDs
+  resultCount Int
+  createdAt   DateTime @default(now())
+
+  @@index([query])
+  @@map("searches")
+}
+
+model Research {
+  id           String   @id @default(cuid())
+  personId     String? // Foreign key to Person model
+  person       Person?  @relation(fields: [personId], references: [id])
+  linkedinUrl  String
+  personName   String
+  report       String   @db.Text // Markdown report
+  sources      Json // Array of source URLs and summaries
+  metadata     Json? // Graph execution metadata (status updates, timing, etc.)
+  status       String // 'pending' | 'processing' | 'completed' | 'failed'
+  errorMessage String?  @db.Text
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([personId])
+  @@index([linkedinUrl])
+  @@index([status])
+  @@index([createdAt])
+  @@map("researches")
+}
+
+// ============================================================================
+// V2 SCHEMA - Compliant Recruiter Sourcing
+// ============================================================================
+// These tables support the v2 architecture with:
+// - LinkedIn URL capture only (no scraping)
+// - Bridge-first identity discovery
+// - Human-in-the-loop confirmation
+// - No PII storage until confirmed
+// ============================================================================
+
+/// Candidate: The anchor for a LinkedIn lead
+/// Stores only URL + metadata from search snippets (NOT scraped profile data)
+model Candidate {
+  id String @id @default(cuid())
+
+  // Multi-tenancy: Clerk organization ID
+  tenantId String
+
+  // LinkedIn anchor (URL only - no scraped data)
+  linkedinUrl String // Unique per tenant (see @@unique below)
+  linkedinId  String // Username from URL (e.g., "johnsmith")
+
+  // Data from search snippets (public SERP data, not scraped)
+  searchTitle   String? @db.Text // Title from Google result
+  searchSnippet String? @db.Text // Snippet from Google result
+  searchMeta    Json? // KG + answerBox from Serper (providerMeta)
+
+  // Parsed hints from search (not authoritative)
+  nameHint           String? // Parsed from title, may be wrong
+  headlineHint       String? @db.Text // Parsed from title/snippet
+  locationHint       String? // Parsed from snippet
+  locationConfidence Float?
+  locationSource     String?
+  companyHint        String? // Parsed from title/snippet
+  seniorityHint      String? // Parsed from headline (intern/junior/mid/senior/staff/principal/lead/manager/director/vp/cxo)
+
+  // Classification for enrichment routing
+  roleType String? // 'engineer' | 'data_scientist' | 'researcher' | 'founder' | 'designer' | 'general'
+
+  // Capture metadata
+  captureSource  String  @default("search") // 'search' | 'extension' | 'import' | 'manual'
+  searchQuery    String? @db.Text // Original query that found this candidate
+  searchProvider String? // 'serper' | 'brave' (legacy: 'searxng' | 'brightdata')
+
+  // Enrichment state
+  enrichmentStatus String    @default("pending") // 'pending' | 'in_progress' | 'completed' | 'failed'
+  lastEnrichedAt   DateTime?
+  confidenceScore  Float? // Overall confidence (0.0-1.0)
+
+  profilePictureUrl String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relations
+  identityCandidates         IdentityCandidate[]
+  confirmedIdentities        ConfirmedIdentity[]
+  enrichmentSessions         EnrichmentSession[]
+  sourcingCandidates         JobSourcingCandidate[]
+  intelligenceSnapshots      CandidateIntelligenceSnapshot[]
+  globalLink                 CandidateGlobalLink?
+  contactEnrichmentOperation ContactEnrichmentOperation?
+
+  // Tenant-scoped unique constraints
+  @@unique([tenantId, id])
+  @@unique([tenantId, linkedinUrl])
+  @@unique([tenantId, linkedinId])
+  @@index([tenantId])
+  @@index([tenantId, linkedinId])
+  @@index([linkedinId], map: "candidates_linkedinId_idx")
+  @@index([roleType])
+  @@index([enrichmentStatus])
+  @@index([confidenceScore])
+  @@index([createdAt])
+  @@map("candidates")
+}
+
+/// CandidateIntelligenceSnapshot: Structured enrichment data computed at enrichment time
+model CandidateIntelligenceSnapshot {
+  id                  String   @id @default(cuid())
+  candidateId         String
+  tenantId            String
+  track               String   @default("tech") // tech | non_tech
+  skillsNormalized    String[]
+  roleType            String?
+  seniorityBand       String?
+  location            String?
+  locationConfidence  Float?
+  locationSource      String?
+  industries          String[] @default([])
+  activityRecencyDays Int?
+  computedAt          DateTime @default(now())
+  staleAfter          DateTime
+  sourceSessionId     String?
+  sourceFingerprint   String?
+  signalsJson         Json?
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@unique([candidateId, tenantId, track])
+  @@index([tenantId, track])
+  @@index([tenantId, staleAfter])
+  @@map("candidate_intelligence_snapshots")
+}
+
+/// IdentityCandidate: Unconfirmed identity signals
+/// Stores evidence pointers, NOT the actual PII (e.g., commit URL, not email)
+model IdentityCandidate {
+  id       String @id @default(cuid())
+  tenantId String
+
+  candidateId String
+  candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  // Platform identity
+  platform   String // 'github' | 'stackoverflow' | 'kaggle' | 'orcid' | etc.
+  platformId String // Username/ID on that platform
+  profileUrl String // Full profile URL
+
+  // Confidence scoring
+  status           String  @default("unconfirmed") // 'unconfirmed' | 'confirmed' | 'rejected'
+  confidence       Float // 0.0 to 1.0
+  confidenceBucket String? // 'auto_merge' | 'suggest' | 'low' | 'rejected'
+
+  // Scoring breakdown
+  scoreBreakdown Json? // { bridgeWeight, nameMatch, companyMatch, ... }
+
+  // Bridge detection (v2.1)
+  bridgeTier    Int? // 1 = auto-merge, 2 = human review, 3 = weak
+  bridgeSignals Json? // Array of signal strings like ['linkedin_url_in_bio']
+  persistReason String? // Why this identity was persisted
+
+  // Evidence pointers (NO PII like emails stored here)
+  // Example: { type: "commit_email", commitUrl: "...", commitSha: "..." }
+  evidence Json?
+
+  // Contradiction tracking
+  hasContradiction  Boolean @default(false)
+  contradictionNote String? @db.Text
+
+  // Discovery metadata
+  discoveredAt DateTime @default(now())
+  discoveredBy String? // Session ID or 'manual'
+  searchQuery  String?  @db.Text // Query that found this
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Tenant-scoped unique constraint
+  @@unique([candidateId, platform, platformId], map: "identity_candidates_candidateId_platform_platformId_key")
+  @@unique([tenantId, candidateId, platform, platformId], map: "identity_candidates_tenantId_candidateId_platform_platformId_ke")
+  @@index([tenantId])
+  @@index([candidateId])
+  @@index([platform])
+  @@index([status])
+  @@index([confidence])
+  @@index([bridgeTier])
+  @@index([createdAt])
+  @@map("identity_candidates")
+}
+
+/// ConfirmedIdentity: Verified identity links (can store PII after confirmation)
+/// Only populated after human or subject confirmation
+model ConfirmedIdentity {
+  id       String @id @default(cuid())
+  tenantId String
+
+  candidateId String
+  candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  // Platform identity (copied from IdentityCandidate on confirmation)
+  platform   String
+  platformId String
+  profileUrl String
+
+  // Contact info (NOW allowed to store PII after confirmation)
+  // Example: { email: "...", source: "github_commit", sourceUrl: "..." }
+  contactInfo Json?
+
+  // Profile data (public data from the platform, fetched at confirmation time)
+  profileData Json? // Platform-specific profile fields
+
+  // Confirmation tracking
+  confirmedBy      String // 'recruiter:{userId}' | 'subject:{method}' | 'auto:{reason}'
+  confirmedAt      DateTime @default(now())
+  confirmationNote String?  @db.Text
+
+  // Original identity candidate reference
+  identityCandidateId String?
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Tenant-scoped unique constraints
+  @@unique([candidateId, platform, platformId], map: "confirmed_identities_candidateId_platform_platformId_key")
+  @@unique([identityCandidateId], map: "confirmed_identities_identityCandidateId_key")
+  @@unique([tenantId, candidateId, platform, platformId], map: "confirmed_identities_tenantId_candidateId_platform_platformId_k")
+  @@unique([tenantId, identityCandidateId])
+  @@index([tenantId])
+  @@index([candidateId])
+  @@index([platform])
+  @@index([confirmedBy])
+  @@index([createdAt])
+  @@map("confirmed_identities")
+}
+
+/// EnrichmentSession: Tracks enrichment runs for audit and debugging
+model EnrichmentSession {
+  id       String @id @default(cuid())
+  tenantId String
+
+  candidateId String
+  candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  // Session state
+  status String @default("pending") // 'pending' | 'running' | 'completed' | 'failed'
+
+  // Execution plan
+  roleType        String? // Role type used for source selection
+  sourcesPlanned  Json? // Array of sources to query
+  sourcesExecuted Json? // Array of sources actually queried
+
+  // Budget tracking
+  queriesPlanned  Int?
+  queriesExecuted Int?
+  earlyStopReason String? // 'confidence_threshold' | 'budget_exhausted' | null
+
+  // Results summary
+  identitiesFound     Int    @default(0)
+  identitiesConfirmed Int    @default(0)
+  finalConfidence     Float?
+
+  // Error tracking
+  errorMessage String? @db.Text
+  errorDetails Json?
+
+  // Timing
+  startedAt   DateTime?
+  completedAt DateTime?
+  durationMs  Int?
+
+  // Optional summary output (generated after discovery)
+  summary            String?   @db.Text
+  summaryStructured  Json?
+  summaryEvidence    Json?
+  summaryModel       String?
+  summaryTokens      Int?
+  summaryGeneratedAt DateTime?
+
+  // Run trace for observability (Phase A.5)
+  // Contains per-platform diagnostics, seed hints, and final metrics
+  runTrace Json?
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([candidateId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("enrichment_sessions")
+}
+
+/// AuditLog: General audit trail for compliance
+model AuditLog {
+  id String @id @default(cuid())
+
+  // Multi-tenancy: Clerk organization ID (optional for system-level logs)
+  tenantId String?
+
+  // What happened
+  action       String // 'candidate.created' | 'identity.confirmed' | 'email.revealed' | etc.
+  resourceType String // 'candidate' | 'identity_candidate' | 'confirmed_identity'
+  resourceId   String
+
+  // Who did it
+  actorType String // 'system' | 'recruiter' | 'subject'
+  actorId   String? // User ID if applicable
+
+  // Context
+  metadata  Json? // Action-specific details
+  ipAddress String?
+  userAgent String? @db.Text
+
+  // Timestamp
+  createdAt DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([action])
+  @@index([resourceType, resourceId])
+  @@index([actorType, actorId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+/// TenantSettings: Per-tenant configuration and policy knobs
+/// Stores settings that customize behavior for each organization
+model TenantSettings {
+  id String @id @default(cuid())
+
+  // Tenant identifier (Clerk org ID) - must be unique
+  tenantId String @unique
+
+  // Rate limit configuration (multiplier applied to base limits)
+  rateLimitMultiplier Float @default(1.0) // 1.0 = standard, 2.0 = double limits
+
+  // Enrichment budget configuration
+  maxEnrichmentsPerDay    Int @default(100) // Daily enrichment limit
+  maxQueriesPerEnrichment Int @default(30) // Max queries per enrichment session
+  maxParallelPlatforms    Int @default(3) // Max platforms to query in parallel
+
+  // Feature flags (JSON for flexibility)
+  features Json? // { summaryEnabled: true, autoConfirmHighConfidence: false, ... }
+
+  // Contact/PII storage settings
+  allowContactStorage Boolean @default(true) // Whether tenant can store confirmed contact info
+
+  // Plan/tier tracking (for future billing integration)
+  plan      String   @default("free") // 'free' | 'pro' | 'enterprise'
+  planSince DateTime @default(now())
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([tenantId])
+  @@index([plan])
+  @@map("tenant_settings")
+}
+
+/// SearchCacheV2: DB-based search cache (alternative to Redis)
+model SearchCacheV2 {
+  id       String @id @default(cuid())
+  tenantId String
+
+  // Cache key (normalized query hash)
+  queryHash String // Unique per tenant (see @@unique below)
+  queryText String @db.Text
+
+  // Cached data
+  parsedQuery Json // ParsedSearchQuery
+  results     Json // Array of candidate summaries
+  resultCount Int
+
+  // Provider info
+  provider String? // 'serper' | 'brave' (legacy: 'searxng' | 'brightdata')
+
+  // TTL management
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  // Tenant-scoped unique constraint
+  @@unique([tenantId, queryHash])
+  @@index([tenantId])
+  @@index([tenantId, queryHash])
+  @@index([queryHash], map: "search_cache_v2_queryHash_idx")
+  @@index([expiresAt])
+  @@map("search_cache_v2")
+}
+
+/// Link from tenant-scoped Signal candidate to global memory.
+/// Created during async graph sync. Used for retrieval join.
+model CandidateGlobalLink {
+  id                String   @id @default(cuid())
+  tenantId          String
+  candidateId       String   @unique
+  globalCandidateId String // UUID from ActiveKG global_candidates.id
+  linkedAt          DateTime @default(now())
+  linkConfidence    Float? // identity resolution confidence at link time
+  matchMethod       String? // 'linkedin_id_exact' | 'github_exact' | 'email_hash_exact'
+
+  candidate Candidate @relation(fields: [tenantId, candidateId], references: [tenantId, id], onDelete: Cascade)
+
+  @@unique([tenantId, candidateId])
+  @@unique([tenantId, globalCandidateId])
+  @@index([globalCandidateId])
+  @@map("candidate_global_links")
+}
+
+/// Durable state machine for shortlist-triggered contact enrichment.
+/// Provider responses never flow into Candidate.searchMeta or sourcing telemetry.
+model ContactEnrichmentOperation {
+  id                 String    @id @default(cuid())
+  tenantId           String
+  candidateId        String
+  globalCandidateId  String?
+  state              String    @default("queued")
+  generation         Int       @default(1)
+  provider           String?
+  providerRequestKey String?
+  providerRecordId   String?
+  stagedEvidence     Json?
+  stagedAt           DateTime?
+  attempts           Int       @default(0)
+  nextAttemptAt      DateTime  @default(now())
+  leaseToken         String?
+  leaseExpiresAt     DateTime?
+  lastErrorCode      String?
+  providerStartedAt  DateTime?
+  selectedEmail      String?
+  completedAt        DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  candidate Candidate @relation(fields: [tenantId, candidateId], references: [tenantId, id], onDelete: Cascade)
+
+  @@unique([tenantId, candidateId])
+  @@unique([tenantId, globalCandidateId])
+  @@index([state, nextAttemptAt])
+  @@index([leaseExpiresAt])
+  @@map("contact_enrichment_operations")
+}
+
+/// Durable, tenant-local delivery ledger for purchased public profiles.
+/// Payloads are never exposed through recruiter APIs or shared telemetry.
+model PublicMemoryIngestOutbox {
+  id                    String    @id
+  tenantId              String
+  signalCandidateId     String
+  sourcingRequestId     String?
+  localCandidateId      String?
+  payload               Json
+  generation            Int       @default(1)
+  status                String    @default("pending")
+  attempts              Int       @default(0)
+  nextAttemptAt         DateTime  @default(now())
+  leaseToken            String?
+  leaseExpiresAt        DateTime?
+  globalCandidateId     String?
+  lastErrorCode         String?
+  acknowledgedAt        DateTime?
+  linkedAt              DateTime?
+  linkAttempts          Int       @default(0)
+  linkNextAttemptAt     DateTime  @default(now())
+  linkLastErrorCode     String?
+  linkDeadAt            DateTime?
+  payloadCompactedAt    DateTime?
+  diagnosticsRecordedAt DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@unique([tenantId, signalCandidateId])
+  @@index([status, nextAttemptAt])
+  @@index([sourcingRequestId, status])
+  @@index([leaseExpiresAt])
+  @@index([linkNextAttemptAt])
+  @@index([status, payloadCompactedAt])
+  @@map("public_memory_ingest_outbox")
+}
+
+/// Per-sourcing-run receipt for a delivery row. Delivery stays idempotent per
+/// public identity while each run retains honest queued/terminal accounting.
+model PublicMemoryIngestReceipt {
+  id                    String    @id
+  tenantId              String
+  signalCandidateId     String
+  sourcingRequestId     String
+  status                String    @default("pending")
+  terminalAt            DateTime?
+  diagnosticsRecordedAt DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@unique([sourcingRequestId, signalCandidateId])
+  @@index([tenantId, signalCandidateId])
+  @@index([sourcingRequestId, status])
+  @@index([diagnosticsRecordedAt, createdAt])
+  @@map("public_memory_ingest_receipts")
+}
+
+/// Fine-query state for the capacity-fill ladder. Scope is tenant today and
+/// remains explicit for the later public-platform migration in #12.
+model SourcingCoverageState {
+  id                          String    @id @default(cuid())
+  scope                       String
+  scopeKey                    String
+  queryFingerprint            String
+  activeRung                  String?
+  shortfallStreak             Int       @default(0)
+  lastExactProviderTotal      Int?
+  lastExactRequestedLimit     Int       @default(0)
+  lastProviderTotal           Int?
+  lastRequestedLimit          Int       @default(0)
+  lastRawReturnedCount        Int       @default(0)
+  lastSpillObservedAt         DateTime?
+  lastSubmittedExclusionCount Int       @default(0)
+  lastObservedAt              DateTime  @default(now())
+  createdAt                   DateTime  @default(now())
+  updatedAt                   DateTime  @updatedAt
+
+  @@unique([scope, scopeKey, queryFingerprint])
+  @@index([scope, scopeKey, queryFingerprint, lastObservedAt], map: "sourcing_coverage_states_scope_scopeKey_queryFingerprint_lastOb")
+  @@map("sourcing_coverage_states")
+}
+
+model JobSourcingRequest {
+  id                    String    @id @default(cuid())
+  tenantId              String
+  externalJobId         String
+  jobContextHash        String
+  jobContext            Json
+  callbackUrl           String
+  status                String    @default("queued")
+  requestedAt           DateTime  @default(now())
+  completedAt           DateTime?
+  callbackAttempts      Int       @default(0)
+  lastCallbackError     String?   @db.Text
+  callbackStatus        String?   @map("callback_status")
+  callbackSentAt        DateTime? @map("callback_sent_at") @db.Timestamptz(6)
+  resultCount           Int?
+  qualityGateTriggered  Boolean   @default(false) @map("quality_gate_triggered")
+  queriesExecuted       Int       @default(0) @map("queries_executed")
+  diagnostics           Json?
+  lastRerankedAt        DateTime? @map("last_reranked_at") @db.Timestamptz(6)
+  acquisitionGeneration Int       @default(1) @map("acquisition_generation")
+  executionAttemptId    String?   @map("execution_attempt_id")
+  processingLeaseId     String?   @map("processing_lease_id")
+
+  candidates        JobSourcingCandidate[]
+  crustdataReceipts CrustdataAcquisitionReceipt[]
+
+  @@unique([tenantId, externalJobId, jobContextHash])
+  @@unique([id, tenantId])
+  @@index([tenantId, status])
+  @@map("job_sourcing_requests")
+}
+
+model CrustdataAcquisitionReceipt {
+  id                    String    @id @default(cuid())
+  tenantId              String
+  sourcingRequestId     String
+  acquisitionGeneration Int
+  slot                  String
+  status                String    @default("started")
+  requestFingerprint    String
+  requestInput          Json
+  requestMetadata       Json
+  result                Json?
+  error                 String?   @db.Text
+  startedAt             DateTime  @default(now())
+  completedAt           DateTime?
+  effectsAppliedAt      DateTime?
+  effectMetadata        Json?
+  memoryIngestedAt      DateTime? @map("memory_ingested_at")
+  memoryIngestMetadata  Json?     @map("memory_ingest_metadata")
+  updatedAt             DateTime  @updatedAt
+
+  sourcingRequest JobSourcingRequest @relation(fields: [sourcingRequestId, tenantId], references: [id, tenantId], onDelete: Cascade)
+
+  @@unique([tenantId, sourcingRequestId, acquisitionGeneration, slot], map: "crustdata_receipts_request_generation_slot_key")
+  @@map("crustdata_acquisition_receipts")
+}
+
+model JobSourcingCandidate {
+  id                String @id @default(cuid())
+  tenantId          String
+  sourcingRequestId String
+  candidateId       String
+  fitScore          Float?
+  fitBreakdown      Json?
+  sourceType        String
+  enrichmentStatus  String
+  rank              Int
+
+  sourcingRequest JobSourcingRequest @relation(fields: [sourcingRequestId], references: [id])
+  candidate       Candidate          @relation(fields: [candidateId], references: [id])
+
+  @@unique([sourcingRequestId, candidateId])
+  @@index([tenantId, sourcingRequestId])
+  @@index([sourcingRequestId])
+  @@index([candidateId])
+  @@map("job_sourcing_candidates")
+}

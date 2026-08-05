@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "sourceBaseCommit": "410d58caf014a85c9f28e99643153db5551a3500",
+  "baselineMigrationThrough": "20260805010000_drop_legacy_global_search_cache_index",
+  "baselinePath": "prisma/baseline/signal-baseline.sql",
+  "baselineSha256": "e113363fe75b67684b69dd7e61d1ca18f12f87e446f9e0174627b9c22ca09b71",
+  "baselineSchemaPath": "prisma/baseline/signal-schema.prisma",
+  "baselineSchemaSha256": "804db2a75558f3aa1eec5d787842a87c8704e9aa6712d69b0ccc443a8abdb159",
+  "migrations": [
+    {
+      "name": "20250101000000_add_v2_candidate_tables",
+      "sha256": "84bc1d13b4d9b1b8ebfab9093fc51b6dad6e13489bef2a1b4801b4db1b324012"
+    },
+    {
+      "name": "20251217000000_add_enrichment_session_summary_fields",
+      "sha256": "edd3bc828e0c4434c341a23ff59f64d9470e2c519595fd7c9f24fa1bc67890f5"
+    },
+    {
+      "name": "20251218000000_add_enrichment_run_trace",
+      "sha256": "8772ad99d597cbfb7500edb2b0635dc6d619bfbc5cd3798b0e1e942ed425c904"
+    },
+    {
+      "name": "20251218100000_add_tenant_id_to_v2_tables",
+      "sha256": "d9e35e1bd0b090d8a426a6cbe57812a772b49e1b9301c3f9cfb99f7aca8cd1ab"
+    },
+    {
+      "name": "20251218200000_add_tenant_settings",
+      "sha256": "7d1c8580e1e363a19c12c4c5036fa8354205163287f998762fd842e3d512e004"
+    },
+    {
+      "name": "20260212000000_add_candidate_search_meta",
+      "sha256": "49f122b9bcacbd7582b7eca0cfb00f75cca4470f441df982455dc4e7792810ec"
+    },
+    {
+      "name": "20260217000000_add_intelligence_snapshot",
+      "sha256": "c4054e79b2da6e3cf4bd912b7055ae896c823b7d9753400e8bf106cb7967f894"
+    },
+    {
+      "name": "20260218010000_add_sourcing_diagnostics_columns",
+      "sha256": "7d682ee5471910bc6d850ae21e40386a77fa1cda766c32615b58bb85e1547385"
+    },
+    {
+      "name": "20260218020000_cleanup_duplicate_sourcing_diag_columns",
+      "sha256": "c64a811616ca8fceeb7724d11f3a8bf24bc0405cbc4ef781f1e59427907387ae"
+    },
+    {
+      "name": "20260227000000_add_last_reranked_at",
+      "sha256": "898e334a4bbaf5f9fd65516963f9477be3ac1b869bf037ddf8035f5494eeb6d5"
+    },
+    {
+      "name": "20260227100000_decouple_callback_status",
+      "sha256": "f9126479229c5aee50bc0c918d1cde73c995eb014ab68312fa326e562357f371"
+    },
+    {
+      "name": "20260310000000_global_memory",
+      "sha256": "1c5eb9c6d3f5d262410ee8a671b71acb8174066f5572293789bf6f45a0012706"
+    },
+    {
+      "name": "20260315100000_add_seniority_hint",
+      "sha256": "1a9092e169b807d6ae1ddbce19631447590fa8c62253a223695eb3460cdb0898"
+    },
+    {
+      "name": "20260720000000_add_candidate_profile_picture_url",
+      "sha256": "5c88f6358cfff031ecf805329b0253a54881a1e4a84389cee53b1ef7d91ced95"
+    },
+    {
+      "name": "20260725000000_add_sourcing_coverage_states",
+      "sha256": "1dffbbe871500e194497929a03a5023bb3cba4e0e113896bb4318181ae7f0e0c"
+    },
+    {
+      "name": "20260725100000_unique_candidate_global_link",
+      "sha256": "bde45b5a373bcb866579dd92f569f31b1cf23cd8574fae41084c3ece39841d97"
+    },
+    {
+      "name": "20260725110000_add_public_memory_ingest_outbox",
+      "sha256": "d34e5ee4e739b1059e0940019aa9d558a308fa7cf52abf743876934626749b93"
+    },
+    {
+      "name": "20260725120000_add_contact_enrichment_operations",
+      "sha256": "fd2daba46327693b63fb823b5d2e547ed7aca94ac3300ad91c49946e6104b4f5"
+    },
+    {
+      "name": "20260727000000_add_crustdata_acquisition_receipts",
+      "sha256": "e2ed476b3a3d328f4798e1826e9dcaffa33257ec7e8c04b0729caac7f0b4d3d6"
+    },
+    {
+      "name": "20260805000000_drop_legacy_candidate_linkedin_indexes",
+      "sha256": "83e22d93493b9be5ebad8366c0092fcabb9f546000833afd5d74b2f8bbbcb923"
+    },
+    {
+      "name": "20260805010000_drop_legacy_global_search_cache_index",
+      "sha256": "88a542f203511d406166090547da1c3679725d042327d412a1d8f1af7fc9a01b"
+    }
+  ]
+}

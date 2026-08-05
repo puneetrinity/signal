@@ -19,5 +19,6 @@ healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
 
-# Migrations are handled by the start script (migrate-with-baseline.sh)
-# Do not duplicate them here to avoid double-migration on each deploy
+# Existing databases run `prisma migrate deploy` in each service's configured
+# start command. A genuinely empty database requires the explicit, guarded
+# `npm run db:bootstrap-empty` operator procedure; it is never automatic.

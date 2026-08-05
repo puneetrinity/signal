@@ -16,6 +16,7 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      - run: npm run check:no-db-push
       - run: npm run typecheck
       - run: npm test
 
@@ -39,6 +40,7 @@ jobs:
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/signal_test
       DIRECT_URL: postgresql://postgres:postgres@localhost:5432/signal_test
+      SIGNAL_BOOTSTRAP_EMPTY_DATABASE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -46,5 +48,5 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npx prisma db push --force-reset --accept-data-loss --skip-generate
+      - run: npm run test:bootstrap
       - run: npm run test:postgres
