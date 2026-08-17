@@ -70,7 +70,7 @@ scoring.ts → dynamic confidence (shadow mode), serpPosition tiebreaker
 - `src/lib/search/providers/types.ts`
 - `src/lib/search/providers/serper.ts`
 - `src/lib/enrichment/sources/search-executor.ts`
-- `src/app/api/v2/search/route.ts`
+- `src/lib/sourcing/discovery.ts`
 - `src/types/linkedin.ts`
 - `src/lib/search/providers/index.ts`
 - `prisma/schema.prisma`
@@ -546,7 +546,7 @@ Step 6 (bridge queries)    Step 7 (3a fixes) ──→ Step 8 (URL-anchored) ─
 | `src/lib/search/providers/types.ts` | 1, 2 |
 | `src/lib/search/providers/serper.ts` | 1, 5 |
 | `src/lib/enrichment/sources/search-executor.ts` | 1, 2, 8 |
-| `src/app/api/v2/search/route.ts` | 1 |
+| `src/lib/sourcing/discovery.ts` | 1 |
 | `src/types/linkedin.ts` | 1 |
 | `prisma/schema.prisma` | 1, 2 |
 | `src/lib/enrichment/hint-extraction.ts` | 4, 7, 9, 10 |
