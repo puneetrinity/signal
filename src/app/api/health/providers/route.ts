@@ -36,7 +36,6 @@ export async function GET() {
         SEARCH_PROVIDER: process.env.SEARCH_PROVIDER || 'serper (default)',
         SEARCH_FALLBACK_PROVIDER: process.env.SEARCH_FALLBACK_PROVIDER || 'none',
         PARSER_PROVIDER: process.env.PARSER_PROVIDER || 'gemini (default)',
-        USE_NEW_DISCOVERY: process.env.USE_NEW_DISCOVERY || 'false',
         // Show which APIs are configured (not the actual keys)
         BRIGHTDATA_API_TOKEN: process.env.BRIGHTDATA_API_TOKEN ? 'configured' : 'not set',
         SEARXNG_URL: process.env.SEARXNG_URL || 'default',

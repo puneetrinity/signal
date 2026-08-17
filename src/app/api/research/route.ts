@@ -1,26 +1,14 @@
-import { NextResponse } from 'next/server';
+import { legacyV2GoneResponse } from '@/lib/legacy-retirement';
 
 /**
  * v1 Research API - DEPRECATED
  *
- * This endpoint has been retired. Use /api/v2/enrich instead.
+ * This endpoint has been retired with the standalone Discover browser product.
  */
 export async function POST() {
-  return NextResponse.json(
-    {
-      success: false,
-      error: 'This endpoint has been retired. Use /api/v2/enrich instead.',
-    },
-    { status: 410 }
-  );
+  return legacyV2GoneResponse();
 }
 
 export async function GET() {
-  return NextResponse.json(
-    {
-      success: false,
-      error: 'This endpoint has been retired. Use /api/v2/enrich instead.',
-    },
-    { status: 410 }
-  );
+  return legacyV2GoneResponse();
 }
