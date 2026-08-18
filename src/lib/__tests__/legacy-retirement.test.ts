@@ -1,12 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { NextRequest } from 'next/server';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { GET as getLegacyImageProxy } from '@/app/api/proxy-image/route';
 import { GET as getLegacyResearch, POST as postLegacyResearch } from '@/app/api/research/route';
 import { GET as getLegacySearch, POST as postLegacySearch } from '@/app/api/search/route';
 import { GET as getV2Review } from '@/app/api/v2/review/route';
 import { GET as getV2Search, POST as postV2Search } from '@/app/api/v2/search/route';
 import { GET as getV2Sessions } from '@/app/api/v2/sessions/route';
 import {
+  LEGACY_IMAGE_PROXY_RETIREMENT_BODY,
   LEGACY_V2_RETIREMENT_BODY,
   isLegacyBrowserPath,
 } from '@/lib/legacy-retirement';
@@ -74,5 +76,28 @@ describe('legacy Discover API tombstones', () => {
 
     expect(source).not.toMatch(/prisma|redis|bull|queue|provider|withAuth|service-jwt/i);
     expect(source).toContain("@/lib/legacy-retirement");
+  });
+
+  it('GET /api/proxy-image returns a stable request-independent retirement response', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const response = await getLegacyImageProxy();
+
+    expect(response.status).toBe(410);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    await expect(response.json()).resolves.toEqual(LEGACY_IMAGE_PROXY_RETIREMENT_BODY);
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+
+  it('the image-proxy tombstone has no network, body, or configuration path', () => {
+    const source = readFileSync('src/app/api/proxy-image/route.ts', 'utf8');
+
+    expect(source).toContain('legacyImageProxyGoneResponse');
+    expect(source).not.toMatch(
+      /fetch|arrayBuffer|NextRequest|node:net|IMAGE_PROXY_ALLOWED_HOSTS|content-length|image\//i
+    );
   });
 });
