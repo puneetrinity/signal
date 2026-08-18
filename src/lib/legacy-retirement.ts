@@ -6,6 +6,12 @@ export const LEGACY_V2_RETIREMENT_BODY = {
   error: 'This legacy Discover browser API has been retired. Use the Ealana application.',
 } as const;
 
+export const LEGACY_IMAGE_PROXY_RETIREMENT_BODY = {
+  success: false,
+  code: 'DISCOVER_IMAGE_PROXY_RETIRED',
+  error: 'The legacy Discover image proxy has been retired.',
+} as const;
+
 const LEGACY_BROWSER_PREFIXES = [
   '/sign-in',
   '/sign-up',
@@ -29,6 +35,15 @@ export function isLegacyBrowserPath(pathname: string): boolean {
 
 export function legacyV2GoneResponse(): NextResponse {
   return NextResponse.json(LEGACY_V2_RETIREMENT_BODY, {
+    status: 410,
+    headers: {
+      'Cache-Control': 'no-store',
+    },
+  });
+}
+
+export function legacyImageProxyGoneResponse(): NextResponse {
+  return NextResponse.json(LEGACY_IMAGE_PROXY_RETIREMENT_BODY, {
     status: 410,
     headers: {
       'Cache-Control': 'no-store',

@@ -1424,6 +1424,9 @@ export default function ProfileSummaryCard({ summary }: Props) {
 }
 ```
 
+> **Historical only (2026-08-17):** this legacy browser component was removed and `/api/proxy-image` is retired.
+> Do not use the following sample as current implementation guidance.
+
 2. Create `src/components/ProfileDetails.tsx`:
 
 ```typescript
