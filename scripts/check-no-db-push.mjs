@@ -7,6 +7,11 @@ const packageJson = JSON.parse(
   await readFile(resolve(ROOT_DIR, 'package.json'), 'utf8'),
 );
 const offenders = [];
+const negativeFixtureFiles = new Set([
+  'scripts/check-no-db-push.mjs',
+  'scripts/schema-control/authority-guard.mjs',
+  'scripts/schema-control/test-schema-control-unit.mjs',
+]);
 
 async function executableScripts(directory) {
   const files = [];
@@ -33,7 +38,7 @@ for (const entry of await readdir(workflowDirectory, { withFileTypes: true })) {
 activeFiles.push(...await executableScripts(resolve(ROOT_DIR, 'scripts')));
 
 for (const relativePath of activeFiles) {
-  if (relativePath === 'scripts/check-no-db-push.mjs') continue;
+  if (negativeFixtureFiles.has(relativePath)) continue;
   const contents = await readFile(resolve(ROOT_DIR, relativePath), 'utf8');
   if (forbidden.test(contents)) offenders.push(relativePath);
 }

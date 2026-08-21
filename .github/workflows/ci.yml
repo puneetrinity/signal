@@ -17,6 +17,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check:no-db-push
+      - run: npm run check:schema-control
+      - run: npm run test:schema-control
       - run: npm run typecheck
       - run: npm test
 
@@ -41,6 +43,8 @@ jobs:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/signal_test
       DIRECT_URL: postgresql://postgres:postgres@localhost:5432/signal_test
       SIGNAL_BOOTSTRAP_EMPTY_DATABASE: "1"
+      SIGNAL_SCHEMA_ENVIRONMENT: development
+      SIGNAL_SCHEMA_DISPOSABLE_SINGLE_CREDENTIAL: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -50,3 +54,35 @@ jobs:
       - run: npm ci
       - run: npm run test:bootstrap
       - run: npm run test:postgres
+
+  schema-control-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Start runner-local PostgreSQL 16 and prepare the disposable identity
+        run: |
+          sudo systemctl start postgresql
+          server_version_num="$(sudo -u postgres psql -d postgres -Atqc 'SHOW server_version_num')"
+          if [[ "$server_version_num" != 16* ]]; then
+            echo "Expected runner-local PostgreSQL 16; got server_version_num=$server_version_num" >&2
+            exit 1
+          fi
+          sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          DROP DATABASE IF EXISTS signal_schema_control_test_ci WITH (FORCE);
+          DROP ROLE IF EXISTS signal_runtime;
+          DROP ROLE IF EXISTS signal_schema_control_test_runner;
+          CREATE ROLE signal_schema_control_test_runner LOGIN SUPERUSER PASSWORD 'runner-test-only';
+          CREATE DATABASE signal_schema_control_test_ci OWNER signal_schema_control_test_runner;
+          SQL
+          pg_isready -h 127.0.0.1 -p 5432 -d signal_schema_control_test_ci -U signal_schema_control_test_runner
+      - run: npm ci
+      - name: Run disposable Discover schema-control matrix
+        env:
+          RUN_SIGNAL_SCHEMA_CONTROL_POSTGRES: "1"
+          SIGNAL_SCHEMA_TEST_DATABASE_URL: postgresql://signal_schema_control_test_runner:runner-test-only@127.0.0.1:5432/signal_schema_control_test_ci
+        run: npm run test:schema-control:pg

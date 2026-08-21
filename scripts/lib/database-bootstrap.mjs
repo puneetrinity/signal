@@ -32,6 +32,8 @@ export function runPrisma(args, options = {}) {
     env = process.env,
     input,
     capture = false,
+    timeoutMs,
+    includeOutputOnError = true,
   } = options;
 
   return new Promise((resolvePromise, reject) => {
@@ -44,16 +46,37 @@ export function runPrisma(args, options = {}) {
     });
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
+    let forceKill = null;
+    const timeout = Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? setTimeout(() => {
+        timedOut = true;
+        child.kill('SIGTERM');
+        forceKill = setTimeout(() => child.kill('SIGKILL'), 5_000);
+      }, timeoutMs)
+      : null;
 
     if (child.stdout) child.stdout.on('data', (chunk) => { stdout += chunk; });
     if (child.stderr) child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', reject);
+    child.on('error', (error) => {
+      if (timeout) clearTimeout(timeout);
+      if (forceKill) clearTimeout(forceKill);
+      reject(error);
+    });
     child.on('close', (code) => {
+      if (timeout) clearTimeout(timeout);
+      if (forceKill) clearTimeout(forceKill);
+      if (timedOut) {
+        reject(new Error(`Prisma command exceeded its ${timeoutMs}ms deadline`));
+        return;
+      }
       if (code === 0) {
         resolvePromise({ stdout, stderr });
         return;
       }
-      const detail = [stdout, stderr].filter(Boolean).join('\n').trim();
+      const detail = includeOutputOnError
+        ? [stdout, stderr].filter(Boolean).join('\n').trim()
+        : '';
       reject(
         new Error(
           `Prisma command failed with exit code ${code}${detail ? `:\n${detail}` : ''}`,

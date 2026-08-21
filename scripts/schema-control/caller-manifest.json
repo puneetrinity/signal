@@ -1,0 +1,16 @@
+{
+  "formatVersion": 1,
+  "system": "discover",
+  "surfaces": [
+    { "id": "web-runtime", "source": "package.json#scripts.start", "authority": "read-only-startup" },
+    { "id": "sourcing-worker-runtime", "source": "package.json#scripts.worker:sourcing", "authority": "read-only-startup" },
+    { "id": "release-job", "source": "package.json#scripts.db:migrate:release", "authority": "migration-release-only" },
+    { "id": "release-descriptor", "source": "railway.schema-release.json", "authority": "manual-one-shot" },
+    { "id": "existing-target-adoption", "source": "package.json#scripts.db:schema:adopt-existing", "authority": "control-metadata-only" },
+    { "id": "runtime-role-provision", "source": "package.json#scripts.db:schema:provision-runtime-role", "authority": "credential-control-only" },
+    { "id": "empty-database-bootstrap", "source": "package.json#scripts.db:bootstrap-empty", "authority": "disposable-fresh-only" },
+    { "id": "railway-runtime-config", "source": "railway.toml", "authority": "no-schema-authority" },
+    { "id": "ci", "source": ".github/workflows/ci.yml", "authority": "disposable-proof-only" },
+    { "id": "scheduled-drift", "source": ".github/workflows/schema-drift.yml", "authority": "read-only-audit" }
+  ]
+}

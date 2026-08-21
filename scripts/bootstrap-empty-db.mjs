@@ -13,6 +13,22 @@ if (process.env[BOOTSTRAP_OPT_IN] !== '1') {
   throw new Error(`${BOOTSTRAP_OPT_IN}=1 is required`);
 }
 if (!targetUrl) throw new Error('DIRECT_URL or DATABASE_URL is required');
+if (
+  process.env.SIGNAL_SCHEMA_ENVIRONMENT !== 'development' ||
+  process.env.SIGNAL_SCHEMA_DISPOSABLE_SINGLE_CREDENTIAL !== '1'
+) {
+  throw new Error(
+    'Empty bootstrap requires an explicitly disposable development environment',
+  );
+}
+const parsedTarget = new URL(targetUrl);
+const databaseName = parsedTarget.pathname.replace(/^\//, '');
+if (
+  !['', 'localhost', '127.0.0.1', '[::1]', '::1'].includes(parsedTarget.hostname) ||
+  !/(?:^|[_-])(?:test|disposable)(?:[_-]|$)/i.test(databaseName)
+) {
+  throw new Error('Empty bootstrap requires a loopback/socket *_test or *_disposable database');
+}
 
 const { manifest, baselinePath } = await validateBaselineManifest();
 const prismaEnvironment = datasourceEnvironment(targetUrl);
