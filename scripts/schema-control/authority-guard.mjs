@@ -85,12 +85,14 @@ export async function evaluateSchemaControl(root) {
 
   const descriptor = JSON.parse(await readFile(resolve(root, 'railway.schema-release.json'), 'utf8'));
   if (
+    descriptor?.build?.builder !== 'NIXPACKS' ||
+    descriptor?.build?.buildCommand !== 'npm run db:generate' ||
     descriptor?.deploy?.startCommand !== 'npm run db:migrate:release' ||
     descriptor?.deploy?.restartPolicyType !== 'NEVER' ||
     'healthcheckPath' in (descriptor?.deploy ?? {}) ||
     'cronSchedule' in (descriptor?.deploy ?? {})
   ) {
-    offenders.push('railway.schema-release.json is not a manual one-shot release descriptor');
+    offenders.push('railway.schema-release.json is not a non-reinstalling manual one-shot release descriptor');
   }
 
   for (const legacy of ['scripts/fix-tenant-migration.ts', 'scripts/fix-tenant-migration.sql']) {

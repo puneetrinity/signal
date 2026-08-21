@@ -139,6 +139,12 @@ try {
       return async () => writeFile(descriptorPath, originalDescriptor);
     },
     async () => {
+      const descriptor = JSON.parse(originalDescriptor);
+      descriptor.build.buildCommand = 'npm ci --include=dev --no-audit --no-fund';
+      await writeFile(descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`);
+      return async () => writeFile(descriptorPath, originalDescriptor);
+    },
+    async () => {
       const dockerfile = resolve(copyRoot, 'Dockerfile.schema-escape');
       await writeFile(dockerfile, 'CMD npx prisma migrate deploy\n');
       return async () => rm(dockerfile, { force: true });
