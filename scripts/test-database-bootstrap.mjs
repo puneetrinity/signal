@@ -22,6 +22,8 @@ const databaseEnvironment = datasourceEnvironment(targetUrl);
 const bootstrapEnvironment = {
   ...databaseEnvironment,
   SIGNAL_BOOTSTRAP_EMPTY_DATABASE: '1',
+  SIGNAL_SCHEMA_ENVIRONMENT: 'development',
+  SIGNAL_SCHEMA_DISPOSABLE_SINGLE_CREDENTIAL: '1',
 };
 const bootstrapScript = resolve(ROOT_DIR, 'scripts/bootstrap-empty-db.mjs');
 const driftScript = resolve(ROOT_DIR, 'scripts/check-schema-drift.mjs');

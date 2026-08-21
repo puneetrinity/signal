@@ -85,11 +85,12 @@ released receipt.
 
 ## Deployment
 
-Both `npm start` and `npm run worker:sourcing` run `prisma migrate deploy` and
-stop if it fails before starting their service. Concurrent deploy commands are
-serialized by Prisma's PostgreSQL migration advisory lock. The worker does not
-have an in-memory fallback: missing receipt storage must fail the run rather than
-permit an unreceipted paid call.
+Both `npm start` and `npm run worker:sourcing` run the read-only schema-ready
+assertion and stop before serving/consuming if the checked-in migration history
+and database ledger do not match. A separately invoked one-shot release wrapper
+holds the Signal release-boundary lock while Prisma retains its own internal
+migration lock. The worker does not have an in-memory fallback: missing receipt
+storage must fail the run rather than permit an unreceipted paid call.
 
 Flow's callback-fencing/ACK companion and Memory's observation-ordering API must
 deploy first. The Signal API and sourcing worker then change the queue contract
