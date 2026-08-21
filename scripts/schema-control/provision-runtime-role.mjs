@@ -1,7 +1,8 @@
 import { CONTROL_SCHEMA, RUNTIME_ROLE, quoteIdentifier, quoteLiteral, requireValue, resolveIdentityEnvironment,
   safeOperationalMessage } from './constants.mjs';
-import { assertIdentity, assertRuntimePrivileges, beginBoundedTransaction, createPrisma,
-  readIdentity } from './database.mjs';
+import { assertCoreRelations, assertIdentity, assertRuntimePrivileges, beginBoundedTransaction, createPrisma,
+  readIdentity, readPrismaLedger } from './database.mjs';
+import { assertPrismaLedger, loadMigrationLock } from './manifest.mjs';
 
 const identity = resolveIdentityEnvironment();
 const directUrl = requireValue(process.env, 'DIRECT_URL');
@@ -11,6 +12,7 @@ const parsedRuntime = new URL(runtimeUrl);
 if (decodeURIComponent(parsedRuntime.username) !== RUNTIME_ROLE) {
   throw new Error(`SIGNAL_RUNTIME_DATABASE_URL must authenticate as ${RUNTIME_ROLE}`);
 }
+const migrations = await loadMigrationLock();
 
 const owner = createPrisma(directUrl);
 let expectedDatabaseOid;
@@ -20,6 +22,14 @@ try {
     await beginBoundedTransaction(tx, { statementMs: 30_000, lockMs: 5_000 });
     const existingIdentity = await readIdentity(tx);
     if (existingIdentity !== null) assertIdentity(identity, existingIdentity);
+
+    // Target proof precedes the first role, grant or default-privilege write.
+    // Before adoption there is intentionally no control identity, so the
+    // immutable Prisma history plus Discover's core relations are the target
+    // identity boundary. This prevents an ambient/foreign owner DSN from
+    // receiving even transactionally rolled-back privilege mutations.
+    assertPrismaLedger(await readPrismaLedger(tx), migrations);
+    await assertCoreRelations(tx);
 
     const [{ database_oid: databaseOid, database_name: databaseName }] = await tx.$queryRawUnsafe(`
       SELECT oid::TEXT AS database_oid, datname AS database_name
@@ -77,6 +87,8 @@ try {
       if (currentIdentity !== null) {
         assertIdentity(identity, currentIdentity);
         await assertRuntimePrivileges(tx);
+      } else {
+        await assertRuntimePrivileges(tx, { allowMissingControl: true });
       }
     }, { maxWait: 5_000, timeout: 15_000 });
   } finally {

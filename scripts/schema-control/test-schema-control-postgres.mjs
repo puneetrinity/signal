@@ -95,6 +95,25 @@ async function resetDatabase() {
   }
 }
 
+async function provisioningFootprint() {
+  const [row] = await admin.$queryRawUnsafe(`
+    SELECT
+      EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${RUNTIME_ROLE}') AS runtime_role_exists,
+      to_regnamespace('${CONTROL_SCHEMA}')::TEXT AS control_schema,
+      (SELECT COALESCE(nspacl::TEXT, '') FROM pg_namespace WHERE nspname = 'public') AS public_acl,
+      COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+          'role', defaclrole::TEXT,
+          'namespace', defaclnamespace::TEXT,
+          'type', defaclobjtype,
+          'acl', COALESCE(defaclacl::TEXT, '')
+        ) ORDER BY defaclrole, defaclnamespace, defaclobjtype)::TEXT
+        FROM pg_default_acl
+      ), '[]') AS default_acls
+  `);
+  return row;
+}
+
 const commonIdentity = {
   SIGNAL_SCHEMA_TARGET_ID: targetId,
   SIGNAL_SCHEMA_ENVIRONMENT: 'development',
@@ -139,6 +158,20 @@ try {
   await safetyProof();
   await resetDatabase();
 
+  const beforeWrongTargetProvision = await provisioningFootprint();
+  const wrongTargetProvision = await runNode('scripts/schema-control/provision-runtime-role.mjs', {
+    ...commonIdentity,
+    DIRECT_URL: adminUrl,
+    SIGNAL_RUNTIME_DATABASE_URL: runtimeUrl,
+    SIGNAL_RUNTIME_ROLE_PASSWORD: runtimePassword,
+  });
+  assert(wrongTargetProvision.code !== 0, 'Non-Discover target provisioning unexpectedly succeeded');
+  const afterWrongTargetProvision = await provisioningFootprint();
+  assert(
+    JSON.stringify(afterWrongTargetProvision) === JSON.stringify(beforeWrongTargetProvision),
+    'Non-Discover target refusal left role, schema, ACL or default-privilege residue',
+  );
+
   await requireSuccess(
     await runNode('scripts/bootstrap-empty-db.mjs', bootstrapEnvironment),
     'guarded empty bootstrap',
@@ -147,6 +180,16 @@ try {
     SELECT COUNT(*)::INTEGER AS count FROM public.tenant_settings
   `);
   assert(beforeAdoption[0].count === 0, 'Disposable product table was not empty before adoption');
+
+  await requireSuccess(
+    await runNode('scripts/schema-control/provision-runtime-role.mjs', {
+      ...commonIdentity,
+      DIRECT_URL: adminUrl,
+      SIGNAL_RUNTIME_DATABASE_URL: runtimeUrl,
+      SIGNAL_RUNTIME_ROLE_PASSWORD: runtimePassword,
+    }),
+    'pre-adoption runtime-role provision',
+  );
 
   await requireSuccess(
     await runNode('scripts/schema-control/adopt-existing.mjs', adoptionEnvironment),
@@ -194,15 +237,6 @@ try {
     'Wrong-target refusal wrote a release attempt',
   );
 
-  await requireSuccess(
-    await runNode('scripts/schema-control/provision-runtime-role.mjs', {
-      ...commonIdentity,
-      DIRECT_URL: adminUrl,
-      SIGNAL_RUNTIME_DATABASE_URL: runtimeUrl,
-      SIGNAL_RUNTIME_ROLE_PASSWORD: runtimePassword,
-    }),
-    'runtime-role provision',
-  );
   const runtime = createPrisma(runtimeUrl);
   try {
     await runtime.$executeRawUnsafe(`

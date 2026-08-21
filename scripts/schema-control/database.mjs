@@ -157,6 +157,46 @@ export async function assertNoProductRowMutation(tx) {
 }
 
 export async function assertRuntimePrivileges(tx, options = {}) {
+  const [{ control_exists: controlExists }] = await tx.$queryRawUnsafe(`
+    SELECT to_regnamespace('${CONTROL_SCHEMA}') IS NOT NULL AS control_exists
+  `);
+  if (!controlExists) {
+    if (!options.allowMissingControl) {
+      throw new Error('Discover schema-control metadata is missing');
+    }
+    const [row] = await tx.$queryRawUnsafe(`
+      SELECT current_user AS role_name,
+             has_schema_privilege(current_user, 'public', 'USAGE') AS public_usage,
+             has_schema_privilege(current_user, 'public', 'CREATE') AS public_create,
+             has_table_privilege(current_user, 'public."_prisma_migrations"', 'SELECT') AS migration_read,
+             (
+               has_table_privilege(current_user, 'public."_prisma_migrations"', 'INSERT') OR
+               has_table_privilege(current_user, 'public."_prisma_migrations"', 'UPDATE') OR
+               has_table_privilege(current_user, 'public."_prisma_migrations"', 'DELETE') OR
+               has_table_privilege(current_user, 'public."_prisma_migrations"', 'TRUNCATE')
+             ) AS migration_write,
+             EXISTS (
+               SELECT 1
+               FROM pg_class relation
+               JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+               WHERE namespace.nspname = 'public'
+                 AND pg_get_userbyid(relation.relowner) = current_user
+                 AND relation.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+             ) AS owns_relation
+    `);
+    if (
+      row.role_name !== RUNTIME_ROLE ||
+      !row.public_usage ||
+      !row.migration_read ||
+      row.public_create ||
+      row.migration_write ||
+      row.owns_relation
+    ) {
+      throw new Error('Pre-adoption runtime role has schema-owner or migration-write authority');
+    }
+    return row;
+  }
+
   const [row] = await tx.$queryRawUnsafe(`
     SELECT current_user AS role_name,
            has_schema_privilege(current_user, 'public', 'USAGE') AS public_usage,
