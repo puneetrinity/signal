@@ -53,3 +53,29 @@ export async function signActiveGraphJWT(
     .setJti(uuidv4())
     .sign(key);
 }
+
+/**
+ * Candidate privacy is a distinct, read-only Memory authority. Keep its
+ * actor/scope contract separate from the existing tenant sourcing signer so a
+ * generic KG caller cannot silently gain directive write authority.
+ */
+export async function signCandidatePrivacyJWT(): Promise<string> {
+  const key = await getSigningKey();
+  const actorId = process.env.SIGNAL_CANDIDATE_PRIVACY_ACTOR_ID ?? 'signal-service';
+  if (actorId !== 'signal-service') {
+    throw new Error('candidate_privacy_configuration_invalid');
+  }
+  return new SignJWT({
+    tenant_id: 'platform',
+    scopes: 'candidate-privacy:read',
+    actor_type: 'service',
+  })
+    .setProtectedHeader({ alg: 'RS256', kid: process.env.SIGNAL_JWT_ACTIVE_KID || 'v1' })
+    .setIssuer('signal')
+    .setAudience('activekg')
+    .setSubject(actorId)
+    .setExpirationTime('5m')
+    .setIssuedAt()
+    .setJti(uuidv4())
+    .sign(key);
+}

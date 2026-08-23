@@ -19,7 +19,11 @@ try {
     await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock($1)', WRAPPER_LOCK_KEY);
     assertIdentity(release, await readIdentity(tx));
     assertPrismaLedger(await readPrismaLedger(tx), migrations, { allowPending: true });
-    await assertCoreRelations(tx);
+    // A forward release must prove the existing Discover target before it can
+    // apply the pending migration, so only the already-established core is
+    // required at this pre-application boundary. The full relation and
+    // constraint set is required again immediately after Prisma returns.
+    await assertCoreRelations(tx, { requireCandidatePrivacy: false });
 
     const attemptId = await startAttempt(tx, { fingerprint, kind: 'migration' });
     try {

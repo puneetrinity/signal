@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { createGroqModel } from '@/lib/ai/groq';
 import { searchLinkedInProfilesWithMeta, type SearchGeoContext } from '@/lib/search/providers';
 import type { ProfileSummary } from '@/types/linkedin';
+import { requireHealthyCandidatePrivacyContext } from '@/lib/candidate-privacy/repository';
 import { upsertDiscoveredCandidates } from './upsert-candidates';
 import type { JobRequirements } from './jd-digest';
 import { getDiscoverySkillBuckets } from './jd-digest';
@@ -791,6 +792,10 @@ export async function discoverCandidates(
     phase: 'strict' | 'fallback',
     geo?: SearchGeoContext,
   ): Promise<{ acceptedCount: number }> => {
+    // Refuse before any paid provider call when the local privacy projection is
+    // absent, stale, or rebuilding. Returned identities are separately checked
+    // by the admission primitive inside upsertDiscoveredCandidates.
+    await requireHealthyCandidatePrivacyContext();
     queriesExecuted++;
     const qi = queryIndex++;
     const startedAt = Date.now();

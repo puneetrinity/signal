@@ -42,7 +42,7 @@ function row(
     tenantId: 'org_1',
     signalCandidateId: `signal-${id}`,
     sourcingRequestId: 'request-1',
-    localCandidateId: null,
+    localCandidateId: `signal-${id}`,
     payload: payload(expectedGlobalCandidateId),
     generation: 1,
     attempts: 1,

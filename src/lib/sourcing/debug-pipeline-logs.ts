@@ -5,10 +5,8 @@
  * (not appended) on every run. Only active in development.
  *
  * Files written to: signal/pipeline-logs/
- *   - 01_sourcing.json     — raw Crustdata discovery results (300 profiles)
- *   - 02_ranking.json      — locally ranked candidates (top 100 + 200 reserve)
- *   - 03_enrichment.json   — Crustdata batch enrichment response map
- *   - 04_reranking.json    — final re-ranked list (= what gets persisted to DB)
+ * Candidate/profile payloads are deliberately excluded. These diagnostics
+ * retain only safe stage counts and timings.
  */
 
 import fs from 'fs';
@@ -69,14 +67,13 @@ export function resetPipelineLogTimers() {
   prevStepMs = null;
 }
 
-/** Step 1 — Raw Crustdata discovery profiles (before ranking) */
+/** Step 1 — privacy-safe Crustdata discovery count (before ranking) */
 export function logSourcingRaw(requestId: string, profiles: unknown[]) {
   write('01_sourcing.json', {
     step: 'sourcing',
     requestId,
     ...timing(),
     count: profiles.length,
-    profiles,
   });
 }
 
@@ -92,20 +89,16 @@ export function logRankingResult(
     ...timing(),
     primaryCount: primaryList.length,
     reserveCount: reserveList.length,
-    primaryList,
-    reserveList,
   });
 }
 
-/** Step 3 — Raw Crustdata batch enrichment map (keyed by LinkedIn URL) */
+/** Step 3 — privacy-safe Crustdata batch enrichment count */
 export function logEnrichmentRaw(requestId: string, enrichedMap: Map<string, unknown>) {
-  const entries = Object.fromEntries(enrichedMap);
   write('03_enrichment.json', {
     step: 'enrichment',
     requestId,
     ...timing(),
     enrichedCount: enrichedMap.size,
-    profiles: entries,
   });
 }
 
@@ -116,7 +109,6 @@ export function logRerankingResult(requestId: string, finalList: unknown[]) {
     requestId,
     ...timing(),
     count: finalList.length,
-    note: 'This is the final sourced candidates list persisted to jobSourcedCandidates',
-    candidates: finalList,
+    note: 'Privacy-safe count of the final sourced candidate list',
   });
 }

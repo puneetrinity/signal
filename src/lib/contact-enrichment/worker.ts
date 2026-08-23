@@ -16,10 +16,12 @@ import {
   type ContactOperationTransition,
 } from "./store";
 import {
+  CONTACT_OPERATION_STATES,
   type ClaimedContactOperation,
   type ContactOperationState,
   type StagedContactEvidence,
 } from "./types";
+import { requireCandidatePrivacyAllowed } from "@/lib/candidate-privacy/repository";
 
 const log = createLogger("ContactEnrichmentWorker");
 const DEFAULT_RETRY_MS = 60_000;
@@ -116,6 +118,7 @@ async function finishFromMemory(
   result: MemoryContactLookupResult,
   now: Date,
 ): Promise<"completed" | "pending"> {
+  await requireCandidatePrivacyAllowed(row.tenantId, row.candidateId);
   if (result.state === "found") {
     await transitionClaim(
       store,
@@ -159,6 +162,7 @@ async function persistStagedEvidence(
   now: Date,
 ): Promise<ClaimedContactOperation | null> {
   if (!row.globalCandidateId || evidence.length === 0) return null;
+  await requireCandidatePrivacyAllowed(row.tenantId, row.candidateId);
   const stagedEvidence: StagedContactEvidence = {
     version: 1,
     globalCandidateId: row.globalCandidateId,
@@ -216,6 +220,7 @@ async function writeStagedEvidence({
   }
 
   try {
+    await requireCandidatePrivacyAllowed(row.tenantId, row.candidateId);
     const result = await memory.record({
       tenantId: row.tenantId,
       evidence,
@@ -291,6 +296,7 @@ async function startEnrichLayer({
   );
   if (!starting) return "pending";
 
+  await requireCandidatePrivacyAllowed(starting.tenantId, starting.candidateId);
   const result = await providers.callEnrichLayer({
     requestKey,
     candidate: starting,
@@ -397,6 +403,7 @@ async function continueToEnrichLayerAfterFreshMemoryLookup({
 
   let memoryResult: MemoryContactLookupResult;
   try {
+    await requireCandidatePrivacyAllowed(current.tenantId, current.candidateId);
     memoryResult = await memory.lookup({
       tenantId: current.tenantId,
       globalCandidateId: current.globalCandidateId,
@@ -464,6 +471,7 @@ async function handleFullEnrichPoll({
     );
     return "completed";
   }
+  await requireCandidatePrivacyAllowed(row.tenantId, row.candidateId);
   const result: FullEnrichPollResult = await providers.pollFullEnrich({
     providerRecordId: row.providerRecordId,
   });
@@ -557,6 +565,7 @@ async function startFullEnrich({
   );
   if (!starting) return "pending";
 
+  await requireCandidatePrivacyAllowed(starting.tenantId, starting.candidateId);
   const result = await providers.startFullEnrich({
     operationId: starting.id,
     generation: starting.generation,
@@ -629,6 +638,7 @@ async function lookupMemoryFirst({
   if (!row.globalCandidateId) return "pending";
   let result: MemoryContactLookupResult;
   try {
+    await requireCandidatePrivacyAllowed(row.tenantId, row.candidateId);
     result = await memory.lookup({
       tenantId: row.tenantId,
       globalCandidateId: row.globalCandidateId,
@@ -697,6 +707,28 @@ async function processContactOperation({
   linkRetryMs: number;
   pollMs: number;
 }): Promise<"completed" | "pending" | "ambiguous"> {
+  try {
+    await requireCandidatePrivacyAllowed(row.tenantId, row.candidateId);
+  } catch (error) {
+    await transitionClaim(
+      store,
+      row,
+      [row.state],
+      {
+        state: "failed",
+        selectedEmail: null,
+        stagedEvidence: null,
+        completedAt: now,
+        lastErrorCode:
+          error instanceof Error && error.message === "candidate_privacy_restricted"
+            ? "privacy_restricted"
+            : "privacy_unavailable",
+      },
+      true,
+      now,
+    );
+    return "completed";
+  }
   if (row.state === "evidence_pending") {
     return writeStagedEvidence({
       store,
@@ -802,23 +834,37 @@ export async function runContactEnrichmentCycle(
         retryMs: options.retryMs ?? DEFAULT_RETRY_MS,
         linkRetryMs: options.linkRetryMs ?? DEFAULT_LINK_RETRY_MS,
         pollMs: options.fullEnrichPollMs ?? DEFAULT_FULLENRICH_POLL_MS,
-      }).catch(async () => {
+      }).catch(async (error) => {
         const failureNow = now();
+        const privacyFailure =
+          error instanceof Error && error.message.startsWith("candidate_privacy_");
         await transitionClaim(
           store,
           row,
-          [row.state],
+          privacyFailure ? [...CONTACT_OPERATION_STATES] : [row.state],
           {
-            state: row.state,
-            nextAttemptAt: new Date(
-              failureNow.getTime() + (options.retryMs ?? DEFAULT_RETRY_MS),
-            ),
-            lastErrorCode: "contact_worker_unexpected",
+            state: privacyFailure ? "failed" : row.state,
+            ...(privacyFailure
+              ? {
+                  selectedEmail: null,
+                  stagedEvidence: null,
+                  completedAt: failureNow,
+                }
+              : {
+                  nextAttemptAt: new Date(
+                    failureNow.getTime() + (options.retryMs ?? DEFAULT_RETRY_MS),
+                  ),
+                }),
+            lastErrorCode: privacyFailure
+              ? (error.message === "candidate_privacy_restricted"
+                  ? "privacy_restricted"
+                  : "privacy_unavailable")
+              : "contact_worker_unexpected",
           },
           true,
           failureNow,
         );
-        return "pending" as const;
+        return privacyFailure ? "completed" as const : "pending" as const;
       }),
     ),
   );

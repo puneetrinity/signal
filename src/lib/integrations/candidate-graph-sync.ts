@@ -8,6 +8,7 @@
 import { Queue } from 'bullmq';
 import IORedis from 'ioredis';
 import { createLogger } from '@/lib/logger';
+import { requireCandidatePrivacyAllowed } from '@/lib/candidate-privacy/repository';
 
 const log = createLogger('CandidateGraphSync');
 
@@ -88,6 +89,8 @@ export async function enqueueGraphSync(
   if (process.env.CANDIDATE_GRAPH_SYNC_ENABLED !== 'true') {
     return null;
   }
+
+  await requireCandidatePrivacyAllowed(data.tenantId, data.candidateId);
 
   const queue = getGraphSyncQueue();
   const jobId = `cgraph-${data.tenantId}-${data.candidateId}-${data.trigger}`;

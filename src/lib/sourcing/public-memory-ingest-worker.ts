@@ -15,6 +15,8 @@ import {
   type ClaimedPublicMemoryOutboxRow,
   type PublicMemoryOutboxStore,
 } from './public-memory-ingest-outbox';
+import { requireCandidatePrivacyAllowed } from '@/lib/candidate-privacy/repository';
+import { createCandidateAdmissionProofs } from '@/lib/candidate-privacy/decision';
 
 const log = createLogger('PublicMemoryIngestWorker');
 
@@ -59,6 +61,35 @@ async function processRow({
   ) => Promise<CandidateIngestResult>;
 }): Promise<boolean> {
   try {
+    try {
+      if (row.localCandidateId) {
+        await requireCandidatePrivacyAllowed(
+          row.tenantId,
+          row.localCandidateId,
+        );
+      } else {
+        const proofs = await createCandidateAdmissionProofs([{
+          key: row.signalCandidateId,
+          linkedinUrl: row.payload.candidate.linkedinUrl,
+          globalCandidateId: row.payload.expectedGlobalCandidateId,
+        }]);
+        if (!proofs.has(row.signalCandidateId)) {
+          throw new Error('candidate_privacy_restricted');
+        }
+      }
+    } catch (error) {
+      await store.fail({
+        row,
+        errorCode:
+          error instanceof Error && error.message === 'candidate_privacy_restricted'
+            ? 'privacy_restricted'
+            : 'privacy_unavailable',
+        maxAttempts,
+        terminal: true,
+        now: now(),
+      });
+      return false;
+    }
     const result = await ingest(row);
     const expectedGlobalCandidateId =
       row.payload.expectedGlobalCandidateId;

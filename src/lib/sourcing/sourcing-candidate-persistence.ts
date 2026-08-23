@@ -1,6 +1,10 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/prisma';
 import type { PublicMemoryMaterializationFailure } from './public-memory-materialization';
+import {
+  CANDIDATE_PRIVACY_ADMISSION_LOCK,
+  filterCandidateIdsBeforeLimit,
+} from '@/lib/candidate-privacy/repository';
 
 export interface SourcingExecutionFence {
   acquisitionGeneration: number;
@@ -25,6 +29,20 @@ export async function persistSourcingCandidatesForRequest({
   };
 }): Promise<void> {
   await prisma.$transaction(async (transaction) => {
+    await transaction.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(${CANDIDATE_PRIVACY_ADMISSION_LOCK}, 0)
+      )
+    `;
+    const candidateIds = [...new Set(data.map((row) => row.candidateId))];
+    const allowedIds = await filterCandidateIdsBeforeLimit(
+      tenantId,
+      candidateIds,
+      transaction,
+    );
+    if (allowedIds.length !== candidateIds.length) {
+      throw new Error('candidate_privacy_unavailable');
+    }
     if (executionFence) {
       // Hold the request row through replacement so a stale BullMQ delivery
       // cannot pass the fence and then overwrite the current candidate set.

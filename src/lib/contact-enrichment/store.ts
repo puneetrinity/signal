@@ -11,6 +11,12 @@ import {
   type StagedContactEvidence,
 } from "./types";
 import type { MemoryContactLookupResult } from "./memory-client";
+import {
+  candidatePrivacyAllowedRelationWhere,
+  CANDIDATE_PRIVACY_ADMISSION_LOCK,
+  requireCandidatePrivacyAllowed,
+  requireHealthyCandidatePrivacyContext,
+} from "@/lib/candidate-privacy/repository";
 
 const CLAIMABLE_STATES: ContactOperationState[] = [
   "queued",
@@ -136,10 +142,12 @@ export async function candidateAppearedInSourcingJob({
   candidateId: string;
   externalJobId: string;
 }): Promise<boolean> {
+  const privacyContext = await requireHealthyCandidatePrivacyContext();
   const appearance = await prisma.jobSourcingCandidate.findFirst({
     where: {
       tenantId,
       candidateId,
+      candidate: candidatePrivacyAllowedRelationWhere(privacyContext),
       sourcingRequest: {
         tenantId,
         externalJobId,
@@ -157,32 +165,42 @@ export async function findOrCreateContactOperation({
   tenantId: string;
   candidateId: string;
 }): Promise<ContactOperationSnapshot | null> {
-  const candidate = await prisma.candidate.findFirst({
-    where: { id: candidateId, tenantId },
-    select: {
-      id: true,
-      globalLink: {
-        select: { globalCandidateId: true },
+  const admitted = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(${CANDIDATE_PRIVACY_ADMISSION_LOCK}, 0)
+      )
+    `;
+    await requireCandidatePrivacyAllowed(tenantId, candidateId, tx);
+    const candidate = await tx.candidate.findFirst({
+      where: { id: candidateId, tenantId },
+      select: {
+        id: true,
+        globalLink: {
+          select: { globalCandidateId: true },
+        },
       },
-    },
+    });
+    if (!candidate) return null;
+    const linkedGlobalCandidateId =
+      candidate.globalLink?.globalCandidateId ?? null;
+    const operation = await tx.contactEnrichmentOperation.upsert({
+      where: {
+        tenantId_candidateId: { tenantId, candidateId },
+      },
+      create: {
+        tenantId,
+        candidateId,
+        globalCandidateId: linkedGlobalCandidateId,
+        state: linkedGlobalCandidateId ? "queued" : "awaiting_global_id",
+        nextAttemptAt: new Date(),
+      },
+      update: {},
+    });
+    return { candidate, operation, linkedGlobalCandidateId };
   });
-  if (!candidate) return null;
-
-  const linkedGlobalCandidateId =
-    candidate.globalLink?.globalCandidateId ?? null;
-  const operation = await prisma.contactEnrichmentOperation.upsert({
-    where: {
-      tenantId_candidateId: { tenantId, candidateId },
-    },
-    create: {
-      tenantId,
-      candidateId,
-      globalCandidateId: linkedGlobalCandidateId,
-      state: linkedGlobalCandidateId ? "queued" : "awaiting_global_id",
-      nextAttemptAt: new Date(),
-    },
-    update: {},
-  });
+  if (!admitted) return null;
+  const { operation, linkedGlobalCandidateId } = admitted;
 
   if (
     linkedGlobalCandidateId &&
@@ -308,6 +326,7 @@ export class PrismaContactOperationStore implements ContactOperationStore {
     leaseMs: number;
     now: Date;
   }): Promise<ClaimedContactOperation[]> {
+    const privacyContext = await requireHealthyCandidatePrivacyContext();
     const leaseToken = randomUUID();
     const leaseExpiresAt = new Date(now.getTime() + leaseMs);
     const rows = await prisma.$transaction(async (tx) => {
@@ -370,6 +389,12 @@ export class PrismaContactOperationStore implements ContactOperationStore {
         WITH claimable AS (
           SELECT operation."id"
           FROM "contact_enrichment_operations" AS operation
+          JOIN "candidate_privacy_projection" AS privacy_projection
+            ON privacy_projection."tenant_id" = operation."tenantId"
+           AND privacy_projection."candidate_id" = operation."candidateId"
+           AND privacy_projection."generation" = ${privacyContext.generation}
+           AND privacy_projection."evaluated_cursor" = ${privacyContext.cursor}
+           AND privacy_projection."decision" = 'allow'
           WHERE operation."state" = ANY(${CLAIMABLE_STATES}::text[])
             AND operation."nextAttemptAt" <= ${now}
             AND (

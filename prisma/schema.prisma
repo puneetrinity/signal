@@ -159,6 +159,7 @@ model Candidate {
   intelligenceSnapshots      CandidateIntelligenceSnapshot[]
   globalLink                 CandidateGlobalLink?
   contactEnrichmentOperation ContactEnrichmentOperation?
+  privacyProjections         CandidatePrivacyProjection[]
 
   // Tenant-scoped unique constraints
   @@unique([tenantId, id])
@@ -172,6 +173,41 @@ model Candidate {
   @@index([confidenceScore])
   @@index([createdAt])
   @@map("candidates")
+}
+
+/// Candidate-keyed, generation-scoped projection of Memory's privacy decision.
+/// It intentionally stores no directive id, raw identifier, HMAC token, or
+/// evidence reference.
+model CandidatePrivacyProjection {
+  tenantId        String   @map("tenant_id")
+  candidateId     String   @map("candidate_id")
+  generation      BigInt
+  decision        String
+  evaluatedCursor BigInt   @map("evaluated_cursor")
+  checkedAt       DateTime @default(now()) @map("checked_at") @db.Timestamptz(6)
+
+  candidate Candidate @relation(fields: [tenantId, candidateId], references: [tenantId, id], onDelete: Restrict)
+
+  @@id([tenantId, candidateId, generation])
+  @@index([tenantId, generation, decision, candidateId], map: "candidate_privacy_projection_active_idx")
+  @@index([generation, candidateId], map: "candidate_privacy_projection_generation_idx")
+  @@map("candidate_privacy_projection")
+}
+
+/// Singleton cursor/generation state for Discover's read-only Memory consumer.
+model CandidatePrivacySyncState {
+  consumerName       String    @id @map("consumer_name")
+  cursor             BigInt    @default(0)
+  activeGeneration   BigInt    @default(0) @map("active_generation")
+  status             String    @default("uninitialized")
+  lastSuccessAt      DateTime? @map("last_success_at") @db.Timestamptz(6)
+  rebuildStartedAt   DateTime? @map("rebuild_started_at") @db.Timestamptz(6)
+  lastErrorCode      String?   @map("last_error_code")
+  expectedCandidates Int       @default(0) @map("expected_candidates")
+  projectedCandidates Int      @default(0) @map("projected_candidates")
+  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("candidate_privacy_sync_state")
 }
 
 /// CandidateIntelligenceSnapshot: Structured enrichment data computed at enrichment time

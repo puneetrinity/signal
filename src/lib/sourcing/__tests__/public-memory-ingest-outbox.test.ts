@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PublicMemoryOutboxEnqueueInput } from "../public-memory-ingest-outbox";
 
 const executeRaw = vi.fn();
+const queryRaw = vi.fn();
 const findMany = vi.fn();
 const updateMany = vi.fn();
 const ensureCandidateGlobalLink = vi.fn();
@@ -9,6 +10,7 @@ const ensureCandidateGlobalLink = vi.fn();
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     $executeRaw: executeRaw,
+    $queryRaw: queryRaw,
     $transaction: vi.fn(async (callback: (tx: unknown) => unknown) =>
       callback({ $executeRaw: executeRaw }),
     ),
@@ -52,6 +54,7 @@ describe("public Memory ingest outbox enqueue", () => {
   beforeEach(() => {
     executeRaw.mockReset();
     executeRaw.mockResolvedValue(1);
+    queryRaw.mockReset();
     findMany.mockReset();
     updateMany.mockReset();
     ensureCandidateGlobalLink.mockReset();
@@ -186,7 +189,7 @@ describe("public Memory ingest outbox enqueue", () => {
 
   it("fences link reconciliation to the selected generation and identity", async () => {
     const globalCandidateId = "11111111-1111-4111-8111-111111111111";
-    findMany.mockResolvedValue([
+    queryRaw.mockResolvedValue([
       {
         id: "outbox-1",
         tenantId: "org_1",
@@ -225,7 +228,7 @@ describe("public Memory ingest outbox enqueue", () => {
 
   it("fences a failed link retry from a re-enqueued generation", async () => {
     const globalCandidateId = "11111111-1111-4111-8111-111111111111";
-    findMany.mockResolvedValue([
+    queryRaw.mockResolvedValue([
       {
         id: "outbox-1",
         tenantId: "org_1",

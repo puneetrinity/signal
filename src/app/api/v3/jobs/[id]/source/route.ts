@@ -19,6 +19,7 @@ import { resolveTrack } from '@/lib/sourcing/track-resolver';
 import { releaseAbandonedCrustdataReceiptPayloads } from '@/lib/sourcing/crustdata-acquisition';
 import { decideSourcingRetry } from '@/lib/sourcing/request-retry';
 import type { SourcingJobData } from '@/lib/sourcing/types';
+import { requireHealthyCandidatePrivacyContext } from '@/lib/candidate-privacy/repository';
 
 const log = createLogger('SourcingSourceRoute');
 
@@ -98,8 +99,14 @@ export async function POST(
 
   const scopeCheck = requireScope(auth.context, 'jobs:source');
   if (!scopeCheck.authorized) return scopeCheck.response;
-
-
+  try {
+    await requireHealthyCandidatePrivacyContext();
+  } catch {
+    return NextResponse.json(
+      { success: false, error: 'candidate_privacy_unavailable' },
+      { status: 503 },
+    );
+  }
 
   // Parse body
   let body: z.infer<typeof bodySchema>;

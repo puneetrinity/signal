@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/prisma';
+import { requireCandidatePrivacyAllowed } from '@/lib/candidate-privacy/repository';
 import { toJsonValue } from '@/lib/prisma/json';
 import { createLogger } from '@/lib/logger';
 import { buildJobRequirements, type SourcingJobContextInput } from './jd-digest';
@@ -98,9 +99,10 @@ export async function rescoreCompletedSourcingRowsForCandidate(
   tenantId: string,
   candidateId: string,
 ): Promise<number> {
+  await requireCandidatePrivacyAllowed(tenantId, candidateId);
   const [candidate, rowsToRescore] = await Promise.all([
-    prisma.candidate.findUnique({
-      where: { id: candidateId },
+    prisma.candidate.findFirst({
+      where: { id: candidateId, tenantId },
       select: {
         id: true,
         headlineHint: true,

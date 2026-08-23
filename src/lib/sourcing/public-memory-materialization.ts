@@ -8,6 +8,8 @@ import { buildObservedPublicMarket, type PublicMarket } from './public-memory';
 import { normalizeGlobalCandidateId } from './global-candidate-id';
 import { isTenantPrivateTemporaryId } from './tenant-private-memory';
 import { upsertDiscoveredCandidates } from './upsert-candidates';
+import { createCandidateAdmissionProofs } from '@/lib/candidate-privacy/decision';
+import { requireCandidatePrivacyAllowed } from '@/lib/candidate-privacy/repository';
 
 const GLOBAL_TEMP_PREFIX = 'global:';
 
@@ -29,6 +31,7 @@ export type PublicMemoryMaterializationFailureCode =
   | 'linkedin_anchor_mismatch'
   | 'candidate_upsert_failed'
   | 'candidate_upsert_skipped'
+  | 'privacy_restricted'
   | 'global_link_failed';
 
 export type PublicMemoryMaterializationFailureCause =
@@ -61,7 +64,7 @@ const MAX_MATERIALIZATION_TRANSACTION_ATTEMPTS = 3;
 export const MAX_MATERIALIZATION_FAILURE_DETAILS = 20;
 type CandidateGlobalLinkClient = Pick<
   Prisma.TransactionClient,
-  'candidate' | 'candidateGlobalLink'
+  'candidate' | 'candidateGlobalLink' | '$queryRaw' | '$executeRaw'
 >;
 
 class MaterializationRaceWinner extends Error {
@@ -254,6 +257,20 @@ async function materializePublicMemoryEntry(
     };
   }
 
+  const admissionProofs = await createCandidateAdmissionProofs([{
+    key: entry.profile.linkedinUrl,
+    linkedinUrl: entry.profile.linkedinUrl,
+    globalCandidateId: entry.globalCandidateId,
+  }]);
+  if (!admissionProofs.has(entry.profile.linkedinUrl)) {
+    return {
+      failure: {
+        globalCandidateId: normalizeGlobalCandidateId(entry.globalCandidateId),
+        code: 'privacy_restricted',
+      },
+    };
+  }
+
   for (
     let attempt = 0;
     attempt < MAX_MATERIALIZATION_TRANSACTION_ATTEMPTS;
@@ -272,6 +289,7 @@ async function materializePublicMemoryEntry(
               failOnError: true,
               adoptCaseVariantIdentity: true,
               db: transaction,
+              admissionProofs,
             },
           );
         } catch (error) {
@@ -478,6 +496,7 @@ export async function ensureCandidateGlobalLink({
   linkConfidence?: number | null;
   db?: CandidateGlobalLinkClient;
 }): Promise<CandidateGlobalLinkResult> {
+  await requireCandidatePrivacyAllowed(tenantId, candidateId, db ?? prisma);
   const canonicalGlobalCandidateId =
     normalizeGlobalCandidateId(globalCandidateId);
   if (!canonicalGlobalCandidateId) {

@@ -89,6 +89,10 @@ import {
   expectedGlobalCandidateIdForCandidate,
 } from './public-memory-identity';
 import { persistSourcingCandidatesForRequest } from './sourcing-candidate-persistence';
+import {
+  candidatePrivacyAllowedRelationWhere,
+  requireHealthyCandidatePrivacyContext,
+} from '@/lib/candidate-privacy/repository';
 
 import {
   logSourcingRaw,
@@ -463,6 +467,7 @@ export async function runSourcingOrchestrator(
   executionAttemptId?: string,
   processingLeaseId?: string,
 ): Promise<OrchestratorResult> {
+  const privacyContext = await requireHealthyCandidatePrivacyContext();
   const config = getSourcingConfig();
   const requirements = buildJobRequirements(jobContext);
   const publicMemory: PublicMemoryTelemetry = {
@@ -667,7 +672,14 @@ export async function runSourcingOrchestrator(
   const prefetchedLocalIdByGlobalId = new Map<string, string>();
 
   const fetchPoolByIds = (ids: string[]) =>
-    prisma.candidate.findMany({ where: { tenantId, id: { in: ids } }, select: poolSelect });
+    prisma.candidate.findMany({
+      where: {
+        tenantId,
+        id: { in: ids },
+        ...candidatePrivacyAllowedRelationWhere(privacyContext),
+      },
+      select: poolSelect,
+    });
   let poolRows: Awaited<ReturnType<typeof fetchPoolByIds>>;
 
   if (config.twoLayerPoolEnabled) {
@@ -675,8 +687,14 @@ export async function runSourcingOrchestrator(
       SELECT "id", "linkedinId", "linkedinUrl", "locationHint",
              "searchMeta"->'serper' AS "serper"
       FROM "candidates"
-      WHERE "tenantId" = ${tenantId}
-      ORDER BY "updatedAt" DESC
+      JOIN "candidate_privacy_projection" privacy_projection
+        ON privacy_projection."tenant_id" = "candidates"."tenantId"
+       AND privacy_projection."candidate_id" = "candidates"."id"
+       AND privacy_projection."generation" = ${privacyContext.generation}
+       AND privacy_projection."evaluated_cursor" = ${privacyContext.cursor}
+       AND privacy_projection."decision" = 'allow'
+      WHERE "candidates"."tenantId" = ${tenantId}
+      ORDER BY "candidates"."updatedAt" DESC
       LIMIT ${config.poolLayer1Cap}
     `;
     layer1CapHit = slimPool.length >= config.poolLayer1Cap;
@@ -731,6 +749,7 @@ export async function runSourcingOrchestrator(
         where: {
           tenantId,
           globalCandidateId: { in: globalCandidateIds },
+          candidate: candidatePrivacyAllowedRelationWhere(privacyContext),
         },
         select: {
           globalCandidateId: true,
@@ -774,7 +793,10 @@ export async function runSourcingOrchestrator(
   } else {
     // Legacy single-layer read (capped at 5000 most recent, full-width).
     poolRows = await prisma.candidate.findMany({
-      where: { tenantId },
+      where: {
+        tenantId,
+        ...candidatePrivacyAllowedRelationWhere(privacyContext),
+      },
       select: poolSelect,
       take: 5000,
       orderBy: { updatedAt: 'desc' },
@@ -923,6 +945,7 @@ export async function runSourcingOrchestrator(
           where: {
             tenantId,
             globalCandidateId: { in: globalCandidateIds },
+            candidate: candidatePrivacyAllowedRelationWhere(privacyContext),
           },
           select: {
             globalCandidateId: true,
@@ -941,6 +964,7 @@ export async function runSourcingOrchestrator(
         ? await prisma.candidate.findMany({
             where: {
               tenantId,
+              ...candidatePrivacyAllowedRelationWhere(privacyContext),
               OR: [
                 ...(linkedLocalIds.length ? [{ id: { in: linkedLocalIds } }] : []),
                 ...(urls.length
@@ -1210,6 +1234,7 @@ export async function runSourcingOrchestrator(
             ? await prisma.candidate.findMany({
                 where: {
                   tenantId,
+                  ...candidatePrivacyAllowedRelationWhere(privacyContext),
                   OR: [
                     ...(linkedinUrls.length
                       ? [
@@ -1976,9 +2001,15 @@ export async function runSourcingOrchestrator(
                 config.excludeKnownFreshDays * 24 * 60 * 60 * 1000,
             );
             const rows = await prisma.$queryRaw<{ pid: string | null }[]>`
-              SELECT ("searchMeta"->'crustdata'->>'crustdata_person_id') AS pid
+              SELECT (candidates."searchMeta"->'crustdata'->>'crustdata_person_id') AS pid
               FROM candidates
-              WHERE "tenantId" = ${tenantId}
+              JOIN "candidate_privacy_projection" privacy_projection
+                ON privacy_projection."tenant_id" = candidates."tenantId"
+               AND privacy_projection."candidate_id" = candidates."id"
+               AND privacy_projection."generation" = ${privacyContext.generation}
+               AND privacy_projection."evaluated_cursor" = ${privacyContext.cursor}
+               AND privacy_projection."decision" = 'allow'
+              WHERE candidates."tenantId" = ${tenantId}
                 AND (
                   ("captureSource" = 'sourcing' AND "searchProvider" = 'crustdata')
                   OR "searchProvider" = 'activegraph_public'
@@ -2014,6 +2045,18 @@ export async function runSourcingOrchestrator(
                 ) AS pid
               FROM "public_memory_ingest_outbox" AS outbox
               WHERE outbox."status" IN ('pending', 'processing', 'succeeded')
+                AND (
+                  outbox."localCandidateId" IS NULL
+                  OR EXISTS (
+                    SELECT 1
+                    FROM "candidate_privacy_projection" privacy_projection
+                    WHERE privacy_projection."tenant_id" = outbox."tenantId"
+                      AND privacy_projection."candidate_id" = outbox."localCandidateId"
+                      AND privacy_projection."generation" = ${privacyContext.generation}
+                      AND privacy_projection."evaluated_cursor" = ${privacyContext.cursor}
+                      AND privacy_projection."decision" = 'allow'
+                  )
+                )
                 AND outbox."updatedAt" > ${cutoff}
                 AND (
                   COALESCE(
@@ -3502,7 +3545,11 @@ export async function runSourcingOrchestrator(
 
         if (discoveredCandidateIds.length > 0) {
           const discoveredRows = await prisma.candidate.findMany({
-            where: { id: { in: discoveredCandidateIds } },
+            where: {
+              tenantId,
+              id: { in: discoveredCandidateIds },
+              ...candidatePrivacyAllowedRelationWhere(privacyContext),
+            },
 
             select: {
               id: true,

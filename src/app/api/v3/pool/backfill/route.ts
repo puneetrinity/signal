@@ -18,6 +18,10 @@ import { discoverCandidates } from '@/lib/sourcing/discovery';
 import { getSourcingConfig } from '@/lib/sourcing/config';
 import type { JobTrack } from '@/lib/sourcing/types';
 import { createLogger } from '@/lib/logger';
+import {
+  candidatePrivacyAllowedRelationWhere,
+  requireHealthyCandidatePrivacyContext,
+} from '@/lib/candidate-privacy/repository';
 
 const log = createLogger('PoolBackfill');
 
@@ -71,6 +75,15 @@ export async function POST(request: NextRequest) {
   if (!scopeCheck.authorized) return scopeCheck.response;
 
   const tenantId = auth.context.tenantId;
+  let privacyContext;
+  try {
+    privacyContext = await requireHealthyCandidatePrivacyContext();
+  } catch {
+    return NextResponse.json(
+      { success: false, error: 'candidate_privacy_unavailable' },
+      { status: 503 },
+    );
+  }
 
   // 2. Parse + validate body
   let body: {
@@ -131,7 +144,7 @@ export async function POST(request: NextRequest) {
 
   // 4. Load existing pool LinkedIn IDs (recent 5000)
   const poolRows = await prisma.candidate.findMany({
-    where: { tenantId },
+    where: { tenantId, ...candidatePrivacyAllowedRelationWhere(privacyContext) },
     select: { linkedinId: true },
     take: 5000,
     orderBy: { updatedAt: 'desc' },
@@ -200,7 +213,11 @@ export async function POST(request: NextRequest) {
 
   // 7. Load candidate state for skip rules + metrics
   const candidates = await prisma.candidate.findMany({
-    where: { id: { in: candidateIds }, tenantId },
+    where: {
+      id: { in: candidateIds },
+      tenantId,
+      ...candidatePrivacyAllowedRelationWhere(privacyContext),
+    },
     select: {
       id: true,
       enrichmentStatus: true,
@@ -302,4 +319,3 @@ export async function POST(request: NextRequest) {
     seniorityBuckets,
   });
 }
-

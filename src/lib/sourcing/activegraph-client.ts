@@ -14,6 +14,29 @@ import {
   projectPublicCrustdataProfile,
   redactPublicContactText,
 } from './public-profile-redaction';
+import {
+  createCandidateAdmissionProofs,
+  requireNewCandidateAllowed,
+} from '@/lib/candidate-privacy/decision';
+import { requireHealthyCandidatePrivacyContext } from '@/lib/candidate-privacy/repository';
+
+async function assertMemoryCandidatesPrivacyAllowed(
+  anchors: Array<{
+    key: string;
+    linkedinUrl?: string | null;
+    signalCandidateId?: string | null;
+    globalCandidateId?: string | null;
+  }>,
+): Promise<void> {
+  await requireHealthyCandidatePrivacyContext();
+  for (let index = 0; index < anchors.length; index += 200) {
+    const chunk = anchors.slice(index, index + 200);
+    const proofs = await createCandidateAdmissionProofs(chunk);
+    if (proofs.size !== chunk.length) {
+      throw new Error('candidate_privacy_restricted');
+    }
+  }
+}
 
 const log = createLogger('activegraph-client');
 
@@ -309,6 +332,7 @@ async function searchGlobalPoolResponseForSurface(
   requestId: string | undefined,
   surface: GlobalPoolSurface,
 ): Promise<GlobalPoolSearchResponse | null> {
+  await requireHealthyCandidatePrivacyContext();
   const queryText = buildPoolQueryText(requirements);
   if (!queryText.trim()) {
     return { surface, results: [], count: 0, appliedLimit: limit };
@@ -354,9 +378,8 @@ async function searchGlobalPoolResponseForSurface(
 
   if (!response.ok) {
     // 503 = GLOBAL_MEMORY_ENABLED off server-side — expected until slice-1 flips it.
-    const body = await response.text().catch(() => '');
     log.info(
-      { requestId, status: response.status, body: body.slice(0, 200) },
+      { requestId, status: response.status },
       'Global pool vector search unavailable — falling back to tag search'
     );
     return null;
@@ -410,6 +433,19 @@ async function searchGlobalPoolResponseForSurface(
           id: normalizeGlobalCandidateId(row.id)!,
         }))
       : (data.results as GlobalPoolSearchResult[]);
+  try {
+    await assertMemoryCandidatesPrivacyAllowed(
+      results.map((row, index) => ({
+        key: `${index}`,
+        linkedinUrl: row.linkedin_url,
+        signalCandidateId: row.signal_candidate_id,
+        globalCandidateId: row.id,
+      })),
+    );
+  } catch {
+    log.warn({ requestId }, 'Global pool privacy admission unavailable');
+    return null;
+  }
   return {
     surface,
     results,
@@ -462,6 +498,7 @@ export async function searchTenantPrivateCandidates(
   limit: number = HOME_POOL_LIMIT,
   requestId?: string,
 ): Promise<TenantPrivateSearchResponse | null> {
+  await requireHealthyCandidatePrivacyContext();
   const token = await signActiveGraphJWT(tenantId, 'kg:read', requestId);
   let response: Response;
   try {
@@ -489,9 +526,8 @@ export async function searchTenantPrivateCandidates(
   }
 
   if (!response.ok) {
-    const body = await response.text().catch(() => '');
     log.warn(
-      { requestId, status: response.status, body: body.slice(0, 200) },
+      { requestId, status: response.status },
       'Tenant-private Memory search unavailable',
     );
     return null;
@@ -588,6 +624,19 @@ export async function searchTenantPrivateCandidates(
       evidenceSurface: 'tenant_private_v1',
     });
   }
+  try {
+    await assertMemoryCandidatesPrivacyAllowed(
+      results.map((row, index) => ({
+        key: `${index}`,
+        linkedinUrl: row.linkedinUrl,
+        signalCandidateId: row.candidateId,
+        globalCandidateId: row.globalCandidateId,
+      })),
+    );
+  } catch {
+    log.warn({ requestId }, 'Tenant-private privacy admission unavailable');
+    return null;
+  }
   return {
     surface: 'tenant_private_v1',
     results,
@@ -625,6 +674,7 @@ export async function getPublicMarketExclusions(
   limit: number,
   requestId?: string,
 ): Promise<PublicMarketExclusionResponse | null> {
+  await requireHealthyCandidatePrivacyContext();
   const token = await signActiveGraphJWT(tenantId, 'kg:read', requestId);
   let response: Response;
   try {
@@ -652,9 +702,8 @@ export async function getPublicMarketExclusions(
   }
 
   if (!response.ok) {
-    const body = await response.text().catch(() => '');
     log.warn(
-      { requestId, status: response.status, body: body.slice(0, 200) },
+      { requestId, status: response.status },
       'Public Memory exclusion lookup unavailable',
     );
     return null;
@@ -724,6 +773,7 @@ export async function resolvePublicIdentities(
   linkedinUrls: string[],
   requestId?: string,
 ): Promise<PublicIdentityLookupResponse | null> {
+  await requireHealthyCandidatePrivacyContext();
   const urlChunks = chunkPublicIdentityUrls(linkedinUrls);
   if (urlChunks.length === 0) {
     return { surface: 'public_v1', results: [] };
@@ -754,9 +804,8 @@ export async function resolvePublicIdentities(
     }
 
     if (!response.ok) {
-      const body = await response.text().catch(() => '');
       log.warn(
-        { requestId, status: response.status, body: body.slice(0, 200) },
+        { requestId, status: response.status },
         'Public Memory identity lookup unavailable',
       );
       return null;
@@ -805,9 +854,22 @@ export async function resolvePublicIdentities(
     return results;
   }));
   if (chunkResults.some((result) => result === null)) return null;
+  const resolved = chunkResults.flatMap((result) => result ?? []);
+  try {
+    await assertMemoryCandidatesPrivacyAllowed(
+      resolved.map((row, index) => ({
+        key: `${index}`,
+        linkedinUrl: row.linkedinUrl,
+        globalCandidateId: row.globalCandidateId,
+      })),
+    );
+  } catch {
+    log.warn({ requestId }, 'Public identity privacy admission unavailable');
+    return null;
+  }
   return {
     surface: 'public_v1',
-    results: chunkResults.flatMap((result) => result ?? []),
+    results: resolved,
   };
 }
 
@@ -893,6 +955,7 @@ export async function searchHomePool(
   limit: number = HOME_POOL_LIMIT,
   requestId?: string
 ): Promise<ActiveGraphSearchResult[] | null> {
+  await requireHealthyCandidatePrivacyContext();
   if (!tags.length) return [];
 
   const token = await signActiveGraphJWT(tenantId, 'kg:read', requestId);
@@ -912,9 +975,8 @@ export async function searchHomePool(
   });
 
   if (!response.ok) {
-    const body = await response.text().catch(() => '');
     log.error(
-      { requestId, tenantId, status: response.status, body: body.slice(0, 300) },
+      { requestId, tenantId, status: response.status },
       'ActiveGraph home-pool search failed — continuing without home pool'
     );
     return null;
@@ -933,7 +995,19 @@ export async function searchHomePool(
       'ActiveGraph home-pool result truncated — candidates above the limit were dropped'
     );
   }
-  return data.results || [];
+  const results = Array.isArray(data.results) ? data.results : [];
+  try {
+    await assertMemoryCandidatesPrivacyAllowed(
+      results.map((row: ActiveGraphSearchResult, index: number) => ({
+        key: `${index}`,
+        signalCandidateId: row.signal_candidate_id,
+      })),
+    );
+  } catch {
+    log.warn({ requestId }, 'Home-pool privacy admission unavailable');
+    return null;
+  }
+  return results;
 }
 
 /**
@@ -1038,6 +1112,11 @@ export async function ingestCandidateWithResult(
   requestId?: string,
   options: CandidateIngestOptions = {},
 ): Promise<CandidateIngestResult> {
+  await requireNewCandidateAllowed({
+    key: candidate.id,
+    linkedinUrl: candidate.linkedinUrl,
+    signalCandidateId: candidate.id,
+  });
   const payload = buildActiveGraphCandidatePayload(
     tenantId,
     candidate,
@@ -1077,14 +1156,12 @@ export async function ingestCandidateWithResult(
   }
 
   if (!response.ok) {
-    const body = await response.text().catch(() => '');
     log.error(
       {
         requestId,
         tenantId,
         candidateId: candidate.id,
         status: response.status,
-        body: body.slice(0, 300),
       },
       'ActiveGraph candidate ingest failed',
     );

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MemoryContactUnavailableError,
   type ContactMemoryClient,
@@ -20,6 +20,12 @@ import type {
   StagedContactEvidence,
 } from "../types";
 import { runContactEnrichmentCycle } from "../worker";
+
+const requireCandidatePrivacyAllowed = vi.hoisted(() => vi.fn());
+
+vi.mock("@/lib/candidate-privacy/repository", () => ({
+  requireCandidatePrivacyAllowed,
+}));
 
 const NOW = new Date("2026-07-25T12:00:00.000Z");
 const GLOBAL_ID = "11111111-1111-4111-8111-111111111111";
@@ -196,6 +202,15 @@ const cycleOptions = {
 };
 
 describe("durable contact enrichment worker", () => {
+  beforeEach(() => {
+    requireCandidatePrivacyAllowed.mockReset();
+    requireCandidatePrivacyAllowed.mockResolvedValue({
+      generation: BigInt(1),
+      cursor: BigInt(0),
+      checkedAt: NOW,
+    });
+  });
+
   it("waits for a canonical Memory id without provider spend", async () => {
     const store = new FakeStore(
       operation("queued", {
@@ -300,6 +315,33 @@ describe("durable contact enrichment worker", () => {
 
     expect(store.row.state).toBe("fullenrich_polling");
     expect(store.row.providerRecordId).toBe("fe-1");
+  });
+
+  it("rechecks privacy immediately before provider spend and fails terminally", async () => {
+    const store = new FakeStore(operation());
+    const memory = memoryClient("miss");
+    const providers = providerClient();
+    requireCandidatePrivacyAllowed
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("candidate_privacy_restricted"));
+
+    await runContactEnrichmentCycle({
+      ...cycleOptions,
+      store,
+      memory,
+      providers,
+    });
+
+    expect(providers.startFullEnrich).not.toHaveBeenCalled();
+    expect(providers.callEnrichLayer).not.toHaveBeenCalled();
+    expect(store.row).toMatchObject({
+      state: "failed",
+      selectedEmail: null,
+      stagedEvidence: null,
+      lastErrorCode: "privacy_restricted",
+    });
   });
 
   it("never reposts an ambiguous FullEnrich start or falls back", async () => {

@@ -22,6 +22,7 @@ import {
   getRedisConnection,
   type CandidateGraphSyncJobData,
 } from './candidate-graph-sync';
+import { requireCandidatePrivacyAllowed } from '@/lib/candidate-privacy/repository';
 
 const log = createLogger('candidate-graph-sync');
 
@@ -147,6 +148,10 @@ async function processCandidateGraphSync(
   job: Job<CandidateGraphSyncJobData>,
 ): Promise<void> {
   const { candidateId, tenantId, trigger } = job.data;
+  const assertStillAllowed = () =>
+    requireCandidatePrivacyAllowed(tenantId, candidateId);
+
+  await assertStillAllowed();
 
   // 1. Load candidate with relations
   const candidate = await loadCandidateWithRelations(tenantId, candidateId);
@@ -163,6 +168,7 @@ async function processCandidateGraphSync(
   const anchors = buildIdentityAnchors(candidate);
 
   // 3. Try to find existing global candidate
+  await assertStillAllowed();
   const existingGlobal = await activeKGClient.findGlobalCandidate(tenantId, {
     linkedin_id: anchors.linkedin_id,
     github_id: anchors.github_id,
@@ -201,6 +207,7 @@ async function processCandidateGraphSync(
       const splitAnchors: IdentityAnchors = {
         linkedin_id: anchors.linkedin_id,
       };
+      await assertStillAllowed();
       const result = await activeKGClient.upsertGlobalCandidate(tenantId, {
         ...buildGlobalCandidateFields(candidate, splitAnchors),
         merge_status: 'split',
@@ -237,6 +244,7 @@ async function processCandidateGraphSync(
         (matchConfidence !== null && matchConfidence >= 0.85)
       ) {
         // Merge: update existing
+        await assertStillAllowed();
         const result = await activeKGClient.upsertGlobalCandidate(tenantId, {
           ...buildGlobalCandidateFields(candidate, anchors),
           identity_confidence: matchConfidence ?? undefined,
@@ -255,6 +263,7 @@ async function processCandidateGraphSync(
         const splitAnchors: IdentityAnchors = {
           linkedin_id: anchors.linkedin_id,
         };
+        await assertStillAllowed();
         const result = await activeKGClient.upsertGlobalCandidate(tenantId, {
           ...buildGlobalCandidateFields(candidate, splitAnchors),
           merge_status: 'split',
@@ -267,6 +276,7 @@ async function processCandidateGraphSync(
     }
   } else {
     // New candidate
+    await assertStillAllowed();
     const result = await activeKGClient.upsertGlobalCandidate(tenantId, {
       ...buildGlobalCandidateFields(candidate, anchors),
       identity_confidence: anchors.linkedin_id ? 1.0 : undefined,
@@ -293,6 +303,7 @@ async function processCandidateGraphSync(
   if (isPublicSourcing) {
     assertPublicSourceDetailIsNonPrivate(sourceDetail);
   }
+  await assertStillAllowed();
   await activeKGClient.upsertProvenance(tenantId, globalCandidateId, {
     source_type: 'web_discovery',
     tenant_id: isPublicSourcing ? undefined : tenantId,
