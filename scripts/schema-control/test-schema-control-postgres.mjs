@@ -204,36 +204,52 @@ try {
   `);
   assert(afterAdoption[0].count === 0, 'Adoption changed a product row');
 
-  // Reproduce the production 21 -> 22 release boundary. Empty bootstrap has
-  // already proven the full 22-migration fresh-install path; this disposable
-  // rollback removes only the new empty privacy objects and their Prisma
-  // ledger row so the real release wrapper must apply migration 22.
-  await admin.$executeRawUnsafe('DROP TABLE public.candidate_privacy_projection');
-  await admin.$executeRawUnsafe('DROP TABLE public.candidate_privacy_sync_state');
+  // Reproduce the production 22 -> 23 release boundary. Empty bootstrap has
+  // already proven the full 23-migration fresh-install path; this disposable
+  // rollback removes only the additive lease metadata and its Prisma ledger
+  // row so the real release wrapper must apply migration 23.
+  await admin.$executeRawUnsafe('DROP INDEX public.candidate_privacy_rebuild_lease_idx');
+  await admin.$executeRawUnsafe(`
+    ALTER TABLE public.candidate_privacy_sync_state
+      DROP COLUMN rebuild_claim_token,
+      DROP COLUMN rebuild_lease_expires_at
+  `);
   await admin.$executeRawUnsafe(`
     DELETE FROM public."_prisma_migrations"
-    WHERE migration_name = '20260823000000_add_candidate_privacy_projection'
+    WHERE migration_name = '20260824000000_add_candidate_privacy_rebuild_lease'
   `);
   await requireSuccess(
     await runNode('scripts/schema-control/migrate-release.mjs', releaseEnvironment),
-    '21-to-22 privacy release',
+    '22-to-23 privacy release',
   );
-  const [privacyUpgrade] = await admin.$queryRawUnsafe(`
+  const [leaseUpgrade] = await admin.$queryRawUnsafe(`
     SELECT
-      to_regclass('public.candidate_privacy_projection') IS NOT NULL AS projection_exists,
-      to_regclass('public.candidate_privacy_sync_state') IS NOT NULL AS sync_exists,
+      EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'candidate_privacy_sync_state'
+          AND column_name = 'rebuild_claim_token'
+      ) AS token_exists,
+      EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'candidate_privacy_sync_state'
+          AND column_name = 'rebuild_lease_expires_at'
+      ) AS expiry_exists,
+      to_regclass('public.candidate_privacy_rebuild_lease_idx') IS NOT NULL AS lease_index_exists,
       COUNT(*) FILTER (
-        WHERE migration_name = '20260823000000_add_candidate_privacy_projection'
+        WHERE migration_name = '20260824000000_add_candidate_privacy_rebuild_lease'
           AND finished_at IS NOT NULL
           AND rolled_back_at IS NULL
       )::INTEGER AS successful_rows
     FROM public."_prisma_migrations"
   `);
   assert(
-    privacyUpgrade.projection_exists &&
-      privacyUpgrade.sync_exists &&
-      privacyUpgrade.successful_rows === 1,
-    'Release wrapper did not apply migration 22 exactly once',
+    leaseUpgrade.token_exists &&
+      leaseUpgrade.expiry_exists &&
+      leaseUpgrade.lease_index_exists &&
+      leaseUpgrade.successful_rows === 1,
+    'Release wrapper did not apply migration 23 exactly once',
   );
 
   await requireSuccess(

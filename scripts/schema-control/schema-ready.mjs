@@ -32,6 +32,7 @@ function assertCandidatePrivacyRuntimeConfiguration() {
   boundedPrivacyInteger('SIGNAL_CANDIDATE_PRIVACY_HTTP_TIMEOUT_MS', 5_000, 1, 10_000);
   boundedPrivacyInteger('SIGNAL_CANDIDATE_PRIVACY_POLL_MS', 30_000, 5_000, 60_000);
   boundedPrivacyInteger('SIGNAL_CANDIDATE_PRIVACY_STALE_MS', 120_000, 60_000, 300_000);
+  boundedPrivacyInteger('SIGNAL_CANDIDATE_PRIVACY_REBUILD_LEASE_MS', 300_000, 60_000, 900_000);
   boundedPrivacyInteger('SIGNAL_CANDIDATE_PRIVACY_BATCH_SIZE', 200, 1, 200);
   boundedPrivacyInteger('SIGNAL_CANDIDATE_PRIVACY_FEED_PAGE_SIZE', 500, 1, 500);
 }

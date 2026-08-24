@@ -23,6 +23,7 @@
     { "name": "20260727000000_add_crustdata_acquisition_receipts", "sha256": "e2ed476b3a3d328f4798e1826e9dcaffa33257ec7e8c04b0729caac7f0b4d3d6" },
     { "name": "20260805000000_drop_legacy_candidate_linkedin_indexes", "sha256": "83e22d93493b9be5ebad8366c0092fcabb9f546000833afd5d74b2f8bbbcb923" },
     { "name": "20260805010000_drop_legacy_global_search_cache_index", "sha256": "88a542f203511d406166090547da1c3679725d042327d412a1d8f1af7fc9a01b" },
-    { "name": "20260823000000_add_candidate_privacy_projection", "sha256": "ab4245e53e7acc7e0ec3e2c2db93c89de3a5e375f7d6633816b14eaeb04c8fd9" }
+    { "name": "20260823000000_add_candidate_privacy_projection", "sha256": "ab4245e53e7acc7e0ec3e2c2db93c89de3a5e375f7d6633816b14eaeb04c8fd9" },
+    { "name": "20260824000000_add_candidate_privacy_rebuild_lease", "sha256": "79585b23ffbbdb617d13af6f48ec5049f4c4c6478555efd19dab903081dcc5ab" }
   ]
 }

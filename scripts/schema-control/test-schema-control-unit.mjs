@@ -12,7 +12,7 @@ function assert(condition, message) {
 }
 
 const migrations = await loadMigrationLock();
-assert(migrations.length === 22, `Expected 22 locked migrations, found ${migrations.length}`);
+assert(migrations.length === 23, `Expected 23 locked migrations, found ${migrations.length}`);
 const validRows = migrations.map((entry, index) => ({
   migration_name: entry.name,
   checksum: entry.sha256,

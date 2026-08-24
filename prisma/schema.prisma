@@ -196,16 +196,18 @@ model CandidatePrivacyProjection {
 
 /// Singleton cursor/generation state for Discover's read-only Memory consumer.
 model CandidatePrivacySyncState {
-  consumerName       String    @id @map("consumer_name")
-  cursor             BigInt    @default(0)
-  activeGeneration   BigInt    @default(0) @map("active_generation")
-  status             String    @default("uninitialized")
-  lastSuccessAt      DateTime? @map("last_success_at") @db.Timestamptz(6)
-  rebuildStartedAt   DateTime? @map("rebuild_started_at") @db.Timestamptz(6)
-  lastErrorCode      String?   @map("last_error_code")
-  expectedCandidates Int       @default(0) @map("expected_candidates")
-  projectedCandidates Int      @default(0) @map("projected_candidates")
-  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  consumerName          String    @id @map("consumer_name")
+  cursor                BigInt    @default(0)
+  activeGeneration      BigInt    @default(0) @map("active_generation")
+  status                String    @default("uninitialized")
+  lastSuccessAt         DateTime? @map("last_success_at") @db.Timestamptz(6)
+  rebuildStartedAt      DateTime? @map("rebuild_started_at") @db.Timestamptz(6)
+  rebuildClaimToken     String?   @map("rebuild_claim_token") @db.Uuid
+  rebuildLeaseExpiresAt DateTime? @map("rebuild_lease_expires_at") @db.Timestamptz(6)
+  lastErrorCode         String?   @map("last_error_code")
+  expectedCandidates    Int       @default(0) @map("expected_candidates")
+  projectedCandidates   Int       @default(0) @map("projected_candidates")
+  updatedAt             DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@map("candidate_privacy_sync_state")
 }

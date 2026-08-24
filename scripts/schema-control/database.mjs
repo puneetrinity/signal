@@ -125,7 +125,8 @@ export async function assertCoreRelations(tx, options = {}) {
         ('constraint', 'candidate_privacy_projection_decision_check'),
         ('constraint', 'candidate_privacy_projection_tenant_id_candidate_id_fkey'),
         ('index', 'candidate_privacy_projection_active_idx'),
-        ('index', 'candidate_privacy_projection_generation_idx')
+        ('index', 'candidate_privacy_projection_generation_idx'),
+        ('index', 'candidate_privacy_rebuild_lease_idx')
     )
     SELECT required.kind, required.name,
            CASE required.kind
@@ -147,6 +148,26 @@ export async function assertCoreRelations(tx, options = {}) {
     throw new Error(
       `Discover database is missing candidate privacy objects: ${missingPrivacyObjects.join(', ')}`,
     );
+  }
+  const privacyColumns = await tx.$queryRawUnsafe(`
+    SELECT attribute.attname AS name,
+           format_type(attribute.atttypid, attribute.atttypmod) AS type
+    FROM pg_attribute attribute
+    WHERE attribute.attrelid = 'public.candidate_privacy_sync_state'::REGCLASS
+      AND attribute.attname IN ('rebuild_claim_token', 'rebuild_lease_expires_at')
+      AND attribute.attnum > 0
+      AND NOT attribute.attisdropped
+    ORDER BY attribute.attname
+  `);
+  const expectedPrivacyColumns = new Map([
+    ['rebuild_claim_token', 'uuid'],
+    ['rebuild_lease_expires_at', 'timestamp(6) with time zone'],
+  ]);
+  if (
+    privacyColumns.length !== expectedPrivacyColumns.size ||
+    privacyColumns.some((row) => expectedPrivacyColumns.get(row.name) !== row.type)
+  ) {
+    throw new Error('Discover database is missing candidate privacy rebuild-lease columns');
   }
 }
 

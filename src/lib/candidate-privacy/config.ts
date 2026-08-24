@@ -4,6 +4,7 @@ export interface CandidatePrivacyConfig {
   httpTimeoutMs: number;
   pollMs: number;
   staleMs: number;
+  rebuildLeaseMs: number;
   eligibilityBatchSize: number;
   feedPageSize: number;
 }
@@ -89,6 +90,13 @@ export function loadCandidatePrivacyConfig(
       120_000,
       60_000,
       300_000,
+    ),
+    rebuildLeaseMs: boundedInt(
+      env,
+      'SIGNAL_CANDIDATE_PRIVACY_REBUILD_LEASE_MS',
+      300_000,
+      60_000,
+      900_000,
     ),
     eligibilityBatchSize: boundedInt(
       env,
