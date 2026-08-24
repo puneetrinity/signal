@@ -24,6 +24,8 @@ const enabled = process.env.RUN_SIGNAL_CANDIDATE_PRIVACY_POSTGRES === '1';
 const describePostgres = enabled ? describe.sequential : describe.skip;
 
 class SyntheticMemoryClient implements CandidatePrivacyMemoryClient {
+  public maxEligibilityBatchSize = 0;
+
   constructor(
     public highWater: number,
     private readonly decisions: Map<string, CandidatePrivacyDecision>,
@@ -37,6 +39,10 @@ class SyntheticMemoryClient implements CandidatePrivacyMemoryClient {
   async eligibilityBatch(
     subjects: CandidatePrivacyEligibilitySubject[],
   ): Promise<Map<string, CandidatePrivacyDecision>> {
+    this.maxEligibilityBatchSize = Math.max(
+      this.maxEligibilityBatchSize,
+      subjects.length,
+    );
     if (this.options.delayMs) {
       await new Promise((resolve) => setTimeout(resolve, this.options.delayMs));
     }
@@ -242,7 +248,86 @@ describePostgres('candidate privacy disposable PostgreSQL matrix', () => {
     })).toBe(4);
   });
 
+  it('privacy-postgres-matrix: production-scale reconciliation bounds remote batches', async () => {
+    await prisma.candidatePrivacySyncState.update({
+      where: { consumerName: 'discover' },
+      data: { status: 'stale' },
+    });
+    const scaleCandidateIds = Array.from(
+      { length: 205 },
+      (_, index) => `candidate-privacy-scale-${index.toString().padStart(3, '0')}`,
+    );
+    await prisma.candidate.createMany({
+      data: scaleCandidateIds.map((id) => ({
+        id,
+        tenantId,
+        linkedinId: id,
+        linkedinUrl: `https://www.linkedin.com/in/${id}`,
+      })),
+    });
+    const client = stableClient();
+    await expect(rebuildCandidatePrivacyProjection(client)).resolves.toBe('rebuilt');
+    expect(client.maxEligibilityBatchSize).toBe(100);
+    const state = await prisma.candidatePrivacySyncState.findUniqueOrThrow({
+      where: { consumerName: 'discover' },
+    });
+    expect(state.expectedCandidates).toBe(209);
+    expect(state.projectedCandidates).toBe(209);
+
+    await prisma.candidatePrivacyProjection.deleteMany();
+    await prisma.candidate.deleteMany({ where: { id: { in: scaleCandidateIds } } });
+    await prisma.candidatePrivacySyncState.update({
+      where: { consumerName: 'discover' },
+      data: { status: 'stale' },
+    });
+  });
+
+  it('privacy-postgres-matrix: candidate drift during remote evaluation refuses the swap', async () => {
+    const stateBefore = await prisma.candidatePrivacySyncState.findUniqueOrThrow({
+      where: { consumerName: 'discover' },
+    });
+    const client = stableClient();
+    const eligibilityBatch = client.eligibilityBatch.bind(client);
+    let inserted = false;
+    client.eligibilityBatch = async (subjects) => {
+      if (!inserted) {
+        inserted = true;
+        await prisma.candidate.create({
+          data: {
+            id: 'candidate-privacy-concurrent-change',
+            tenantId,
+            linkedinId: 'candidate-privacy-concurrent-change',
+            linkedinUrl: 'https://www.linkedin.com/in/candidate-privacy-concurrent-change',
+          },
+        });
+      }
+      return eligibilityBatch(subjects);
+    };
+
+    await expect(rebuildCandidatePrivacyProjection(client)).resolves.toBe(
+      'needs_reconciliation',
+    );
+    const stateAfter = await prisma.candidatePrivacySyncState.findUniqueOrThrow({
+      where: { consumerName: 'discover' },
+    });
+    expect(stateAfter).toMatchObject({
+      activeGeneration: stateBefore.activeGeneration,
+      status: 'needs_reconciliation',
+      lastErrorCode: 'candidate_privacy_reconciliation_changed',
+      projectedCandidates: 0,
+    });
+    expect(await prisma.candidatePrivacyProjection.count({
+      where: { generation: stateBefore.activeGeneration + BigInt(1) },
+    })).toBe(0);
+    await prisma.candidate.delete({
+      where: { id: 'candidate-privacy-concurrent-change' },
+    });
+  });
+
   it('privacy-postgres-matrix: changing high-water refuses the new generation', async () => {
+    const stateBefore = await prisma.candidatePrivacySyncState.findUniqueOrThrow({
+      where: { consumerName: 'discover' },
+    });
     await prisma.candidatePrivacySyncState.update({
       where: { consumerName: 'discover' },
       data: { status: 'stale' },
@@ -257,9 +342,9 @@ describePostgres('candidate privacy disposable PostgreSQL matrix', () => {
       where: { consumerName: 'discover' },
     });
     expect(state.status).toBe('needs_reconciliation');
-    expect(state.activeGeneration).toBe(BigInt(2));
+    expect(state.activeGeneration).toBe(stateBefore.activeGeneration);
     expect(await prisma.candidatePrivacyProjection.count({
-      where: { generation: BigInt(3) },
+      where: { generation: stateBefore.activeGeneration + BigInt(1) },
     })).toBe(0);
   });
 
