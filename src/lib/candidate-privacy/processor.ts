@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/prisma';
 import { loadCandidatePrivacyConfig } from './config';
 import {
@@ -19,6 +20,100 @@ export type CandidatePrivacyProcessorResult =
   | 'rebuilt'
   | 'busy'
   | 'needs_reconciliation';
+
+const candidateSnapshotSelect = {
+  id: true,
+  tenantId: true,
+  linkedinUrl: true,
+  globalLink: { select: { globalCandidateId: true } },
+} as const;
+
+type CandidateSnapshotRow = Prisma.CandidateGetPayload<{
+  select: typeof candidateSnapshotSelect;
+}>;
+
+type CandidateProjectionSeed = {
+  tenantId: string;
+  candidateId: string;
+  generation: bigint;
+  decision: string;
+  evaluatedCursor: bigint;
+};
+
+const PROJECTION_INSERT_BATCH_SIZE = 1_000;
+const CANDIDATE_SNAPSHOT_READ_BATCH_SIZE = 1_000;
+const ELIGIBILITY_RECONCILIATION_BATCH_MAX = 100;
+
+async function loadCandidateSnapshot(
+  db: typeof prisma | Prisma.TransactionClient,
+): Promise<CandidateSnapshotRow[]> {
+  const snapshot: CandidateSnapshotRow[] = [];
+  let afterId: string | undefined;
+  for (;;) {
+    const rows = await db.candidate.findMany({
+      where: afterId ? { id: { gt: afterId } } : undefined,
+      orderBy: { id: 'asc' },
+      take: CANDIDATE_SNAPSHOT_READ_BATCH_SIZE,
+      select: candidateSnapshotSelect,
+    });
+    snapshot.push(...rows);
+    if (rows.length < CANDIDATE_SNAPSHOT_READ_BATCH_SIZE) break;
+    afterId = rows[rows.length - 1].id;
+  }
+  return snapshot;
+}
+
+function candidateSnapshotFingerprint(rows: CandidateSnapshotRow[]): Buffer {
+  const hash = createHash('sha256');
+  for (const row of rows) {
+    for (const value of [
+      row.id,
+      row.tenantId,
+      row.linkedinUrl,
+      row.globalLink?.globalCandidateId,
+    ]) {
+      if (value === null || value === undefined) {
+        hash.update('n:');
+      } else {
+        hash.update(`s${Buffer.byteLength(value, 'utf8')}:`);
+        hash.update(value);
+      }
+      hash.update('|');
+    }
+    hash.update('\n');
+  }
+  return hash.digest();
+}
+
+async function evaluateCandidateSnapshot(
+  client: CandidatePrivacyMemoryClient,
+  rows: CandidateSnapshotRow[],
+  batchSize: number,
+  generation: bigint,
+  evaluatedCursor: bigint,
+): Promise<CandidateProjectionSeed[]> {
+  const projections: CandidateProjectionSeed[] = [];
+  for (let offset = 0; offset < rows.length; offset += batchSize) {
+    const batch = rows.slice(offset, offset + batchSize);
+    const refs = batch.map((row) => ({ row, requestRef: randomUUID() }));
+    const decisions = await client.eligibilityBatch(
+      refs.map(({ row, requestRef }) => anchorToEligibilitySubject({
+        requestRef,
+        linkedinUrl: row.linkedinUrl,
+        signalCandidateId: row.id,
+        globalCandidateId: row.globalLink?.globalCandidateId,
+      })),
+    );
+    projections.push(...refs.map(({ row, requestRef }) => ({
+      tenantId: row.tenantId,
+      candidateId: row.id,
+      generation,
+      decision: decisions.get(requestRef) ?? 'review',
+      evaluatedCursor,
+    })));
+  }
+  return projections;
+}
 
 async function refreshHealthyState(
   client: CandidatePrivacyMemoryClient,
@@ -115,10 +210,10 @@ export async function rebuildCandidatePrivacyProjection(
   const config = loadCandidatePrivacyConfig(process.env, {
     requireProcessor: true,
   });
-  // Commit the restrictive state before any network read or long-running
-  // rebuild transaction. Keeping this update inside the rebuild transaction
-  // would leave the previous healthy row visible to concurrent readers under
-  // MVCC until the final commit.
+  // Commit the restrictive state before any network read. Remote eligibility
+  // evaluation deliberately stays outside the short generation-swap
+  // transaction; the swap re-fingerprints every candidate and rechecks the
+  // Memory high-water mark before making the generation visible.
   const claimed = await prisma.candidatePrivacySyncState.updateMany({
     where: {
       consumerName: 'discover',
@@ -133,32 +228,12 @@ export async function rebuildCandidatePrivacyProjection(
   if (claimed.count !== 1) return 'busy';
 
   try {
-    return await withCandidatePrivacyTransaction(async (tx) => {
-    const lock = await tx.$queryRaw<Array<{ acquired: boolean }>>`
-      SELECT pg_try_advisory_xact_lock(
-        hashtextextended(${CANDIDATE_PRIVACY_PROCESSOR_LOCK}, 0)
-      ) AS "acquired"
-    `;
-    if (lock.length !== 1 || !lock[0].acquired) {
-      throw new Error('candidate_privacy_processor_lock_unavailable');
-    }
-
-    await tx.$executeRaw`
-      SELECT pg_advisory_xact_lock(
-        hashtextextended(${CANDIDATE_PRIVACY_ADMISSION_LOCK}, 0)
-      )
-    `;
-    const current = await tx.candidatePrivacySyncState.findUniqueOrThrow({
+    const highWaterBefore = await client.readHighWater();
+    const claimedState = await prisma.candidatePrivacySyncState.findUniqueOrThrow({
       where: { consumerName: 'discover' },
     });
-    const nextGeneration = current.activeGeneration + BigInt(1);
-    if (current.status !== 'rebuilding') {
-      throw new Error('candidate_privacy_rebuild_claim_lost');
-    }
-
-    const highWaterBefore = await client.readHighWater();
-    if (BigInt(highWaterBefore) < current.cursor) {
-      await tx.candidatePrivacySyncState.update({
+    if (BigInt(highWaterBefore) < claimedState.cursor) {
+      await prisma.candidatePrivacySyncState.update({
         where: { consumerName: 'discover' },
         data: {
           status: 'needs_reconciliation',
@@ -168,91 +243,111 @@ export async function rebuildCandidatePrivacyProjection(
       });
       return 'needs_reconciliation';
     }
-    const expectedCandidates = await tx.candidate.count();
-    await tx.candidatePrivacyProjection.deleteMany({
-      where: { generation: nextGeneration },
-    });
-
-    let afterId: string | undefined;
-    let projectedCandidates = 0;
-    for (;;) {
-      const rows = await tx.candidate.findMany({
-        where: afterId ? { id: { gt: afterId } } : undefined,
-        orderBy: { id: 'asc' },
-        take: config.eligibilityBatchSize,
-        select: {
-          id: true,
-          tenantId: true,
-          linkedinUrl: true,
-          globalLink: { select: { globalCandidateId: true } },
-        },
-      });
-      if (rows.length === 0) break;
-      const refs = rows.map((row) => ({ row, requestRef: randomUUID() }));
-      const decisions = await client.eligibilityBatch(
-        refs.map(({ row, requestRef }) => anchorToEligibilitySubject({
-          requestRef,
-          linkedinUrl: row.linkedinUrl,
-          signalCandidateId: row.id,
-          globalCandidateId: row.globalLink?.globalCandidateId,
-        })),
-      );
-      await tx.candidatePrivacyProjection.createMany({
-        data: refs.map(({ row, requestRef }) => ({
-          tenantId: row.tenantId,
-          candidateId: row.id,
-          generation: nextGeneration,
-          decision: decisions.get(requestRef) ?? 'review',
-          evaluatedCursor: BigInt(highWaterBefore),
-        })),
-      });
-      projectedCandidates += rows.length;
-      afterId = rows[rows.length - 1].id;
-    }
-
+    const nextGeneration = claimedState.activeGeneration + BigInt(1);
+    const candidateSnapshot = await loadCandidateSnapshot(prisma);
+    const snapshotFingerprint = candidateSnapshotFingerprint(candidateSnapshot);
+    const projections = await evaluateCandidateSnapshot(
+      client,
+      candidateSnapshot,
+      Math.min(
+        config.eligibilityBatchSize,
+        ELIGIBILITY_RECONCILIATION_BATCH_MAX,
+      ),
+      nextGeneration,
+      BigInt(highWaterBefore),
+    );
     const highWaterAfter = await client.readHighWater();
-    const finalCandidateCount = await tx.candidate.count();
-    const finalProjectionCount = await tx.candidatePrivacyProjection.count({
-      where: { generation: nextGeneration },
-    });
-    if (
-      highWaterAfter !== highWaterBefore ||
-      finalCandidateCount !== expectedCandidates ||
-      projectedCandidates !== expectedCandidates ||
-      finalProjectionCount !== expectedCandidates
-    ) {
-      await tx.candidatePrivacyProjection.deleteMany({
-        where: { generation: nextGeneration },
-      });
-      await tx.candidatePrivacySyncState.update({
+    if (highWaterAfter !== highWaterBefore) {
+      await prisma.candidatePrivacySyncState.update({
         where: { consumerName: 'discover' },
         data: {
           status: 'needs_reconciliation',
           rebuildStartedAt: null,
           lastErrorCode: 'candidate_privacy_reconciliation_changed',
-          expectedCandidates,
-          projectedCandidates: Math.min(
-            projectedCandidates,
-            expectedCandidates,
-          ),
+          expectedCandidates: candidateSnapshot.length,
+          projectedCandidates: 0,
         },
       });
       return 'needs_reconciliation';
     }
 
-    await tx.candidatePrivacySyncState.update({
-      where: { consumerName: 'discover' },
-      data: {
-        cursor: BigInt(highWaterBefore),
-        activeGeneration: nextGeneration,
-        status: 'healthy',
-        lastSuccessAt: new Date(),
-        rebuildStartedAt: null,
-        lastErrorCode: null,
-        expectedCandidates,
-        projectedCandidates,
-      },
-    });
+    return await withCandidatePrivacyTransaction(async (tx) => {
+      const lock = await tx.$queryRaw<Array<{ acquired: boolean }>>`
+        SELECT pg_try_advisory_xact_lock(
+          hashtextextended(${CANDIDATE_PRIVACY_PROCESSOR_LOCK}, 0)
+        ) AS "acquired"
+      `;
+      if (lock.length !== 1 || !lock[0].acquired) {
+        throw new Error('candidate_privacy_processor_lock_unavailable');
+      }
+
+      await tx.$executeRaw`
+        SELECT pg_advisory_xact_lock(
+          hashtextextended(${CANDIDATE_PRIVACY_ADMISSION_LOCK}, 0)
+        )
+      `;
+      const current = await tx.candidatePrivacySyncState.findUniqueOrThrow({
+        where: { consumerName: 'discover' },
+      });
+      if (
+        current.status !== 'rebuilding' ||
+        current.activeGeneration + BigInt(1) !== nextGeneration
+      ) {
+        throw new Error('candidate_privacy_rebuild_claim_lost');
+      }
+
+      const currentSnapshot = await loadCandidateSnapshot(tx);
+      const highWaterAtCommit = await client.readHighWater();
+      if (
+        highWaterAtCommit !== highWaterBefore ||
+        !candidateSnapshotFingerprint(currentSnapshot).equals(snapshotFingerprint) ||
+        projections.length !== candidateSnapshot.length
+      ) {
+        await tx.candidatePrivacySyncState.update({
+          where: { consumerName: 'discover' },
+          data: {
+            status: 'needs_reconciliation',
+            rebuildStartedAt: null,
+            lastErrorCode: 'candidate_privacy_reconciliation_changed',
+            expectedCandidates: currentSnapshot.length,
+            projectedCandidates: 0,
+          },
+        });
+        return 'needs_reconciliation';
+      }
+
+      await tx.candidatePrivacyProjection.deleteMany({
+        where: { generation: nextGeneration },
+      });
+      for (let offset = 0; offset < projections.length; offset += PROJECTION_INSERT_BATCH_SIZE) {
+        await tx.candidatePrivacyProjection.createMany({
+          data: projections.slice(offset, offset + PROJECTION_INSERT_BATCH_SIZE),
+        });
+      }
+      const finalCandidateCount = await tx.candidate.count();
+      const finalProjectionCount = await tx.candidatePrivacyProjection.count({
+        where: { generation: nextGeneration },
+      });
+      if (
+        finalCandidateCount !== candidateSnapshot.length ||
+        finalProjectionCount !== candidateSnapshot.length
+      ) {
+        throw new Error('candidate_privacy_reconciliation_changed');
+      }
+
+      await tx.candidatePrivacySyncState.update({
+        where: { consumerName: 'discover' },
+        data: {
+          cursor: BigInt(highWaterBefore),
+          activeGeneration: nextGeneration,
+          status: 'healthy',
+          lastSuccessAt: new Date(),
+          rebuildStartedAt: null,
+          lastErrorCode: null,
+          expectedCandidates: candidateSnapshot.length,
+          projectedCandidates: candidateSnapshot.length,
+        },
+      });
       return 'rebuilt';
     });
   } catch (error) {

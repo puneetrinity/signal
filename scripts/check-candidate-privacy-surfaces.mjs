@@ -91,7 +91,10 @@ const REQUIRED_PATTERNS = new Map([
   ['src/lib/candidate-privacy/processor.ts', [
     /status:\s*'rebuilding'/,
     /CANDIDATE_PRIVACY_ADMISSION_LOCK/,
-    /finalProjectionCount !== expectedCandidates/,
+    /finalProjectionCount !== candidateSnapshot\.length/,
+    /ELIGIBILITY_RECONCILIATION_BATCH_MAX\s*=\s*100/,
+    /CANDIDATE_SNAPSHOT_READ_BATCH_SIZE\s*=\s*1_000/,
+    /candidateSnapshotFingerprint\(currentSnapshot\)/,
   ]],
 ]);
 
@@ -225,6 +228,23 @@ export async function evaluateCandidatePrivacySurfaces(root) {
     resolve(root, 'src/lib/candidate-privacy/config.ts'),
     'utf8',
   );
+  const privacyProcessor = await readFile(
+    resolve(root, 'src/lib/candidate-privacy/processor.ts'),
+    'utf8',
+  );
+  const remoteEvaluation = privacyProcessor.indexOf(
+    'const projections = await evaluateCandidateSnapshot(',
+  );
+  const atomicSwap = privacyProcessor.indexOf(
+    'return await withCandidatePrivacyTransaction(async (tx)',
+  );
+  if (
+    remoteEvaluation < 0 ||
+    atomicSwap < 0 ||
+    remoteEvaluation > atomicSwap
+  ) {
+    offenders.push('candidate privacy remote evaluation moved inside the atomic swap transaction');
+  }
   if (
     !/env\.NODE_ENV === 'test'\s*&&\s*\n?\s*env\.SIGNAL_CANDIDATE_PRIVACY_TEST_ADAPTER === 'disposable_passthrough'/.test(
       privacyConfig,
