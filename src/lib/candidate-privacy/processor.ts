@@ -43,6 +43,13 @@ type CandidateProjectionSeed = {
 const PROJECTION_INSERT_BATCH_SIZE = 1_000;
 const CANDIDATE_SNAPSHOT_READ_BATCH_SIZE = 1_000;
 const ELIGIBILITY_RECONCILIATION_BATCH_MAX = 100;
+const REBUILD_CLAIM_LOST = 'candidate_privacy_rebuild_claim_lost';
+
+type RebuildClaim = {
+  token: string;
+  activeGeneration: bigint;
+  leaseMs: number;
+};
 
 async function loadCandidateSnapshot(
   db: typeof prisma | Prisma.TransactionClient,
@@ -91,6 +98,7 @@ async function evaluateCandidateSnapshot(
   batchSize: number,
   generation: bigint,
   evaluatedCursor: bigint,
+  afterBatch: () => Promise<void>,
 ): Promise<CandidateProjectionSeed[]> {
   const projections: CandidateProjectionSeed[] = [];
   for (let offset = 0; offset < rows.length; offset += batchSize) {
@@ -104,6 +112,7 @@ async function evaluateCandidateSnapshot(
         globalCandidateId: row.globalLink?.globalCandidateId,
       })),
     );
+    await afterBatch();
     projections.push(...refs.map(({ row, requestRef }) => ({
       tenantId: row.tenantId,
       candidateId: row.id,
@@ -204,6 +213,69 @@ async function markProcessorFailure(
   });
 }
 
+function rebuildLeaseExpiry(leaseMs: number, now = new Date()): Date {
+  return new Date(now.getTime() + leaseMs);
+}
+
+async function heartbeatRebuildClaim(claim: RebuildClaim): Promise<void> {
+  const now = new Date();
+  const heartbeat = await prisma.candidatePrivacySyncState.updateMany({
+    where: {
+      consumerName: 'discover',
+      status: 'rebuilding',
+      activeGeneration: claim.activeGeneration,
+      rebuildClaimToken: claim.token,
+      rebuildLeaseExpiresAt: { gt: now },
+    },
+    data: {
+      rebuildLeaseExpiresAt: rebuildLeaseExpiry(claim.leaseMs, now),
+    },
+  });
+  if (heartbeat.count !== 1) throw new Error(REBUILD_CLAIM_LOST);
+}
+
+async function markRebuildNeedsReconciliation(
+  claim: RebuildClaim,
+  lastErrorCode: string,
+  counts?: { expectedCandidates: number; projectedCandidates: number },
+): Promise<void> {
+  const updated = await prisma.candidatePrivacySyncState.updateMany({
+    where: {
+      consumerName: 'discover',
+      status: 'rebuilding',
+      activeGeneration: claim.activeGeneration,
+      rebuildClaimToken: claim.token,
+    },
+    data: {
+      status: 'needs_reconciliation',
+      rebuildStartedAt: null,
+      rebuildClaimToken: null,
+      rebuildLeaseExpiresAt: null,
+      lastErrorCode,
+      ...counts,
+    },
+  });
+  if (updated.count !== 1) throw new Error(REBUILD_CLAIM_LOST);
+}
+
+async function markRebuildFailure(error: unknown, claim: RebuildClaim): Promise<void> {
+  const updated = await prisma.candidatePrivacySyncState.updateMany({
+    where: {
+      consumerName: 'discover',
+      status: 'rebuilding',
+      activeGeneration: claim.activeGeneration,
+      rebuildClaimToken: claim.token,
+    },
+    data: {
+      ...processorFailureState(error),
+      rebuildStartedAt: null,
+      rebuildClaimToken: null,
+      rebuildLeaseExpiresAt: null,
+    },
+  });
+  if (updated.count !== 1) throw new Error(REBUILD_CLAIM_LOST);
+}
+
 export async function rebuildCandidatePrivacyProjection(
   client: CandidatePrivacyMemoryClient,
 ): Promise<CandidatePrivacyProcessorResult> {
@@ -214,33 +286,49 @@ export async function rebuildCandidatePrivacyProjection(
   // evaluation deliberately stays outside the short generation-swap
   // transaction; the swap re-fingerprints every candidate and rechecks the
   // Memory high-water mark before making the generation visible.
+  const claimToken = randomUUID();
+  const claimedAt = new Date();
   const claimed = await prisma.candidatePrivacySyncState.updateMany({
     where: {
       consumerName: 'discover',
-      status: { not: 'rebuilding' },
+      OR: [
+        { status: { not: 'rebuilding' } },
+        { rebuildClaimToken: null },
+        { rebuildLeaseExpiresAt: null },
+        { rebuildLeaseExpiresAt: { lte: claimedAt } },
+      ],
     },
     data: {
       status: 'rebuilding',
-      rebuildStartedAt: new Date(),
+      rebuildStartedAt: claimedAt,
+      rebuildClaimToken: claimToken,
+      rebuildLeaseExpiresAt: rebuildLeaseExpiry(config.rebuildLeaseMs, claimedAt),
       lastErrorCode: null,
     },
   });
   if (claimed.count !== 1) return 'busy';
 
+  const claimedState = await prisma.candidatePrivacySyncState.findFirst({
+    where: {
+      consumerName: 'discover',
+      status: 'rebuilding',
+      rebuildClaimToken: claimToken,
+    },
+  });
+  if (!claimedState) throw new Error(REBUILD_CLAIM_LOST);
+  const claim: RebuildClaim = {
+    token: claimToken,
+    activeGeneration: claimedState.activeGeneration,
+    leaseMs: config.rebuildLeaseMs,
+  };
+
   try {
     const highWaterBefore = await client.readHighWater();
-    const claimedState = await prisma.candidatePrivacySyncState.findUniqueOrThrow({
-      where: { consumerName: 'discover' },
-    });
     if (BigInt(highWaterBefore) < claimedState.cursor) {
-      await prisma.candidatePrivacySyncState.update({
-        where: { consumerName: 'discover' },
-        data: {
-          status: 'needs_reconciliation',
-          rebuildStartedAt: null,
-          lastErrorCode: 'candidate_privacy_cursor_decreased',
-        },
-      });
+      await markRebuildNeedsReconciliation(
+        claim,
+        'candidate_privacy_cursor_decreased',
+      );
       return 'needs_reconciliation';
     }
     const nextGeneration = claimedState.activeGeneration + BigInt(1);
@@ -255,19 +343,19 @@ export async function rebuildCandidatePrivacyProjection(
       ),
       nextGeneration,
       BigInt(highWaterBefore),
+      () => heartbeatRebuildClaim(claim),
     );
+    await heartbeatRebuildClaim(claim);
     const highWaterAfter = await client.readHighWater();
     if (highWaterAfter !== highWaterBefore) {
-      await prisma.candidatePrivacySyncState.update({
-        where: { consumerName: 'discover' },
-        data: {
-          status: 'needs_reconciliation',
-          rebuildStartedAt: null,
-          lastErrorCode: 'candidate_privacy_reconciliation_changed',
+      await markRebuildNeedsReconciliation(
+        claim,
+        'candidate_privacy_reconciliation_changed',
+        {
           expectedCandidates: candidateSnapshot.length,
           projectedCandidates: 0,
         },
-      });
+      );
       return 'needs_reconciliation';
     }
 
@@ -291,9 +379,13 @@ export async function rebuildCandidatePrivacyProjection(
       });
       if (
         current.status !== 'rebuilding' ||
-        current.activeGeneration + BigInt(1) !== nextGeneration
+        current.activeGeneration !== claim.activeGeneration ||
+        current.activeGeneration + BigInt(1) !== nextGeneration ||
+        current.rebuildClaimToken !== claim.token ||
+        !current.rebuildLeaseExpiresAt ||
+        current.rebuildLeaseExpiresAt <= new Date()
       ) {
-        throw new Error('candidate_privacy_rebuild_claim_lost');
+        throw new Error(REBUILD_CLAIM_LOST);
       }
 
       const currentSnapshot = await loadCandidateSnapshot(tx);
@@ -303,16 +395,24 @@ export async function rebuildCandidatePrivacyProjection(
         !candidateSnapshotFingerprint(currentSnapshot).equals(snapshotFingerprint) ||
         projections.length !== candidateSnapshot.length
       ) {
-        await tx.candidatePrivacySyncState.update({
-          where: { consumerName: 'discover' },
+        const refused = await tx.candidatePrivacySyncState.updateMany({
+          where: {
+            consumerName: 'discover',
+            status: 'rebuilding',
+            activeGeneration: claim.activeGeneration,
+            rebuildClaimToken: claim.token,
+          },
           data: {
             status: 'needs_reconciliation',
             rebuildStartedAt: null,
+            rebuildClaimToken: null,
+            rebuildLeaseExpiresAt: null,
             lastErrorCode: 'candidate_privacy_reconciliation_changed',
             expectedCandidates: currentSnapshot.length,
             projectedCandidates: 0,
           },
         });
+        if (refused.count !== 1) throw new Error(REBUILD_CLAIM_LOST);
         return 'needs_reconciliation';
       }
 
@@ -335,23 +435,32 @@ export async function rebuildCandidatePrivacyProjection(
         throw new Error('candidate_privacy_reconciliation_changed');
       }
 
-      await tx.candidatePrivacySyncState.update({
-        where: { consumerName: 'discover' },
+      const completed = await tx.candidatePrivacySyncState.updateMany({
+        where: {
+          consumerName: 'discover',
+          status: 'rebuilding',
+          activeGeneration: claim.activeGeneration,
+          rebuildClaimToken: claim.token,
+          rebuildLeaseExpiresAt: { gt: new Date() },
+        },
         data: {
           cursor: BigInt(highWaterBefore),
           activeGeneration: nextGeneration,
           status: 'healthy',
           lastSuccessAt: new Date(),
           rebuildStartedAt: null,
+          rebuildClaimToken: null,
+          rebuildLeaseExpiresAt: null,
           lastErrorCode: null,
           expectedCandidates: candidateSnapshot.length,
           projectedCandidates: candidateSnapshot.length,
         },
       });
+      if (completed.count !== 1) throw new Error(REBUILD_CLAIM_LOST);
       return 'rebuilt';
     });
   } catch (error) {
-    await markProcessorFailure(error, { status: 'rebuilding' });
+    await markRebuildFailure(error, claim);
     throw error;
   }
 }

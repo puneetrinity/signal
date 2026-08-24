@@ -19,6 +19,7 @@ assert(baseline.length === 0, `Baseline privacy guard rejected:\n${baseline.join
 
 const temporaryRoot = await mkdtemp(join(tmpdir(), 'signal-privacy-guard-'));
 const copyRoot = join(temporaryRoot, 'repo');
+let mutationCount = 0;
 try {
   await cp(root, copyRoot, {
     recursive: true,
@@ -28,6 +29,7 @@ try {
   const manifestPath = resolve(copyRoot, 'src/lib/candidate-privacy/surfaces.json');
   const retiredPath = resolve(copyRoot, 'src/lib/legacy-retirement.ts');
   const clientPath = resolve(copyRoot, 'src/lib/candidate-privacy/memory-client.ts');
+  const processorPath = resolve(copyRoot, 'src/lib/candidate-privacy/processor.ts');
 
   const mutations = [
     async () => {
@@ -71,7 +73,54 @@ try {
       );
       return { paths: [[clientPath, original]] };
     },
+    async () => {
+      const original = await readFile(processorPath);
+      await writeFile(
+        processorPath,
+        original.toString('utf8').replace(
+          'async function heartbeatRebuildClaim(',
+          'async function extendRebuildClaim(',
+        ),
+      );
+      return { paths: [[processorPath, original]] };
+    },
+    async () => {
+      const original = await readFile(processorPath);
+      await writeFile(
+        processorPath,
+        original.toString('utf8').replace(
+          'rebuildLeaseExpiresAt: { gt: new Date() },',
+          'rebuildLeaseExpiresAt: { not: null },',
+        ),
+      );
+      return { paths: [[processorPath, original]] };
+    },
+    async () => {
+      const original = await readFile(processorPath);
+      const source = original.toString('utf8');
+      const start = source.indexOf('async function markRebuildFailure(');
+      const end = source.indexOf('export async function rebuildCandidatePrivacyProjection(');
+      const mutated = `${source.slice(0, start)}${source.slice(start, end).replace(
+        'rebuildClaimToken: claim.token,',
+        'rebuildClaimToken: undefined,',
+      )}${source.slice(end)}`;
+      await writeFile(processorPath, mutated);
+      return { paths: [[processorPath, original]] };
+    },
+    async () => {
+      const original = await readFile(processorPath);
+      const source = original.toString('utf8');
+      const start = source.indexOf('async function markRebuildFailure(');
+      const end = source.indexOf('export async function rebuildCandidatePrivacyProjection(');
+      const mutated = `${source.slice(0, start)}${source.slice(start, end).replace(
+          'if (updated.count !== 1) throw new Error(REBUILD_CLAIM_LOST);',
+          'if (updated.count < 0) throw new Error(REBUILD_CLAIM_LOST);',
+        )}${source.slice(end)}`;
+      await writeFile(processorPath, mutated);
+      return { paths: [[processorPath, original]] };
+    },
   ];
+  mutationCount = mutations.length;
 
   for (const mutate of mutations) {
     const { paths } = await mutate();
@@ -95,4 +144,4 @@ try {
   await rm(temporaryRoot, { recursive: true, force: true });
 }
 
-console.log('[Candidate privacy guard test] Six negative mutations failed red and byte restoration returned green');
+console.log(`[Candidate privacy guard test] ${mutationCount} negative mutations failed red and byte restoration returned green`);

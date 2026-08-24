@@ -97,6 +97,8 @@ async function resetFixture(): Promise<void> {
       status: 'uninitialized',
       lastSuccessAt: null,
       rebuildStartedAt: null,
+      rebuildClaimToken: null,
+      rebuildLeaseExpiresAt: null,
       lastErrorCode: null,
       expectedCandidates: 0,
       projectedCandidates: 0,
@@ -109,6 +111,7 @@ describePostgres('candidate privacy disposable PostgreSQL matrix', () => {
     process.env.ACTIVEGRAPH_URL = 'http://127.0.0.1:18000';
     process.env.SIGNAL_JWT_PRIVATE_KEY = 'disposable-test-marker';
     process.env.SIGNAL_CANDIDATE_PRIVACY_STALE_MS = '120000';
+    process.env.SIGNAL_CANDIDATE_PRIVACY_REBUILD_LEASE_MS = '60000';
     const rows = await prisma.$queryRaw<Array<{
       database_name: string;
       role_name: string;
@@ -228,24 +231,168 @@ describePostgres('candidate privacy disposable PostgreSQL matrix', () => {
     });
   });
 
-  it('privacy-postgres-matrix: two processors serialize and one complete generation wins', async () => {
+  it('privacy-postgres-matrix: a live lease excludes a competing processor', async () => {
     await prisma.candidatePrivacySyncState.update({
       where: { consumerName: 'discover' },
       data: { status: 'stale' },
     });
-    const results = await Promise.all([
-      rebuildCandidatePrivacyProjection(stableClient(7, 30)),
-      rebuildCandidatePrivacyProjection(stableClient(7, 30)),
-    ]);
-    expect(results.sort()).toEqual(['busy', 'rebuilt']);
+    let releaseBatch!: () => void;
+    let signalBatchStarted!: () => void;
+    const batchStarted = new Promise<void>((resolve) => { signalBatchStarted = resolve; });
+    const batchRelease = new Promise<void>((resolve) => { releaseBatch = resolve; });
+    const client = stableClient();
+    const evaluate = client.eligibilityBatch.bind(client);
+    client.eligibilityBatch = async (subjects) => {
+      signalBatchStarted();
+      await batchRelease;
+      return evaluate(subjects);
+    };
+
+    const first = rebuildCandidatePrivacyProjection(client);
+    await batchStarted;
+    const liveClaim = await prisma.candidatePrivacySyncState.findUniqueOrThrow({
+      where: { consumerName: 'discover' },
+    });
+    expect(liveClaim).toMatchObject({ status: 'rebuilding' });
+    expect(liveClaim.rebuildClaimToken).toEqual(expect.any(String));
+    expect(liveClaim.rebuildLeaseExpiresAt!.getTime()).toBeGreaterThan(Date.now());
+    await expect(rebuildCandidatePrivacyProjection(stableClient())).resolves.toBe('busy');
+    releaseBatch();
+    await expect(first).resolves.toBe('rebuilt');
     const state = await prisma.candidatePrivacySyncState.findUniqueOrThrow({
       where: { consumerName: 'discover' },
     });
     expect(state.status).toBe('healthy');
     expect(state.activeGeneration).toBe(BigInt(2));
+    expect(state.rebuildClaimToken).toBeNull();
+    expect(state.rebuildLeaseExpiresAt).toBeNull();
     expect(await prisma.candidatePrivacyProjection.count({
       where: { generation: BigInt(2) },
     })).toBe(4);
+  });
+
+  it('privacy-postgres-matrix: a stalled owner past its lease is fenced by one successor', async () => {
+    const before = await prisma.candidatePrivacySyncState.findUniqueOrThrow({
+      where: { consumerName: 'discover' },
+    });
+    await prisma.candidatePrivacySyncState.update({
+      where: { consumerName: 'discover' },
+      data: { status: 'stale' },
+    });
+    let releaseBatch!: () => void;
+    let signalBatchStarted!: () => void;
+    const batchStarted = new Promise<void>((resolve) => { signalBatchStarted = resolve; });
+    const batchRelease = new Promise<void>((resolve) => { releaseBatch = resolve; });
+    const stalledClient = stableClient();
+    const evaluate = stalledClient.eligibilityBatch.bind(stalledClient);
+    stalledClient.eligibilityBatch = async (subjects) => {
+      signalBatchStarted();
+      await batchRelease;
+      return evaluate(subjects);
+    };
+
+    const staleOwner = rebuildCandidatePrivacyProjection(stalledClient);
+    await batchStarted;
+    const staleClaim = await prisma.candidatePrivacySyncState.findUniqueOrThrow({
+      where: { consumerName: 'discover' },
+    });
+    await prisma.candidatePrivacySyncState.updateMany({
+      where: {
+        consumerName: 'discover',
+        rebuildClaimToken: staleClaim.rebuildClaimToken,
+      },
+      data: { rebuildLeaseExpiresAt: new Date(Date.now() - 1) },
+    });
+
+    await expect(rebuildCandidatePrivacyProjection(stableClient())).resolves.toBe('rebuilt');
+    releaseBatch();
+    await expect(staleOwner).rejects.toThrow('candidate_privacy_rebuild_claim_lost');
+    const state = await prisma.candidatePrivacySyncState.findUniqueOrThrow({
+      where: { consumerName: 'discover' },
+    });
+    expect(state).toMatchObject({
+      status: 'healthy',
+      activeGeneration: before.activeGeneration + BigInt(1),
+      rebuildClaimToken: null,
+      rebuildLeaseExpiresAt: null,
+    });
+    expect(await prisma.candidatePrivacyProjection.count({
+      where: { generation: state.activeGeneration },
+    })).toBe(4);
+  });
+
+  it('privacy-postgres-matrix: a stale owner failure cannot overwrite its successor', async () => {
+    const before = await prisma.candidatePrivacySyncState.findUniqueOrThrow({
+      where: { consumerName: 'discover' },
+    });
+    await prisma.candidatePrivacySyncState.update({
+      where: { consumerName: 'discover' },
+      data: { status: 'stale' },
+    });
+    let releaseBatch!: () => void;
+    let signalBatchStarted!: () => void;
+    const batchStarted = new Promise<void>((resolve) => { signalBatchStarted = resolve; });
+    const batchRelease = new Promise<void>((resolve) => { releaseBatch = resolve; });
+    const stalledClient = stableClient();
+    stalledClient.eligibilityBatch = async () => {
+      signalBatchStarted();
+      await batchRelease;
+      throw new Error('candidate_privacy_invalid_response');
+    };
+
+    const staleOwner = rebuildCandidatePrivacyProjection(stalledClient);
+    await batchStarted;
+    const staleClaim = await prisma.candidatePrivacySyncState.findUniqueOrThrow({
+      where: { consumerName: 'discover' },
+    });
+    await prisma.candidatePrivacySyncState.updateMany({
+      where: {
+        consumerName: 'discover',
+        rebuildClaimToken: staleClaim.rebuildClaimToken,
+      },
+      data: { rebuildLeaseExpiresAt: new Date(Date.now() - 1) },
+    });
+
+    await expect(rebuildCandidatePrivacyProjection(stableClient())).resolves.toBe('rebuilt');
+    releaseBatch();
+    await expect(staleOwner).rejects.toThrow('candidate_privacy_rebuild_claim_lost');
+    const state = await prisma.candidatePrivacySyncState.findUniqueOrThrow({
+      where: { consumerName: 'discover' },
+    });
+    expect(state).toMatchObject({
+      status: 'healthy',
+      activeGeneration: before.activeGeneration + BigInt(1),
+      rebuildClaimToken: null,
+      rebuildLeaseExpiresAt: null,
+    });
+    expect(await prisma.candidatePrivacyProjection.count({
+      where: { generation: state.activeGeneration },
+    })).toBe(4);
+  });
+
+  it('privacy-postgres-matrix: a legacy tokenless rebuilding claim is recoverable', async () => {
+    const before = await prisma.candidatePrivacySyncState.findUniqueOrThrow({
+      where: { consumerName: 'discover' },
+    });
+    await prisma.candidatePrivacySyncState.update({
+      where: { consumerName: 'discover' },
+      data: {
+        status: 'rebuilding',
+        rebuildStartedAt: new Date(Date.now() - 600_000),
+        rebuildClaimToken: null,
+        rebuildLeaseExpiresAt: null,
+      },
+    });
+    await expect(rebuildCandidatePrivacyProjection(stableClient())).resolves.toBe('rebuilt');
+    const state = await prisma.candidatePrivacySyncState.findUniqueOrThrow({
+      where: { consumerName: 'discover' },
+    });
+    expect(state).toMatchObject({
+      status: 'healthy',
+      activeGeneration: before.activeGeneration + BigInt(1),
+      rebuildClaimToken: null,
+      rebuildLeaseExpiresAt: null,
+    });
   });
 
   it('privacy-postgres-matrix: production-scale reconciliation bounds remote batches', async () => {

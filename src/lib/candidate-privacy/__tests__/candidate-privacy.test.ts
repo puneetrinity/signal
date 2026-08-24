@@ -19,6 +19,7 @@ function config() {
     SIGNAL_CANDIDATE_PRIVACY_HTTP_TIMEOUT_MS: '5000',
     SIGNAL_CANDIDATE_PRIVACY_POLL_MS: '30000',
     SIGNAL_CANDIDATE_PRIVACY_STALE_MS: '120000',
+    SIGNAL_CANDIDATE_PRIVACY_REBUILD_LEASE_MS: '300000',
     SIGNAL_CANDIDATE_PRIVACY_BATCH_SIZE: '200',
     SIGNAL_CANDIDATE_PRIVACY_FEED_PAGE_SIZE: '500',
   });
@@ -51,6 +52,7 @@ describe('Discover candidate privacy contract', () => {
     expect(config()).toMatchObject({
       memoryBaseUrl: 'http://127.0.0.1:18000',
       actorId: 'signal-service',
+      rebuildLeaseMs: 300000,
       eligibilityBatchSize: 200,
       feedPageSize: 500,
     });
@@ -60,6 +62,16 @@ describe('Discover candidate privacy contract', () => {
       NODE_ENV: 'test',
       ACTIVEGRAPH_URL: 'https://example.test',
       SIGNAL_CANDIDATE_PRIVACY_STALE_MS: '300001',
+    })).toThrow('candidate_privacy_configuration_invalid');
+    expect(() => loadCandidatePrivacyConfig({
+      NODE_ENV: 'test',
+      ACTIVEGRAPH_URL: 'https://example.test',
+      SIGNAL_CANDIDATE_PRIVACY_REBUILD_LEASE_MS: '59999',
+    })).toThrow('candidate_privacy_configuration_invalid');
+    expect(() => loadCandidatePrivacyConfig({
+      NODE_ENV: 'test',
+      ACTIVEGRAPH_URL: 'https://example.test',
+      SIGNAL_CANDIDATE_PRIVACY_REBUILD_LEASE_MS: '900001',
     })).toThrow('candidate_privacy_configuration_invalid');
     expect(() => loadCandidatePrivacyConfig({
       NODE_ENV: 'test',

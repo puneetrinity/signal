@@ -90,6 +90,13 @@ const REQUIRED_PATTERNS = new Map([
   ]],
   ['src/lib/candidate-privacy/processor.ts', [
     /status:\s*'rebuilding'/,
+    /rebuildClaimToken:\s*claimToken/,
+    /rebuildLeaseExpiresAt:\s*rebuildLeaseExpiry/,
+    /async function heartbeatRebuildClaim\(/,
+    /heartbeatRebuildClaim\(claim\)/,
+    /rebuildClaimToken:\s*claim\.token/,
+    /rebuildLeaseExpiresAt:\s*\{ gt: new Date\(\) \}/,
+    /if \(completed\.count !== 1\) throw new Error\(REBUILD_CLAIM_LOST\)/,
     /CANDIDATE_PRIVACY_ADMISSION_LOCK/,
     /finalProjectionCount !== candidateSnapshot\.length/,
     /ELIGIBILITY_RECONCILIATION_BATCH_MAX\s*=\s*100/,
@@ -245,6 +252,28 @@ export async function evaluateCandidatePrivacySurfaces(root) {
   ) {
     offenders.push('candidate privacy remote evaluation moved inside the atomic swap transaction');
   }
+  const evaluateFunction = privacyProcessor.slice(
+    privacyProcessor.indexOf('async function evaluateCandidateSnapshot('),
+    privacyProcessor.indexOf('async function refreshHealthyState('),
+  );
+  if (
+    evaluateFunction.indexOf('await afterBatch()') < 0 ||
+    evaluateFunction.indexOf('await afterBatch()') > evaluateFunction.indexOf('projections.push(')
+  ) {
+    offenders.push('candidate privacy rebuild no longer heartbeats before retaining a batch result');
+  }
+  const failureFunction = privacyProcessor.slice(
+    privacyProcessor.indexOf('async function markRebuildFailure('),
+    privacyProcessor.indexOf('export async function rebuildCandidatePrivacyProjection('),
+  );
+  if (
+    !failureFunction.includes("status: 'rebuilding'") ||
+    !failureFunction.includes('activeGeneration: claim.activeGeneration') ||
+    !failureFunction.includes('rebuildClaimToken: claim.token') ||
+    !failureFunction.includes('if (updated.count !== 1) throw new Error(REBUILD_CLAIM_LOST)')
+  ) {
+    offenders.push('candidate privacy rebuild failure lost its token-fenced compare-and-set');
+  }
   if (
     !/env\.NODE_ENV === 'test'\s*&&\s*\n?\s*env\.SIGNAL_CANDIDATE_PRIVACY_TEST_ADAPTER === 'disposable_passthrough'/.test(
       privacyConfig,
@@ -302,6 +331,19 @@ export async function evaluateCandidatePrivacySurfaces(root) {
   }
   if (!/ON DELETE RESTRICT/.test(migration)) {
     offenders.push('candidate privacy projection foreign key is not restrictive');
+  }
+  const leaseMigration = await readFile(
+    resolve(root, 'prisma/migrations/20260824000000_add_candidate_privacy_rebuild_lease/migration.sql'),
+    'utf8',
+  );
+  if (/^\s*(?:DELETE\s+FROM|TRUNCATE\b)|ON\s+DELETE\s+CASCADE/im.test(leaseMigration)) {
+    offenders.push('candidate privacy rebuild-lease migration contains destructive authority');
+  }
+  if (
+    !leaseMigration.includes('ADD COLUMN "rebuild_claim_token" UUID') ||
+    !leaseMigration.includes('ADD COLUMN "rebuild_lease_expires_at" TIMESTAMPTZ(6)')
+  ) {
+    offenders.push('candidate privacy rebuild-lease migration lost its additive nullable columns');
   }
 
   const workflow = await readFile(resolve(root, '.github/workflows/ci.yml'), 'utf8');
