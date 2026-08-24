@@ -15,9 +15,13 @@
     "db:check-drift": "node scripts/check-schema-drift.mjs",
     "check:no-db-push": "node scripts/check-no-db-push.mjs",
     "check:schema-control": "node scripts/schema-control/check-schema-control.mjs",
+    "check:candidate-privacy": "node scripts/check-candidate-privacy-surfaces.mjs",
     "test:bootstrap": "node scripts/test-database-bootstrap.mjs",
     "test:schema-control": "node scripts/schema-control/test-schema-control-unit.mjs",
     "test:schema-control:pg": "node scripts/schema-control/test-schema-control-postgres.mjs",
+    "test:candidate-privacy-surfaces": "node scripts/test-candidate-privacy-surfaces.mjs",
+    "test:candidate-privacy": "vitest run src/lib/candidate-privacy/__tests__/candidate-privacy.test.ts src/lib/candidate-privacy/__tests__/surface-contract.test.ts",
+    "test:candidate-privacy:pg": "RUN_SIGNAL_CANDIDATE_PRIVACY_POSTGRES=1 vitest run src/lib/candidate-privacy/__tests__/candidate-privacy-postgres.integration.test.ts --no-file-parallelism",
     "db:schema:adopt-existing": "node scripts/schema-control/adopt-existing.mjs",
     "db:schema:provision-runtime-role": "node scripts/schema-control/provision-runtime-role.mjs",
     "db:migrate:release": "node scripts/schema-control/migrate-release.mjs",
@@ -26,9 +30,9 @@
     "db:generate": "prisma generate",
     "worker:sourcing": "node scripts/schema-control/schema-ready.mjs && tsx src/lib/sourcing/worker.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:postgres": "RUN_SIGNAL_POSTGRES_INTEGRATION=1 vitest run src/lib/sourcing/__tests__/candidate-index-repair-postgres.integration.test.ts src/lib/sourcing/__tests__/materialization-postgres.integration.test.ts src/lib/sourcing/__tests__/search-cache-index-repair-postgres.integration.test.ts --no-file-parallelism",
-    "test:two-layer": "vitest run src/lib/sourcing/__tests__/two-layer-pool.test.ts"
+    "test": "SIGNAL_CANDIDATE_PRIVACY_TEST_ADAPTER=disposable_passthrough vitest run",
+    "test:postgres": "SIGNAL_CANDIDATE_PRIVACY_TEST_ADAPTER=disposable_passthrough RUN_SIGNAL_POSTGRES_INTEGRATION=1 vitest run src/lib/sourcing/__tests__/candidate-index-repair-postgres.integration.test.ts src/lib/sourcing/__tests__/materialization-postgres.integration.test.ts src/lib/sourcing/__tests__/search-cache-index-repair-postgres.integration.test.ts --no-file-parallelism",
+    "test:two-layer": "SIGNAL_CANDIDATE_PRIVACY_TEST_ADAPTER=disposable_passthrough vitest run src/lib/sourcing/__tests__/two-layer-pool.test.ts"
   },
   "dependencies": {
     "@ai-sdk/google": "^2.0.17",

@@ -12,6 +12,11 @@ import {
   releaseDeliveredCrustdataReceiptPayloads,
 } from './crustdata-acquisition';
 import type { SourcingCallbackPayload } from './types';
+import {
+  candidatePrivacyAllowedRelationWhere,
+  requireCandidatePrivacyAllowed,
+  requireHealthyCandidatePrivacyContext,
+} from '@/lib/candidate-privacy/repository';
 
 const log = createLogger('SourcingCallback');
 
@@ -155,6 +160,27 @@ export async function deliverCallback(
   updateStatus = true,
   executionFence?: SourcingExecutionFence,
 ): Promise<boolean> {
+  const privacyContext = await requireHealthyCandidatePrivacyContext();
+  const candidateData = payload.candidateData as
+    | { candidateId?: unknown }
+    | undefined;
+  if (typeof candidateData?.candidateId === 'string') {
+    await requireCandidatePrivacyAllowed(
+      tenantId,
+      candidateData.candidateId,
+    );
+  }
+  const allowedCandidateCount = await prisma.jobSourcingCandidate.count({
+    where: {
+      tenantId,
+      sourcingRequestId: requestId,
+      candidate: candidatePrivacyAllowedRelationWhere(privacyContext),
+    },
+  });
+  const privacySafePayload: SourcingCallbackPayload = {
+    ...payload,
+    candidateCount: allowedCandidateCount,
+  };
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     // Wait before retry (skip on first attempt)
     if (attempt > 0) {
@@ -176,7 +202,7 @@ export async function deliverCallback(
         );
         return false;
       }
-      const token = await signCallbackJWT(tenantId, requestId, payload);
+      const token = await signCallbackJWT(tenantId, requestId, privacySafePayload);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
@@ -186,7 +212,7 @@ export async function deliverCallback(
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(privacySafePayload),
         signal: controller.signal,
       });
 
@@ -206,7 +232,7 @@ export async function deliverCallback(
         if (!updated) return false;
         if (
           updateStatus &&
-          payload.status === 'complete' &&
+          privacySafePayload.status === 'complete' &&
           executionFence
         ) {
           await releaseCrustdataReceiptPayloads(
@@ -220,14 +246,12 @@ export async function deliverCallback(
             );
           });
         }
-        log.info({ requestId, callbackUrl, attempt: attempt + 1 }, 'Callback delivered');
+        log.info({ requestId, attempt: attempt + 1 }, 'Callback delivered');
         return true;
       }
 
-      const responseText = await res.text().catch(() => '');
-      const errorText = `HTTP ${res.status}: ${responseText}`;
-      const nonRetryableUnknownRequest =
-        res.status === 404 && /unknown request id/i.test(responseText);
+      const errorText = `HTTP ${res.status}`;
+      const nonRetryableUnknownRequest = res.status === 404;
       const updated = await updateCallbackState(
         requestId,
         tenantId,
@@ -239,13 +263,15 @@ export async function deliverCallback(
         updateStatus,
       );
       if (!updated) return false;
-      log.warn({ requestId, callbackUrl, attempt: attempt + 1, error: errorText }, 'Callback attempt failed');
+      log.warn({ requestId, attempt: attempt + 1, error: errorText }, 'Callback attempt failed');
       if (nonRetryableUnknownRequest) {
-        log.warn({ requestId, callbackUrl }, 'Stopping callback retries due to non-retryable unknown request ID');
+        log.warn({ requestId }, 'Stopping callback retries due to non-retryable unknown request ID');
         break;
       }
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+      const errorMsg = err instanceof Error
+        ? `callback_error:${err.constructor.name}`
+        : 'callback_error:UnknownError';
       const updated = await updateCallbackState(
         requestId,
         tenantId,
@@ -257,7 +283,7 @@ export async function deliverCallback(
         updateStatus,
       );
       if (!updated) return false;
-      log.warn({ requestId, callbackUrl, attempt: attempt + 1, error: errorMsg }, 'Callback attempt error');
+      log.warn({ requestId, attempt: attempt + 1, error: errorMsg }, 'Callback attempt error');
     }
   }
 

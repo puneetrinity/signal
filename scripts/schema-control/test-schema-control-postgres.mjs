@@ -117,6 +117,8 @@ async function provisioningFootprint() {
 const commonIdentity = {
   SIGNAL_SCHEMA_TARGET_ID: targetId,
   SIGNAL_SCHEMA_ENVIRONMENT: 'development',
+  SIGNAL_CANDIDATE_PRIVACY_RUNTIME: 'web',
+  ACTIVEGRAPH_URL: 'http://127.0.0.1:18000',
 };
 const bootstrapEnvironment = {
   DATABASE_URL: adminUrl,
@@ -201,6 +203,38 @@ try {
     SELECT COUNT(*)::INTEGER AS count FROM public.tenant_settings
   `);
   assert(afterAdoption[0].count === 0, 'Adoption changed a product row');
+
+  // Reproduce the production 21 -> 22 release boundary. Empty bootstrap has
+  // already proven the full 22-migration fresh-install path; this disposable
+  // rollback removes only the new empty privacy objects and their Prisma
+  // ledger row so the real release wrapper must apply migration 22.
+  await admin.$executeRawUnsafe('DROP TABLE public.candidate_privacy_projection');
+  await admin.$executeRawUnsafe('DROP TABLE public.candidate_privacy_sync_state');
+  await admin.$executeRawUnsafe(`
+    DELETE FROM public."_prisma_migrations"
+    WHERE migration_name = '20260823000000_add_candidate_privacy_projection'
+  `);
+  await requireSuccess(
+    await runNode('scripts/schema-control/migrate-release.mjs', releaseEnvironment),
+    '21-to-22 privacy release',
+  );
+  const [privacyUpgrade] = await admin.$queryRawUnsafe(`
+    SELECT
+      to_regclass('public.candidate_privacy_projection') IS NOT NULL AS projection_exists,
+      to_regclass('public.candidate_privacy_sync_state') IS NOT NULL AS sync_exists,
+      COUNT(*) FILTER (
+        WHERE migration_name = '20260823000000_add_candidate_privacy_projection'
+          AND finished_at IS NOT NULL
+          AND rolled_back_at IS NULL
+      )::INTEGER AS successful_rows
+    FROM public."_prisma_migrations"
+  `);
+  assert(
+    privacyUpgrade.projection_exists &&
+      privacyUpgrade.sync_exists &&
+      privacyUpgrade.successful_rows === 1,
+    'Release wrapper did not apply migration 22 exactly once',
+  );
 
   await requireSuccess(
     await runNode('scripts/schema-control/migrate-release.mjs', releaseEnvironment),

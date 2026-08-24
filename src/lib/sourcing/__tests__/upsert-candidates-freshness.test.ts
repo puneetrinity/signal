@@ -1,13 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProfileSummary } from "@/types/linkedin";
 
-const prismaMock = vi.hoisted(() => ({
-  candidate: {
-    findFirst: vi.fn(),
-    create: vi.fn(),
-    updateMany: vi.fn(),
-  },
-}));
+const prismaMock = vi.hoisted(() => {
+  const database = {
+    candidate: {
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      updateMany: vi.fn(),
+    },
+    $queryRaw: vi.fn(),
+    $executeRaw: vi.fn(),
+    $transaction: vi.fn(),
+  };
+  database.$transaction.mockImplementation(
+    async (callback: (transaction: typeof database) => unknown) =>
+      callback(database),
+  );
+  return database;
+});
 
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMock }));
 

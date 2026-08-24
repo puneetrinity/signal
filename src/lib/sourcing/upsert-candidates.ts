@@ -10,6 +10,14 @@ import {
 import { enqueueGraphSync } from '@/lib/integrations/candidate-graph-sync';
 import type { ProfileSummary } from '@/types/linkedin';
 import type { Prisma } from '@prisma/client';
+import {
+  createCandidateAdmissionProofs,
+} from '@/lib/candidate-privacy/decision';
+import type { CandidatePrivacyMemoryClient } from '@/lib/candidate-privacy/memory-client';
+import {
+  persistAdmissionProjection,
+  type CandidatePrivacyAdmissionProof,
+} from '@/lib/candidate-privacy/repository';
 
 function extractLinkedInId(url: string): string | null {
   try {
@@ -56,7 +64,10 @@ function isUniqueConstraintError(error: unknown): boolean {
 }
 
 const MAX_CANDIDATE_WRITE_ATTEMPTS = 5;
-type CandidateWriteClient = Pick<Prisma.TransactionClient, 'candidate'>;
+type CandidateWriteClient = Pick<
+  Prisma.TransactionClient,
+  'candidate' | '$queryRaw' | '$executeRaw'
+>;
 
 export async function upsertDiscoveredCandidates(
   tenantId: string,
@@ -71,16 +82,55 @@ export async function upsertDiscoveredCandidates(
     failOnError?: boolean;
     adoptCaseVariantIdentity?: boolean;
     db?: CandidateWriteClient;
+    admissionProofs?: ReadonlyMap<string, CandidatePrivacyAdmissionProof>;
+    privacyClient?: CandidatePrivacyMemoryClient;
   } = {},
 ): Promise<Map<string, string>> {
+  if (!options.db) {
+    const proofs = options.admissionProofs ?? await createCandidateAdmissionProofs(
+      profiles.map((profile) => ({
+        key: profile.linkedinUrl,
+        linkedinUrl: profile.linkedinUrl,
+      })),
+      options.privacyClient,
+    );
+    const combined = new Map<string, string>();
+    for (let index = 0; index < profiles.length; index += 25) {
+      const chunk = profiles.slice(index, index + 25).filter(
+        (profile) => proofs.has(profile.linkedinUrl),
+      );
+      const outcomes = await Promise.all(
+        chunk.map((profile) => prisma.$transaction((transaction) =>
+          upsertDiscoveredCandidates(
+            tenantId,
+            [profile],
+            searchQuery,
+            searchProvider,
+            {
+              ...options,
+              db: transaction,
+              admissionProofs: proofs,
+            },
+          ),
+        )),
+      );
+      for (const result of outcomes) {
+        for (const [key, value] of result) combined.set(key, value);
+      }
+    }
+    return combined;
+  }
+
   const candidateMap = new Map<string, string>();
-  const db: CandidateWriteClient = options.db ?? prisma;
+  const db: CandidateWriteClient = options.db;
 
   const chunkSize = 25;
   for (let i = 0; i < profiles.length; i += chunkSize) {
     const chunk = profiles.slice(i, i + chunkSize);
     const outcomes = await Promise.allSettled(
       chunk.map(async (result) => {
+        const admissionProof = options.admissionProofs?.get(result.linkedinUrl);
+        if (!admissionProof) return;
         const linkedinId = result.canonicalLinkedinId || extractLinkedInId(result.linkedinUrl);
         if (!linkedinId) return;
 
@@ -271,6 +321,11 @@ export async function upsertDiscoveredCandidates(
             );
             return;
           }
+          await persistAdmissionProjection(db, {
+            tenantId,
+            candidateId,
+            proof: admissionProof,
+          });
           candidateMap.set(linkedinId, candidateId);
         } catch (error) {
           if (options?.failOnError) throw error;

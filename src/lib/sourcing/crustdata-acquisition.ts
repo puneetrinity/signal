@@ -4,6 +4,8 @@ import { prisma } from "@/lib/prisma";
 import { toJsonValue } from "@/lib/prisma/json";
 import type { JobRequirements } from "./jd-digest";
 import type { CrustdataSearchResult } from "./crustdata-client";
+import { createCandidateAdmissionProofs } from "@/lib/candidate-privacy/decision";
+import { requireHealthyCandidatePrivacyContext } from "@/lib/candidate-privacy/repository";
 
 export type CrustdataAcquisitionSlot = "exact" | "spill";
 
@@ -74,6 +76,7 @@ interface AcquireDependencies {
   sleep?: (milliseconds: number) => Promise<void>;
   waitAttempts?: number;
   waitIntervalMs?: number;
+  requirePrivacyHealth?: () => Promise<unknown>;
 }
 
 export interface AcquireCrustdataSearchInput {
@@ -101,6 +104,14 @@ export interface AcquiredCrustdataSearch {
 
 const DEFAULT_WAIT_ATTEMPTS = 240;
 const DEFAULT_WAIT_INTERVAL_MS = 250;
+
+function disposablePrivacyAdapterEnabled(): boolean {
+  return (
+    process.env.NODE_ENV === "test" &&
+    process.env.SIGNAL_CANDIDATE_PRIVACY_TEST_ADAPTER ===
+      "disposable_passthrough"
+  );
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -225,6 +236,51 @@ function parseResult(value: unknown): CrustdataSearchResult {
   return result as unknown as CrustdataSearchResult;
 }
 
+function crustdataLinkedinUrl(
+  profile: CrustdataSearchResult["profiles"][number],
+): string | null {
+  const value =
+    profile.social_handles?.professional_network_identifier?.profile_url;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+async function privacyFilterCrustdataResult(
+  result: CrustdataSearchResult,
+): Promise<CrustdataSearchResult> {
+  if (disposablePrivacyAdapterEnabled()) {
+    return result;
+  }
+  if (!disposablePrivacyAdapterEnabled()) {
+    await requireHealthyCandidatePrivacyContext();
+  }
+  const anchored = result.profiles.flatMap((profile, index) => {
+    const linkedinUrl = crustdataLinkedinUrl(profile);
+    return linkedinUrl
+      ? [{ key: `${index}`, linkedinUrl, profile }]
+      : [];
+  });
+  if (anchored.length === 0) {
+    return {
+      profiles: [],
+      providerTotal: null,
+      rawReturnedCount: 0,
+      requestedLimit: result.requestedLimit,
+    };
+  }
+  const proofs = await createCandidateAdmissionProofs(
+    anchored.map(({ key, linkedinUrl }) => ({ key, linkedinUrl })),
+  );
+  const profiles = anchored
+    .filter(({ key }) => proofs.has(key))
+    .map(({ profile }) => profile);
+  return {
+    profiles,
+    providerTotal: null,
+    rawReturnedCount: profiles.length,
+    requestedLimit: result.requestedLimit,
+  };
+}
+
 async function resolveStoredReceipt(
   receipt: StoredReceipt,
   input: AcquireCrustdataSearchInput,
@@ -274,7 +330,7 @@ async function resolveStoredReceipt(
   }
 
   return {
-    result: parseResult(current.result),
+    result: await privacyFilterCrustdataResult(parseResult(current.result)),
     receiptId: current.id,
     reused: true,
     requestFingerprint: current.requestFingerprint,
@@ -290,6 +346,10 @@ export async function acquireCrustdataSearch(
   input: AcquireCrustdataSearchInput,
   dependencies: AcquireDependencies,
 ): Promise<AcquiredCrustdataSearch> {
+  if (!disposablePrivacyAdapterEnabled()) {
+    await (dependencies.requirePrivacyHealth ??
+      requireHealthyCandidatePrivacyContext)();
+  }
   const requestFingerprint = buildCrustdataRequestFingerprint(input);
   const existing = await findStoredReceipt(dependencies.store, input);
   if (existing) {
@@ -352,8 +412,21 @@ export async function acquireCrustdataSearch(
     );
   }
 
+  let privacySafeResult: CrustdataSearchResult;
   try {
-    await dependencies.store.complete(receipt.id, result);
+    privacySafeResult = await privacyFilterCrustdataResult(result);
+  } catch {
+    await dependencies.store
+      .markUncertain(receipt.id, "candidate_privacy_unavailable")
+      .catch(() => {});
+    throw new CrustdataAcquisitionSafetyError(
+      "receipt_uncertain",
+      "Crustdata acquisition could not be privacy-admitted; provider output was discarded",
+    );
+  }
+
+  try {
+    await dependencies.store.complete(receipt.id, privacySafeResult);
   } catch (error) {
     const message = errorMessage(error);
     throw new CrustdataAcquisitionSafetyError(
@@ -362,7 +435,7 @@ export async function acquireCrustdataSearch(
     );
   }
   return {
-    result,
+    result: privacySafeResult,
     receiptId: receipt.id,
     reused: false,
     requestFingerprint,

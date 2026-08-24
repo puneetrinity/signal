@@ -6,6 +6,10 @@
 import { prisma } from '@/lib/prisma';
 import { buildJobRequirements, type SourcingJobContextInput } from './jd-digest';
 import { canonicalizeLocation, extractPrimaryCity } from './ranking-new';
+import {
+  candidatePrivacyAllowedRelationWhere,
+  requireHealthyCandidatePrivacyContext,
+} from '@/lib/candidate-privacy/repository';
 
 /**
  * Returns candidate IDs that appeared in recent completed sourcing requests
@@ -18,6 +22,7 @@ export async function getRecentlyExposedCandidateIds(
   windowDays: number,
 ): Promise<Set<string>> {
   if (!roleFamily) return new Set();
+  const privacyContext = await requireHealthyCandidatePrivacyContext();
 
   const targetCity = location
     ? extractPrimaryCity(canonicalizeLocation(location))
@@ -60,6 +65,8 @@ export async function getRecentlyExposedCandidateIds(
   const candidates = await prisma.jobSourcingCandidate.findMany({
     where: {
       sourcingRequestId: { in: matchingRequestIds },
+      tenantId,
+      candidate: candidatePrivacyAllowedRelationWhere(privacyContext),
     },
     select: { candidateId: true },
   });

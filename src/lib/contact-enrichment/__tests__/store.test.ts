@@ -33,8 +33,15 @@ vi.mock("@/lib/prisma", () => ({
         callback: (tx: {
           $executeRaw: typeof executeRaw;
           $queryRaw: typeof queryRaw;
+          candidate: { findFirst: typeof candidateFindFirst };
+          contactEnrichmentOperation: { upsert: typeof operationUpsert };
         }) => unknown,
-      ) => callback({ $executeRaw: executeRaw, $queryRaw: queryRaw }),
+      ) => callback({
+        $executeRaw: executeRaw,
+        $queryRaw: queryRaw,
+        candidate: { findFirst: candidateFindFirst },
+        contactEnrichmentOperation: { upsert: operationUpsert },
+      }),
     ),
   },
 }));
@@ -143,6 +150,7 @@ describe("contact operation store", () => {
       where: {
         tenantId: "org_1",
         candidateId: "candidate-1",
+        candidate: {},
         sourcingRequest: {
           tenantId: "org_1",
           externalJobId: "vanta:jobs:42",

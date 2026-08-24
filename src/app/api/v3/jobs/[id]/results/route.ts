@@ -20,6 +20,10 @@ import {
   redactContactIdentities,
   redactSearchMetaContactValues,
 } from '@/lib/sourcing/public-profile-redaction';
+import {
+  candidatePrivacyAllowedRelationWhere,
+  requireHealthyCandidatePrivacyContext,
+} from '@/lib/candidate-privacy/repository';
 
 function safeObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object'
@@ -55,6 +59,16 @@ export async function GET(
   const scopeCheck = requireScope(auth.context, 'jobs:results');
   if (!scopeCheck.authorized) return scopeCheck.response;
 
+  let privacyContext;
+  try {
+    privacyContext = await requireHealthyCandidatePrivacyContext();
+  } catch {
+    return NextResponse.json(
+      { success: false, error: 'candidate_privacy_unavailable' },
+      { status: 503 },
+    );
+  }
+
   const { id: externalJobId } = await params;
   const tenantId = auth.context.tenantId;
   const requestId = request.nextUrl.searchParams.get('requestId');
@@ -72,6 +86,9 @@ export async function GET(
     orderBy: { requestedAt: 'desc' },
     include: {
       candidates: {
+        where: {
+          candidate: candidatePrivacyAllowedRelationWhere(privacyContext),
+        },
         orderBy: { rank: 'asc' },
         take: limit,
         include: {
@@ -139,6 +156,7 @@ export async function GET(
     where: {
       tenantId,
       sourcingRequestId: sourcingRequest.id,
+      candidate: candidatePrivacyAllowedRelationWhere(privacyContext),
     },
     select: { fitScore: true },
   });
@@ -475,7 +493,7 @@ export async function GET(
   return NextResponse.json({
     requestId: sourcingRequest.id,
     externalJobId: sourcingRequest.externalJobId,
-    resultCount: sourcingRequest.resultCount,
+    resultCount: persistedRunScores.length,
     matchStrengthBands,
     data: candidateResults,
   });

@@ -18,30 +18,19 @@ jobs:
       - run: npm ci
       - run: npm run check:no-db-push
       - run: npm run check:schema-control
+      - run: npm run check:candidate-privacy
       - run: npm run test:schema-control
+      - run: npm run test:candidate-privacy-surfaces
+      - run: npm run test:candidate-privacy
       - run: npm run typecheck
       - run: npm test
 
   postgres-integration:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: signal_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d signal_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+    timeout-minutes: 15
     env:
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/signal_test
-      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/signal_test
+      DATABASE_URL: postgresql://signal_postgres_integration_test_runner:runner-test-only@127.0.0.1:5432/signal_postgres_integration_test_ci
+      DIRECT_URL: postgresql://signal_postgres_integration_test_runner:runner-test-only@127.0.0.1:5432/signal_postgres_integration_test_ci
       SIGNAL_BOOTSTRAP_EMPTY_DATABASE: "1"
       SIGNAL_SCHEMA_ENVIRONMENT: development
       SIGNAL_SCHEMA_DISPOSABLE_SINGLE_CREDENTIAL: "1"
@@ -51,9 +40,58 @@ jobs:
         with:
           node-version: 20
           cache: npm
+      - name: Start runner-local PostgreSQL 16 for integration tests
+        run: |
+          sudo systemctl start postgresql
+          server_version_num="$(sudo -u postgres psql -d postgres -Atqc 'SHOW server_version_num')"
+          if [[ "$server_version_num" != 16* ]]; then
+            echo "Expected runner-local PostgreSQL 16; got server_version_num=$server_version_num" >&2
+            exit 1
+          fi
+          sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          DROP DATABASE IF EXISTS signal_postgres_integration_test_ci WITH (FORCE);
+          DROP ROLE IF EXISTS signal_postgres_integration_test_runner;
+          CREATE ROLE signal_postgres_integration_test_runner LOGIN SUPERUSER PASSWORD 'runner-test-only';
+          CREATE DATABASE signal_postgres_integration_test_ci OWNER signal_postgres_integration_test_runner;
+          SQL
+          pg_isready -h 127.0.0.1 -p 5432 -d signal_postgres_integration_test_ci -U signal_postgres_integration_test_runner
       - run: npm ci
       - run: npm run test:bootstrap
       - run: npm run test:postgres
+
+  candidate-privacy-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DATABASE_URL: postgresql://signal_candidate_privacy_test_runner:runner-test-only@127.0.0.1:5432/signal_candidate_privacy_test_ci
+      DIRECT_URL: postgresql://signal_candidate_privacy_test_runner:runner-test-only@127.0.0.1:5432/signal_candidate_privacy_test_ci
+      SIGNAL_BOOTSTRAP_EMPTY_DATABASE: "1"
+      SIGNAL_SCHEMA_ENVIRONMENT: development
+      SIGNAL_SCHEMA_DISPOSABLE_SINGLE_CREDENTIAL: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Start runner-local PostgreSQL 16 for candidate privacy
+        run: |
+          sudo systemctl start postgresql
+          server_version_num="$(sudo -u postgres psql -d postgres -Atqc 'SHOW server_version_num')"
+          if [[ "$server_version_num" != 16* ]]; then
+            echo "Expected runner-local PostgreSQL 16; got server_version_num=$server_version_num" >&2
+            exit 1
+          fi
+          sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          DROP DATABASE IF EXISTS signal_candidate_privacy_test_ci WITH (FORCE);
+          DROP ROLE IF EXISTS signal_candidate_privacy_test_runner;
+          CREATE ROLE signal_candidate_privacy_test_runner LOGIN SUPERUSER PASSWORD 'runner-test-only';
+          CREATE DATABASE signal_candidate_privacy_test_ci OWNER signal_candidate_privacy_test_runner;
+          SQL
+          pg_isready -h 127.0.0.1 -p 5432 -d signal_candidate_privacy_test_ci -U signal_candidate_privacy_test_runner
+      - run: npm ci
+      - run: npm run db:bootstrap-empty
+      - run: npm run test:candidate-privacy:pg
 
   schema-control-postgres:
     runs-on: ubuntu-latest

@@ -13,6 +13,7 @@ import { deliverCallback } from '../callback';
 import { runSourcingOrchestrator } from '../orchestrator';
 import type { SourcingJobData, SourcingJobResult, SourcingCallbackPayload } from '../types';
 import type { SourcingJobContextInput } from '../jd-digest';
+import { requireHealthyCandidatePrivacyContext } from '@/lib/candidate-privacy/repository';
 
 const log = createLogger('SourcingQueue');
 
@@ -26,6 +27,7 @@ import { getRedisConnection, getSourcingQueue, SOURCING_QUEUE_NAME } from './pro
 async function processSourcingJob(
   job: Job<SourcingJobData, SourcingJobResult>,
 ): Promise<SourcingJobResult> {
+  await requireHealthyCandidatePrivacyContext();
   const { requestId, tenantId, externalJobId, callbackUrl } = job.data;
   const startTime = Date.now();
   const processingLeaseId = randomUUID();

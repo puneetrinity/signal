@@ -8,6 +8,7 @@ import {
   candidateAppearedInSourcingJob,
   findOrCreateContactOperation,
 } from "@/lib/contact-enrichment/store";
+import { requireCandidatePrivacyAllowed } from "@/lib/candidate-privacy/repository";
 
 interface ShortlistContactTrigger {
   trigger: "shortlist";
@@ -44,6 +45,7 @@ export async function POST(
 
   const { id: candidateId } = await params;
   try {
+    await requireCandidatePrivacyAllowed(auth.context.tenantId, candidateId);
     const trigger = await readShortlistTrigger(request);
     if (!trigger) {
       return NextResponse.json(
@@ -114,6 +116,15 @@ export async function POST(
     const result = contactOperationRouteResult(operation);
     return NextResponse.json(result.body, { status: result.status });
   } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.startsWith("candidate_privacy_")
+    ) {
+      return NextResponse.json(
+        { success: false, error: "candidate_privacy_unavailable" },
+        { status: 503 },
+      );
+    }
     console.error("[ContactEnrichmentRoute] Request failed", {
       errorType: error instanceof Error ? error.name : "unknown",
     });

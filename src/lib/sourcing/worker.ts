@@ -22,6 +22,11 @@ import {
   startContactEnrichmentWorker,
   stopContactEnrichmentWorker,
 } from '@/lib/contact-enrichment/worker';
+import { loadCandidatePrivacyConfig } from '@/lib/candidate-privacy/config';
+import {
+  startCandidatePrivacyProcessor,
+  stopCandidatePrivacyProcessor,
+} from '@/lib/candidate-privacy/processor';
 
 const log = createLogger('SourcingWorker');
 
@@ -68,6 +73,8 @@ const CALLBACK_REDELIVERY_BATCH_SIZE = parsePositiveInt(
 
 log.info({ concurrency: CONCURRENCY, redisConfigured: !!process.env.REDIS_URL }, 'Starting sourcing worker');
 
+loadCandidatePrivacyConfig(process.env, { requireProcessor: true });
+startCandidatePrivacyProcessor();
 const worker = startSourcingWorker({ concurrency: CONCURRENCY });
 const PUBLIC_MEMORY_INGEST_ENABLED =
   process.env.SOURCE_PUBLIC_MEMORY_INGEST_WORKER_ENABLED !== 'false';
@@ -203,6 +210,7 @@ const shutdown = async (signal: string) => {
     }
     stopPublicMemoryIngestWorker();
     stopContactEnrichmentWorker();
+    stopCandidatePrivacyProcessor();
     await cleanupSourcingQueue();
     log.info('Cleanup complete, exiting');
     process.exit(0);

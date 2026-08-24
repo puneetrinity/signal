@@ -11,6 +11,12 @@ import {
   projectPublicCrustdataProfile,
   redactPublicContactText,
 } from "./public-profile-redaction";
+import { createCandidateAdmissionProofs } from "@/lib/candidate-privacy/decision";
+import { assertAdmissionProofCurrent } from "@/lib/candidate-privacy/repository";
+import {
+  requireCandidatePrivacyAllowed,
+  requireHealthyCandidatePrivacyContext,
+} from "@/lib/candidate-privacy/repository";
 
 type SerializedCandidateIngestOptions = Omit<
   CandidateIngestOptions,
@@ -191,7 +197,18 @@ export async function enqueuePublicMemoryIngestOutbox({
 }): Promise<number> {
   const uniqueCandidates = dedupePublicMemoryOutboxInputs(candidates);
   if (uniqueCandidates.length === 0) return 0;
-  const rows = uniqueCandidates.map(
+  const admissionProofs = await createCandidateAdmissionProofs(
+    uniqueCandidates.map(({ candidate, expectedGlobalCandidateId }) => ({
+      key: candidate.id,
+      linkedinUrl: candidate.linkedinUrl,
+      globalCandidateId: expectedGlobalCandidateId,
+    })),
+  );
+  const allowedCandidates = uniqueCandidates.filter(({ candidate }) =>
+    admissionProofs.has(candidate.id),
+  );
+  if (allowedCandidates.length === 0) return 0;
+  const rows = allowedCandidates.map(
     ({ candidate, options, expectedGlobalCandidateId }) => ({
       id: randomUUID(),
       receipt_id: randomUUID(),
@@ -207,6 +224,11 @@ export async function enqueuePublicMemoryIngestOutbox({
   );
 
   return prisma.$transaction(async (tx) => {
+    for (const { candidate } of allowedCandidates) {
+      const proof = admissionProofs.get(candidate.id);
+      if (!proof) throw new Error("candidate_privacy_unavailable");
+      await assertAdmissionProofCurrent(tx, proof);
+    }
     await tx.$executeRaw`
       INSERT INTO "public_memory_ingest_outbox" (
       "id", "tenantId", "signalCandidateId", "sourcingRequestId",
@@ -297,6 +319,13 @@ export async function attachLocalCandidatesToPublicMemoryOutbox(
     })),
   );
   return prisma.$transaction(async (tx) => {
+    for (const link of links) {
+      await requireCandidatePrivacyAllowed(
+        tenantId,
+        link.localCandidateId,
+        tx,
+      );
+    }
     const updated = await tx.$executeRaw`
       UPDATE "public_memory_ingest_outbox" AS outbox
       SET "localCandidateId" = input.local_candidate_id,
@@ -339,6 +368,7 @@ export class PrismaPublicMemoryOutboxStore implements PublicMemoryOutboxStore {
     leaseMs: number;
     now: Date;
   }): Promise<ClaimedPublicMemoryOutboxRow[]> {
+    const privacyContext = await requireHealthyCandidatePrivacyContext();
     const leaseToken = randomUUID();
     const leaseExpiresAt = new Date(now.getTime() + leaseMs);
     const rows = await prisma.$queryRaw<
@@ -361,6 +391,18 @@ export class PrismaPublicMemoryOutboxStore implements PublicMemoryOutboxStore {
           ("status" = 'pending' AND "nextAttemptAt" <= ${now})
           OR
           ("status" = 'processing' AND "leaseExpiresAt" <= ${now})
+        )
+        AND (
+          "localCandidateId" IS NULL
+          OR EXISTS (
+            SELECT 1
+            FROM "candidate_privacy_projection" privacy_projection
+            WHERE privacy_projection."tenant_id" = "public_memory_ingest_outbox"."tenantId"
+              AND privacy_projection."candidate_id" = "public_memory_ingest_outbox"."localCandidateId"
+              AND privacy_projection."generation" = ${privacyContext.generation}
+              AND privacy_projection."evaluated_cursor" = ${privacyContext.cursor}
+              AND privacy_projection."decision" = 'allow'
+          )
         )
         ORDER BY "nextAttemptAt" ASC, "createdAt" ASC
         FOR UPDATE SKIP LOCKED
@@ -494,27 +536,39 @@ export class PrismaPublicMemoryOutboxStore implements PublicMemoryOutboxStore {
 
 export async function reconcilePublicMemoryOutboxLinks(): Promise<number> {
   const now = new Date();
-  const rows = await prisma.publicMemoryIngestOutbox.findMany({
-    where: {
-      status: "succeeded",
-      globalCandidateId: { not: null },
-      localCandidateId: { not: null },
-      linkedAt: null,
-      linkDeadAt: null,
-      linkNextAttemptAt: { lte: now },
-    },
-    select: {
-      id: true,
-      tenantId: true,
-      localCandidateId: true,
-      globalCandidateId: true,
-      generation: true,
-      status: true,
-      linkAttempts: true,
-    },
-    orderBy: [{ linkNextAttemptAt: "asc" }, { createdAt: "asc" }],
-    take: 100,
-  });
+  const privacyContext = await requireHealthyCandidatePrivacyContext();
+  const rows = await prisma.$queryRaw<Array<{
+    id: string;
+    tenantId: string;
+    localCandidateId: string;
+    globalCandidateId: string;
+    generation: number;
+    status: string;
+    linkAttempts: number;
+  }>>`
+    SELECT outbox."id",
+           outbox."tenantId" AS "tenantId",
+           outbox."localCandidateId" AS "localCandidateId",
+           outbox."globalCandidateId" AS "globalCandidateId",
+           outbox."generation",
+           outbox."status",
+           outbox."linkAttempts" AS "linkAttempts"
+    FROM "public_memory_ingest_outbox" AS outbox
+    JOIN "candidate_privacy_projection" AS privacy_projection
+      ON privacy_projection."tenant_id" = outbox."tenantId"
+     AND privacy_projection."candidate_id" = outbox."localCandidateId"
+     AND privacy_projection."generation" = ${privacyContext.generation}
+     AND privacy_projection."evaluated_cursor" = ${privacyContext.cursor}
+     AND privacy_projection."decision" = 'allow'
+    WHERE outbox."status" = 'succeeded'
+      AND outbox."globalCandidateId" IS NOT NULL
+      AND outbox."localCandidateId" IS NOT NULL
+      AND outbox."linkedAt" IS NULL
+      AND outbox."linkDeadAt" IS NULL
+      AND outbox."linkNextAttemptAt" <= ${now}
+    ORDER BY outbox."linkNextAttemptAt" ASC, outbox."createdAt" ASC
+    LIMIT 100
+  `;
   if (rows.length === 0) return 0;
 
   const { ensureCandidateGlobalLink } = await import(
@@ -582,6 +636,7 @@ export async function reconcilePublicMemoryOutboxLinks(): Promise<number> {
 }
 
 export async function reconcilePublicMemoryOutboxDiagnostics(): Promise<number> {
+  const privacyContext = await requireHealthyCandidatePrivacyContext();
   const updatedRequests = await prisma.$queryRaw<Array<{ id: string }>>`
     WITH eligible_receipts AS (
       SELECT receipt."id", receipt."sourcingRequestId" AS request_id
@@ -591,6 +646,18 @@ export async function reconcilePublicMemoryOutboxDiagnostics(): Promise<number> 
        AND outbox."signalCandidateId" = receipt."signalCandidateId"
       WHERE receipt."diagnosticsRecordedAt" IS NULL
         AND receipt."status" IN ('succeeded', 'dead')
+        AND (
+          outbox."localCandidateId" IS NULL
+          OR EXISTS (
+            SELECT 1
+            FROM "candidate_privacy_projection" privacy_projection
+            WHERE privacy_projection."tenant_id" = outbox."tenantId"
+              AND privacy_projection."candidate_id" = outbox."localCandidateId"
+              AND privacy_projection."generation" = ${privacyContext.generation}
+              AND privacy_projection."evaluated_cursor" = ${privacyContext.cursor}
+              AND privacy_projection."decision" = 'allow'
+          )
+        )
         AND (
           receipt."status" = 'dead'
           OR outbox."localCandidateId" IS NULL
@@ -624,6 +691,16 @@ export async function reconcilePublicMemoryOutboxDiagnostics(): Promise<number> 
       LEFT JOIN "public_memory_ingest_outbox" AS outbox
         ON outbox."tenantId" = receipt."tenantId"
        AND outbox."signalCandidateId" = receipt."signalCandidateId"
+      WHERE outbox."localCandidateId" IS NULL
+         OR EXISTS (
+           SELECT 1
+           FROM "candidate_privacy_projection" privacy_projection
+           WHERE privacy_projection."tenant_id" = outbox."tenantId"
+             AND privacy_projection."candidate_id" = outbox."localCandidateId"
+             AND privacy_projection."generation" = ${privacyContext.generation}
+             AND privacy_projection."evaluated_cursor" = ${privacyContext.cursor}
+             AND privacy_projection."decision" = 'allow'
+         )
       GROUP BY receipt."sourcingRequestId"
     )
     UPDATE "job_sourcing_requests" AS request

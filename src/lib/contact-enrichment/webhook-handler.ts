@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/prisma';
+import { Prisma } from '@prisma/client';
 import {
   getFullEnrichWebhookProviderRecordId,
   parseFullEnrichWebhookIdentity,
@@ -6,6 +7,7 @@ import {
 } from './fullenrich-webhook';
 import { applyFullEnrichWebhookTransition } from './store';
 import type { StagedContactEvidence } from './types';
+import { requireCandidatePrivacyAllowed } from '@/lib/candidate-privacy/repository';
 
 export type FullEnrichWebhookHandleResult =
   | { accepted: false; code: 'invalid_identity' }
@@ -26,11 +28,38 @@ export async function handleFullEnrichWebhookPayload(
         generation: identity.generation,
       },
       select: {
+        tenantId: true,
+        candidateId: true,
         globalCandidateId: true,
         providerRecordId: true,
       },
     });
   if (!operation) return { accepted: true, updated: false };
+
+  try {
+    await requireCandidatePrivacyAllowed(
+      operation.tenantId,
+      operation.candidateId,
+    );
+  } catch (error) {
+    const updated = await prisma.contactEnrichmentOperation.updateMany({
+      where: {
+        id: identity.operationId,
+        generation: identity.generation,
+      },
+      data: {
+        state: 'failed',
+        stagedEvidence: Prisma.DbNull,
+        selectedEmail: null,
+        completedAt: now,
+        lastErrorCode:
+          error instanceof Error && error.message === 'candidate_privacy_restricted'
+            ? 'privacy_restricted'
+            : 'privacy_unavailable',
+      },
+    });
+    return { accepted: true, updated: updated.count === 1 };
+  }
 
   const providerRecordId =
     getFullEnrichWebhookProviderRecordId(payload) ||

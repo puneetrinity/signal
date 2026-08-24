@@ -9,6 +9,8 @@ export const CORE_RELATIONS = [
   'job_sourcing_candidates',
   'crustdata_acquisition_receipts',
   'public_memory_ingest_outbox',
+  'candidate_privacy_projection',
+  'candidate_privacy_sync_state',
 ];
 
 export const CONTROL_DDL_STATEMENTS = [
@@ -92,16 +94,59 @@ export async function readPrismaLedger(tx) {
   `);
 }
 
-export async function assertCoreRelations(tx) {
+export async function assertCoreRelations(tx, options = {}) {
+  const requiredRelations = options.requireCandidatePrivacy === false
+    ? CORE_RELATIONS.filter((relation) => !relation.startsWith('candidate_privacy_'))
+    : CORE_RELATIONS;
   const rows = await tx.$queryRawUnsafe(`
     SELECT relation_name,
            to_regclass('public.' || quote_ident(relation_name)) IS NOT NULL AS present
     FROM unnest($1::TEXT[]) AS relation_name
     ORDER BY relation_name
-  `, CORE_RELATIONS);
+  `, requiredRelations);
   const missing = rows.filter((row) => !row.present).map((row) => row.relation_name);
   if (missing.length > 0) {
     throw new Error(`Discover database is missing critical relations: ${missing.join(', ')}`);
+  }
+  if (options.requireCandidatePrivacy === false) return;
+  const privacyObjects = await tx.$queryRawUnsafe(`
+    WITH required(kind, name) AS (
+      VALUES
+        ('constraint', 'candidate_privacy_sync_state_pkey'),
+        ('constraint', 'candidate_privacy_sync_state_consumer_check'),
+        ('constraint', 'candidate_privacy_sync_state_cursor_check'),
+        ('constraint', 'candidate_privacy_sync_state_generation_check'),
+        ('constraint', 'candidate_privacy_sync_state_status_check'),
+        ('constraint', 'candidate_privacy_sync_state_error_code_check'),
+        ('constraint', 'candidate_privacy_sync_state_counts_check'),
+        ('constraint', 'candidate_privacy_projection_pkey'),
+        ('constraint', 'candidate_privacy_projection_generation_check'),
+        ('constraint', 'candidate_privacy_projection_cursor_check'),
+        ('constraint', 'candidate_privacy_projection_decision_check'),
+        ('constraint', 'candidate_privacy_projection_tenant_id_candidate_id_fkey'),
+        ('index', 'candidate_privacy_projection_active_idx'),
+        ('index', 'candidate_privacy_projection_generation_idx')
+    )
+    SELECT required.kind, required.name,
+           CASE required.kind
+             WHEN 'constraint' THEN EXISTS (
+               SELECT 1
+               FROM pg_constraint c
+               JOIN pg_namespace n ON n.oid = c.connamespace
+               WHERE n.nspname = 'public' AND c.conname = required.name
+             )
+             ELSE to_regclass('public.' || quote_ident(required.name)) IS NOT NULL
+           END AS present
+    FROM required
+    ORDER BY required.kind, required.name
+  `);
+  const missingPrivacyObjects = privacyObjects
+    .filter((row) => !row.present)
+    .map((row) => `${row.kind}:${row.name}`);
+  if (missingPrivacyObjects.length > 0) {
+    throw new Error(
+      `Discover database is missing candidate privacy objects: ${missingPrivacyObjects.join(', ')}`,
+    );
   }
 }
 
@@ -209,6 +254,24 @@ export async function assertRuntimePrivileges(tx, options = {}) {
              has_table_privilege(current_user, '${CONTROL_SCHEMA}.target_identity', 'UPDATE') OR
              has_table_privilege(current_user, '${CONTROL_SCHEMA}.target_identity', 'DELETE')
            ) AS identity_write,
+           (
+             has_table_privilege(current_user, 'public.candidate_privacy_projection', 'SELECT') AND
+             has_table_privilege(current_user, 'public.candidate_privacy_projection', 'INSERT') AND
+             has_table_privilege(current_user, 'public.candidate_privacy_projection', 'UPDATE') AND
+             has_table_privilege(current_user, 'public.candidate_privacy_projection', 'DELETE') AND
+             has_table_privilege(current_user, 'public.candidate_privacy_sync_state', 'SELECT') AND
+             has_table_privilege(current_user, 'public.candidate_privacy_sync_state', 'INSERT') AND
+             has_table_privilege(current_user, 'public.candidate_privacy_sync_state', 'UPDATE') AND
+             has_table_privilege(current_user, 'public.candidate_privacy_sync_state', 'DELETE')
+           ) AS privacy_dml,
+           (
+             has_table_privilege(current_user, 'public.candidate_privacy_projection', 'TRUNCATE') OR
+             has_table_privilege(current_user, 'public.candidate_privacy_projection', 'REFERENCES') OR
+             has_table_privilege(current_user, 'public.candidate_privacy_projection', 'TRIGGER') OR
+             has_table_privilege(current_user, 'public.candidate_privacy_sync_state', 'TRUNCATE') OR
+             has_table_privilege(current_user, 'public.candidate_privacy_sync_state', 'REFERENCES') OR
+             has_table_privilege(current_user, 'public.candidate_privacy_sync_state', 'TRIGGER')
+           ) AS privacy_escalated,
            EXISTS (
              SELECT 1
              FROM pg_class relation
@@ -218,7 +281,12 @@ export async function assertRuntimePrivileges(tx, options = {}) {
                AND relation.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
            ) AS owns_relation
   `);
-  if (!row.public_usage || !row.control_usage || !row.identity_read) {
+  if (
+    !row.public_usage ||
+    !row.control_usage ||
+    !row.identity_read ||
+    (!options.allowOwner && (!row.privacy_dml || row.privacy_escalated))
+  ) {
     throw new Error('Runtime role is missing required read/schema privileges');
   }
   if (!options.allowOwner && (

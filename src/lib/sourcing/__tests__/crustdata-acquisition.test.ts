@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "@/lib/prisma";
 import type { JobRequirements } from "../jd-digest";
 import type { CrustdataSearchResult } from "../crustdata-client";
@@ -132,11 +132,40 @@ function acquisitionInput(
   };
 }
 
+beforeEach(() => {
+  process.env.SIGNAL_CANDIDATE_PRIVACY_TEST_ADAPTER =
+    "disposable_passthrough";
+});
+
 afterEach(() => {
+  delete process.env.SIGNAL_CANDIDATE_PRIVACY_TEST_ADAPTER;
   vi.restoreAllMocks();
 });
 
 describe("request-scoped Crustdata acquisition receipts", () => {
+  it("makes zero provider or receipt calls when privacy health is unavailable", async () => {
+    delete process.env.SIGNAL_CANDIDATE_PRIVACY_TEST_ADAPTER;
+    const store = new InMemoryReceiptStore();
+    const find = vi.spyOn(store, "find");
+    const reserve = vi.spyOn(store, "reserve");
+    const search = vi.fn().mockResolvedValue(exactResult);
+
+    await expect(
+      acquireCrustdataSearch(acquisitionInput(), {
+        store,
+        search,
+        requirePrivacyHealth: vi
+          .fn()
+          .mockRejectedValue(new Error("candidate_privacy_unavailable")),
+      }),
+    ).rejects.toThrow("candidate_privacy_unavailable");
+
+    expect(find).not.toHaveBeenCalled();
+    expect(reserve).not.toHaveBeenCalled();
+    expect(search).not.toHaveBeenCalled();
+    expect(store.receipts.size).toBe(0);
+  });
+
   it("reuses exact and spill batches independently on a downstream retry", async () => {
     const store = new InMemoryReceiptStore();
     const search = vi
