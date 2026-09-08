@@ -1,19 +1,17 @@
 import { JobRequirements } from './jd-digest';
 import type { CandidateForRanking } from './ranking-new';
 import type { CrustdataProfileResponse } from './crustdata-client';
-import { signActiveGraphJWT } from './activegraph-auth';
-import {
-  toActiveGraphPublicMarket,
-  type PublicMarket,
-} from './public-memory';
+import { signActiveGraphJWT, signSourcedCandidateIngestJWT } from './activegraph-auth';
+import type { PublicMarket } from './public-memory';
 import { resolveLocationDeterministic } from '@/lib/taxonomy/location-service';
 import type { RoleFamily } from '@/lib/taxonomy/role-service';
 import { createLogger } from '@/lib/logger';
 import { normalizeGlobalCandidateId } from './global-candidate-id';
 import {
-  projectPublicCrustdataProfile,
-  redactPublicContactText,
-} from './public-profile-redaction';
+  adaptCrustdataCandidateForMemory,
+  type AcquisitionSlot,
+  type ApprovedProviderCandidateIngestRequest,
+} from './sourced-candidate-adapter';
 import {
   createCandidateAdmissionProofs,
   requireNewCandidateAllowed,
@@ -1018,6 +1016,9 @@ export interface CandidateIngestOptions {
   publicCandidateRoleFamily?: RoleFamily | null;
   profileObservedAt?: Date;
   acquisitionGeneration?: number;
+  acquisitionReceiptId?: string;
+  acquisitionSlot?: AcquisitionSlot;
+  expectedGlobalCandidateId?: string | null;
 }
 
 export interface CandidateIngestResult {
@@ -1027,7 +1028,26 @@ export interface CandidateIngestResult {
   globalCandidateId: string | null;
   sourceRecordId: string | null;
   resolutionStatus: string | null;
+  deliveryStatus?: 'recorded' | 'replayed' | null;
+  sourceIdentityId?: string | null;
+  sourceObservationId?: string | null;
+  ingestReceiptId?: string | null;
   errorCode?: string | null;
+}
+
+const DURABLE_SOURCE_RESOLUTIONS = new Set([
+  'created',
+  'matched',
+  'refreshed',
+  'stale',
+  'conflict_review_required',
+]);
+
+function isUuid(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+  );
 }
 
 export function isConfirmedCandidateIngestResult(
@@ -1036,21 +1056,26 @@ export function isConfirmedCandidateIngestResult(
   expectedSignalCandidateId: string | null = null,
 ): result is CandidateIngestResult & {
   success: true;
-  memoryCandidateId: string;
-  globalCandidateId: string;
-  sourceRecordId: string;
+  sourceObservationId: string;
+  ingestReceiptId: string;
 } {
+  const durableConflict = result?.resolutionStatus === 'conflict_review_required';
   return Boolean(
     result?.success &&
-      (result.resolutionStatus === 'created' ||
-        result.resolutionStatus === 'matched') &&
-      result.memoryCandidateId?.trim() &&
-      normalizeGlobalCandidateId(result.globalCandidateId) !== null &&
-      result.sourceRecordId?.trim() &&
-      result.sourceRecordId === result.signalCandidateId &&
-      (!expectedSignalCandidateId ||
-        result.signalCandidateId === expectedSignalCandidateId) &&
+      result.deliveryStatus &&
+      ['recorded', 'replayed'].includes(result.deliveryStatus) &&
+      result.resolutionStatus &&
+      DURABLE_SOURCE_RESOLUTIONS.has(result.resolutionStatus) &&
+      isUuid(result.sourceObservationId) &&
+      typeof result.ingestReceiptId === 'string' &&
+      /^[0-9a-f]{64}$/.test(result.ingestReceiptId) &&
+      (durableConflict
+        ? result.globalCandidateId === null && result.sourceIdentityId === null
+        : normalizeGlobalCandidateId(result.globalCandidateId) !== null &&
+          isUuid(result.sourceIdentityId)) &&
+      (!expectedSignalCandidateId || result.signalCandidateId === expectedSignalCandidateId) &&
       (!expectedGlobalCandidateId ||
+        durableConflict ||
         result.globalCandidateId === expectedGlobalCandidateId),
   );
 }
@@ -1066,43 +1091,121 @@ export function buildActiveGraphCandidatePayload(
   tags: string[],
   requestId?: string,
   options: CandidateIngestOptions = {},
-): Record<string, unknown> {
-  let linkedinUrl = candidate.linkedinUrl || candidate.id;
-  if (!linkedinUrl.startsWith('http')) {
-    linkedinUrl = `https://www.linkedin.com/in/${linkedinUrl}`;
+): ApprovedProviderCandidateIngestRequest {
+  void tenantId;
+  void tags;
+  void requestId;
+  if (
+    !options.acquisitionReceiptId ||
+    !options.acquisitionSlot ||
+    !options.profileObservedAt ||
+    !options.acquisitionGeneration
+  ) {
+    throw new Error('sourced_candidate_acquisition_identity_missing');
   }
-  const sourceMetadata = {
-    public_memory_surface: 'public_v1',
-    ...(options.publicCandidateRoleFamily
-      ? {
-          public_candidate_role_family:
-            options.publicCandidateRoleFamily,
-        }
-      : {}),
-    ...(options.publicMarket
-      ? { public_market: toActiveGraphPublicMarket(options.publicMarket) }
-      : {}),
-  };
-  return {
-    signal_candidate_id: candidate.id,
-    source_record_type: 'sourced_candidate',
-    linkedinUrl,
-    display_name:
-      typeof candidate.name === 'string'
-        ? redactPublicContactText(candidate.name)
-        : candidate.name,
-    headline:
-      typeof candidate.headlineHint === 'string'
-        ? redactPublicContactText(candidate.headlineHint)
-        : candidate.headlineHint,
-    request_id: requestId,
-    tags,
-    tenant_id: tenantId,
-    crustdata: projectPublicCrustdataProfile(candidate.crustdata),
-    source_metadata: sourceMetadata,
-    profile_observed_at: options.profileObservedAt?.toISOString(),
-    acquisition_generation: options.acquisitionGeneration,
-  };
+  return adaptCrustdataCandidateForMemory(candidate, {
+    acquisitionReceiptId: options.acquisitionReceiptId,
+    acquisitionGeneration: options.acquisitionGeneration,
+    acquisitionSlot: options.acquisitionSlot,
+    acquiredAt: options.profileObservedAt,
+    profileObservedAt: options.profileObservedAt,
+    expectedGlobalCandidateId: options.expectedGlobalCandidateId,
+    publicMarket: options.publicMarket,
+    publicCandidateRoleFamily: options.publicCandidateRoleFamily,
+  });
+}
+
+async function readBoundedResponse(response: Response, limit = 16 * 1024): Promise<string> {
+  const declared = response.headers.get('content-length');
+  if (declared && Number(declared) > limit) {
+    throw new Error('sourced_candidate_response_too_large');
+  }
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel();
+        throw new Error('sourced_candidate_response_too_large');
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(joined);
+}
+
+interface SourcedCandidateResponse {
+  delivery_status: unknown;
+  resolution: unknown;
+  provider_namespace: unknown;
+  record_type: unknown;
+  provider_record_id: unknown;
+  acquisition_receipt_id: unknown;
+  acquisition_generation: unknown;
+  acquisition_slot: unknown;
+  idempotency_key: unknown;
+  source_observation_id: unknown;
+  ingest_receipt_id: unknown;
+  source_identity_id: unknown;
+  global_candidate_id: unknown;
+}
+
+function parseSourcedCandidateResponse(
+  value: unknown,
+  request: ApprovedProviderCandidateIngestRequest,
+): SourcedCandidateResponse | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const allowed = new Set([
+    'delivery_status',
+    'resolution',
+    'provider_namespace',
+    'record_type',
+    'provider_record_id',
+    'acquisition_receipt_id',
+    'acquisition_generation',
+    'acquisition_slot',
+    'idempotency_key',
+    'source_observation_id',
+    'ingest_receipt_id',
+    'source_identity_id',
+    'global_candidate_id',
+  ]);
+  if (Object.keys(row).some((key) => !allowed.has(key))) return null;
+  const conflict = row.resolution === 'conflict_review_required';
+  if (
+    !['recorded', 'replayed'].includes(String(row.delivery_status)) ||
+    !DURABLE_SOURCE_RESOLUTIONS.has(String(row.resolution)) ||
+    row.provider_namespace !== request.provider_namespace ||
+    row.record_type !== request.record_type ||
+    row.provider_record_id !== request.provider_record_id ||
+    row.acquisition_receipt_id !== request.acquisition_receipt_id ||
+    row.acquisition_generation !== request.acquisition_generation ||
+    row.acquisition_slot !== request.acquisition_slot ||
+    row.idempotency_key !== request.idempotency_key ||
+    row.ingest_receipt_id !== request.idempotency_key ||
+    !isUuid(row.source_observation_id) ||
+    (conflict
+      ? row.source_identity_id !== null || row.global_candidate_id !== null
+      : !isUuid(row.source_identity_id) ||
+        normalizeGlobalCandidateId(row.global_candidate_id) === null)
+  ) {
+    return null;
+  }
+  return row as unknown as SourcedCandidateResponse;
 }
 
 export async function ingestCandidateWithResult(
@@ -1112,36 +1215,72 @@ export async function ingestCandidateWithResult(
   requestId?: string,
   options: CandidateIngestOptions = {},
 ): Promise<CandidateIngestResult> {
-  await requireNewCandidateAllowed({
-    key: candidate.id,
-    linkedinUrl: candidate.linkedinUrl,
-    signalCandidateId: candidate.id,
-  });
-  const payload = buildActiveGraphCandidatePayload(
-    tenantId,
-    candidate,
-    tags,
-    requestId,
-    options,
-  );
-
-  const token = await signActiveGraphJWT(tenantId, 'kg:write', requestId);
+  let payload: ApprovedProviderCandidateIngestRequest;
+  try {
+    payload = buildActiveGraphCandidatePayload(tenantId, candidate, tags, requestId, options);
+  } catch {
+    return {
+      success: false,
+      signalCandidateId: candidate.id,
+      memoryCandidateId: null,
+      globalCandidateId: null,
+      sourceRecordId: null,
+      resolutionStatus: null,
+      errorCode: 'invalid_adapter_input',
+    };
+  }
+  // Last-moment admission is deliberately after all local adaptation and
+  // immediately before token creation/network disclosure.
+  try {
+    await requireNewCandidateAllowed({
+      key: candidate.id,
+      linkedinUrl: payload.linkedin_url,
+      signalCandidateId: candidate.id,
+      globalCandidateId: options.expectedGlobalCandidateId,
+    });
+  } catch {
+    return {
+      success: false,
+      signalCandidateId: candidate.id,
+      memoryCandidateId: null,
+      globalCandidateId: null,
+      sourceRecordId: null,
+      resolutionStatus: null,
+      errorCode: 'privacy_restricted',
+    };
+  }
+  let token: string;
+  try {
+    token = await signSourcedCandidateIngestJWT(tenantId, requestId);
+  } catch {
+    return {
+      success: false,
+      signalCandidateId: candidate.id,
+      memoryCandidateId: null,
+      globalCandidateId: null,
+      sourceRecordId: null,
+      resolutionStatus: null,
+      errorCode: 'auth_configuration',
+    };
+  }
   let response: Response;
   try {
     response = await fetchWithTimeout(
-      `${ACTIVEGRAPH_URL}/candidates/resolve/signal/candidate`,
+      `${ACTIVEGRAPH_URL}/sourced-candidates/ingest`,
       {
         method: 'POST',
+        redirect: 'error',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify(payload),
       },
+      5_000,
     );
-  } catch (err) {
+  } catch {
     log.error(
-      { requestId, candidateId: candidate.id, err: String(err) },
+      { requestId, acquisitionSlot: options.acquisitionSlot },
       'ActiveGraph candidate ingest unreachable',
     );
     return {
@@ -1159,9 +1298,8 @@ export async function ingestCandidateWithResult(
     log.error(
       {
         requestId,
-        tenantId,
-        candidateId: candidate.id,
         status: response.status,
+        acquisitionSlot: options.acquisitionSlot,
       },
       'ActiveGraph candidate ingest failed',
     );
@@ -1175,25 +1313,20 @@ export async function ingestCandidateWithResult(
       errorCode: `http_${response.status}`,
     };
   }
-
-  const data = await response.json().catch(() => null) as {
-    candidate_id?: unknown;
-    global_candidate_id?: unknown;
-    resolution_status?: unknown;
-    source_record_id?: unknown;
-  } | null;
-  if (!isDurableActiveGraphCandidateResolve(data)) {
+  let data: unknown;
+  try {
+    data = JSON.parse(await readBoundedResponse(response));
+  } catch (error) {
     log.error(
       {
         requestId,
-        tenantId,
-        candidateId: candidate.id,
-        resolutionStatus:
-          data && typeof data.resolution_status === 'string'
-            ? data.resolution_status
-            : null,
+        acquisitionSlot: options.acquisitionSlot,
+        errorCode:
+          error instanceof Error && error.message === 'sourced_candidate_response_too_large'
+            ? 'response_too_large'
+            : 'invalid_contract',
       },
-      'ActiveGraph candidate ingest was not durably resolved',
+      'ActiveGraph candidate ingest response was invalid',
     );
     return {
       success: false,
@@ -1201,22 +1334,22 @@ export async function ingestCandidateWithResult(
       memoryCandidateId: null,
       globalCandidateId: null,
       sourceRecordId: null,
-      resolutionStatus:
-        data && typeof data.resolution_status === 'string'
-          ? data.resolution_status
-          : null,
-      errorCode: 'invalid_contract',
+      resolutionStatus: null,
+      errorCode:
+        error instanceof Error && error.message === 'sourced_candidate_response_too_large'
+          ? 'response_too_large'
+          : 'invalid_contract',
     };
   }
-  if (data.source_record_id !== candidate.id) {
+  const parsed = parseSourcedCandidateResponse(data, payload);
+  if (!parsed) {
     log.error(
       {
         requestId,
-        tenantId,
-        candidateId: candidate.id,
-        sourceRecordId: data.source_record_id,
+        acquisitionSlot: options.acquisitionSlot,
+        errorCode: 'identity_mismatch',
       },
-      'ActiveGraph candidate ingest resolved a different source record',
+      'ActiveGraph candidate ingest returned mismatched evidence identity',
     );
     return {
       success: false,
@@ -1224,25 +1357,7 @@ export async function ingestCandidateWithResult(
       memoryCandidateId: null,
       globalCandidateId: null,
       sourceRecordId: null,
-      resolutionStatus: data.resolution_status,
-      errorCode: 'invalid_contract',
-    };
-  }
-  const globalCandidateId = normalizeGlobalCandidateId(
-    data.global_candidate_id,
-  );
-  if (!globalCandidateId) {
-    log.error(
-      { requestId, candidateId: candidate.id },
-      'ActiveGraph candidate ingest returned an invalid canonical ID',
-    );
-    return {
-      success: false,
-      signalCandidateId: candidate.id,
-      memoryCandidateId: null,
-      globalCandidateId: null,
-      sourceRecordId: null,
-      resolutionStatus: data.resolution_status,
+      resolutionStatus: null,
       errorCode: 'invalid_contract',
     };
   }
@@ -1250,10 +1365,18 @@ export async function ingestCandidateWithResult(
   return {
     success: true,
     signalCandidateId: candidate.id,
-    memoryCandidateId: data.candidate_id as string,
-    globalCandidateId,
-    sourceRecordId: data.source_record_id as string,
-    resolutionStatus: data.resolution_status,
+    memoryCandidateId: null,
+    globalCandidateId:
+      typeof parsed.global_candidate_id === 'string'
+        ? normalizeGlobalCandidateId(parsed.global_candidate_id)
+        : null,
+    sourceRecordId: parsed.ingest_receipt_id as string,
+    resolutionStatus: parsed.resolution as string,
+    deliveryStatus: parsed.delivery_status as 'recorded' | 'replayed',
+    sourceIdentityId:
+      typeof parsed.source_identity_id === 'string' ? parsed.source_identity_id : null,
+    sourceObservationId: parsed.source_observation_id as string,
+    ingestReceiptId: parsed.ingest_receipt_id as string,
     errorCode: null,
   };
 }

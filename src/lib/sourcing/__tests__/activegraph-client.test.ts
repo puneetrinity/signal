@@ -1,10 +1,12 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CandidateForRanking } from "../ranking-new";
-import type { JobRequirements } from "../jd-digest";
-import { buildPublicMarket } from "../public-memory";
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { CandidateForRanking } from '../ranking-new';
+import type { JobRequirements } from '../jd-digest';
+import { buildPublicMarket } from '../public-memory';
+import { signSourcedCandidateIngestJWT } from '../activegraph-auth';
 
-vi.mock("../activegraph-auth", () => ({
-  signActiveGraphJWT: vi.fn().mockResolvedValue("test-token"),
+vi.mock('../activegraph-auth', () => ({
+  signActiveGraphJWT: vi.fn().mockResolvedValue('test-token'),
+  signSourcedCandidateIngestJWT: vi.fn().mockResolvedValue('source-token'),
 }));
 
 const requirements: JobRequirements = {
@@ -44,20 +46,51 @@ const candidate: CandidateForRanking & {
   },
   snapshot: null,
 };
-const GLOBAL_ID = "123e4567-e89b-42d3-a456-426614174000";
+const GLOBAL_ID = '123e4567-e89b-42d3-a456-426614174000';
+const SOURCE_ID = '223e4567-e89b-42d3-a456-426614174000';
+const OBSERVATION_ID = '323e4567-e89b-42d3-a456-426614174000';
+const OBSERVED_AT = new Date('2026-09-07T12:00:00.000Z');
+
+function ingestOptions(overrides: Record<string, unknown> = {}) {
+  return {
+    profileObservedAt: OBSERVED_AT,
+    acquisitionGeneration: 1,
+    acquisitionReceiptId: 'receipt:exact:one',
+    acquisitionSlot: 'exact' as const,
+    ...overrides,
+  };
+}
+
+function sourcedResponse(body: Record<string, unknown>, overrides = {}) {
+  return {
+    delivery_status: 'recorded',
+    resolution: 'matched',
+    provider_namespace: body.provider_namespace,
+    record_type: body.record_type,
+    provider_record_id: body.provider_record_id,
+    acquisition_receipt_id: body.acquisition_receipt_id,
+    acquisition_generation: body.acquisition_generation,
+    acquisition_slot: body.acquisition_slot,
+    idempotency_key: body.idempotency_key,
+    source_observation_id: OBSERVATION_ID,
+    ingest_receipt_id: body.idempotency_key,
+    source_identity_id: SOURCE_ID,
+    global_candidate_id: GLOBAL_ID,
+    ...overrides,
+  };
+}
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
 
 function okJson(body: unknown) {
-  return {
-    ok: true,
+  return new Response(JSON.stringify(body), {
     status: 200,
-    json: async () => body,
-    text: async () => JSON.stringify(body),
-  };
+    headers: { 'content-type': 'application/json' },
+  });
 }
 
 describe("ActiveGraph public Memory contracts", () => {
@@ -420,92 +453,86 @@ describe("ActiveGraph public Memory contracts", () => {
         },
       },
     } as typeof candidate;
-    const fetchMock = vi.fn().mockResolvedValue(
-      okJson({
-        candidate_id: "memory-tenant-candidate-1",
-        global_candidate_id: GLOBAL_ID,
-        resolution_status: "matched",
-        source_record_id: "signal-candidate-1",
-      }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-    const { ingestCandidateWithResult } = await import("../activegraph-client");
+    const fetchMock = vi.fn().mockImplementation(async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      return okJson(sourcedResponse(body));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { ingestCandidateWithResult } = await import('../activegraph-client');
 
-    const result = await ingestCandidateWithResult(
-      "org_1",
-      unsafeCandidate,
-      ["python"],
-      "req-5",
-      {
-        publicMarket: market,
-        publicCandidateRoleFamily: "backend",
-      },
-    );
+    const result = await ingestCandidateWithResult('org_1', unsafeCandidate, ['python'], 'req-5', {
+      publicMarket: market,
+      publicCandidateRoleFamily: 'backend',
+      ...ingestOptions({ expectedGlobalCandidateId: GLOBAL_ID }),
+    });
 
     expect(result).toEqual({
       success: true,
-      signalCandidateId: "signal-candidate-1",
-      memoryCandidateId: "memory-tenant-candidate-1",
+      signalCandidateId: 'signal-candidate-1',
+      memoryCandidateId: null,
       globalCandidateId: GLOBAL_ID,
-      sourceRecordId: "signal-candidate-1",
-      resolutionStatus: "matched",
+      sourceRecordId: expect.stringMatching(/^[0-9a-f]{64}$/),
+      resolutionStatus: 'matched',
+      deliveryStatus: 'recorded',
+      sourceIdentityId: SOURCE_ID,
+      sourceObservationId: OBSERVATION_ID,
+      ingestReceiptId: expect.stringMatching(/^[0-9a-f]{64}$/),
       errorCode: null,
     });
     const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
-    expect(JSON.stringify(body)).not.toContain("alice@example.com");
-    expect(JSON.stringify(body)).not.toContain("+1-415-555-0123");
-    expect(JSON.stringify(body)).not.toContain("nested@example.com");
-    expect(JSON.stringify(body)).not.toContain("private@example.com");
-    expect(body.display_name).toBe("Alice [redacted]");
-    expect(body.headline).toBe("Engineer [redacted]");
-    expect(body.source_metadata).toEqual({
-      public_memory_surface: "public_v1",
-      public_candidate_role_family: "backend",
-      public_market: {
-        version: 1,
-        coarse_market_key: market.coarseMarketKey,
-        role_family: "backend",
-        location_city: "bangalore",
-        location_country_code: "IN",
-        seniority_band: "senior",
-      },
+    expect(JSON.stringify(body)).not.toContain('alice@example.com');
+    expect(JSON.stringify(body)).not.toContain('+1-415-555-0123');
+    expect(JSON.stringify(body)).not.toContain('nested@example.com');
+    expect(JSON.stringify(body)).not.toContain('private@example.com');
+    expect(body.normalized_profile.display_name).toBe('Alice');
+    expect(body.normalized_profile.headline).toBe('Senior Backend Engineer');
+    expect(body.normalized_profile.role_family).toBe('backend');
+    expect(body.public_market).toEqual({
+      version: 1,
+      coarse_market_key: market.coarseMarketKey,
+      role_family: 'backend',
+      location_city: 'bangalore',
+      location_country_code: 'IN',
+      seniority_band: 'senior',
     });
+    expect(body.acquisition_receipt_id).toBe('receipt:exact:one');
+    expect(body.expected_global_candidate_id).toBe(GLOBAL_ID);
+    expect(signSourcedCandidateIngestJWT).toHaveBeenCalledWith('org_1', 'req-5');
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://localhost:8000/sourced-candidates/ingest');
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      method: 'POST',
+      redirect: 'error',
+    });
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('authorization')).toBe(
+      'Bearer source-token',
+    );
   });
 
-  it("marks public-v1 ingest even when no coarse market can be formed", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      okJson({
-        candidate_id: "memory-tenant-candidate-1",
-        global_candidate_id: GLOBAL_ID,
-        resolution_status: "created",
-        source_record_id: "signal-candidate-1",
-      }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-    const { ingestCandidateWithResult } = await import("../activegraph-client");
+  it('omits coarse market when none can be formed', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      return okJson(sourcedResponse(body, { resolution: 'created' }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { ingestCandidateWithResult } = await import('../activegraph-client');
 
-    await ingestCandidateWithResult("org_1", candidate, ["python"], "req-6");
+    await ingestCandidateWithResult('org_1', candidate, ['python'], 'req-6', ingestOptions());
 
     const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
-    expect(body.source_metadata).toEqual({
-      public_memory_surface: "public_v1",
-    });
+    expect(body.public_market).toBeUndefined();
+    expect(body.provider_namespace).toBe('crustdata');
   });
 
-  it("rejects an ingest response for a different source record", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      okJson({
-        candidate_id: "memory-tenant-candidate-1",
-        global_candidate_id: GLOBAL_ID,
-        resolution_status: "matched",
-        source_record_id: "another-signal-candidate",
-      }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-    const { ingestCandidateWithResult } = await import("../activegraph-client");
+  it('rejects an ingest response for a different source record', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      return okJson(sourcedResponse(body, { provider_record_id: '999' }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { ingestCandidateWithResult } = await import('../activegraph-client');
 
     await expect(
-      ingestCandidateWithResult("org_1", candidate, ["python"], "req-mismatch"),
+      ingestCandidateWithResult('org_1', candidate, ['python'], 'req-mismatch', ingestOptions()),
     ).resolves.toMatchObject({
       success: false,
       signalCandidateId: "signal-candidate-1",
@@ -513,17 +540,91 @@ describe("ActiveGraph public Memory contracts", () => {
     });
   });
 
-  it("rejects malformed canonical IDs from ingest and identity lookup", async () => {
+  it('classifies 451 without reading or reflecting its response body', async () => {
+    const privateCanary = 'private-person@example.invalid';
+    const response = new Response(privateCanary, { status: 451 });
+    const read = vi.spyOn(response, 'text');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response));
+    const { ingestCandidateWithResult } = await import('../activegraph-client');
+
+    await expect(
+      ingestCandidateWithResult('org_1', candidate, [], 'req-451', ingestOptions()),
+    ).resolves.toMatchObject({
+      success: false,
+      errorCode: 'http_451',
+    });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('refuses oversized and extra-field response contracts', async () => {
+    const oversized = new Response('{}', {
+      status: 200,
+      headers: { 'content-length': String(16 * 1024 + 1) },
+    });
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(
-        okJson({
-          candidate_id: "memory-tenant-candidate-1",
-          global_candidate_id: "not-a-uuid",
-          resolution_status: "matched",
-          source_record_id: "signal-candidate-1",
-        }),
-      )
+      .mockResolvedValueOnce(oversized)
+      .mockImplementationOnce(async (_url, init) => {
+        const body = JSON.parse(String(init?.body));
+        return okJson(sourcedResponse(body, { private_note: 'no' }));
+      });
+    vi.stubGlobal('fetch', fetchMock);
+    const { ingestCandidateWithResult } = await import('../activegraph-client');
+
+    await expect(
+      ingestCandidateWithResult('org_1', candidate, [], 'req-large', ingestOptions()),
+    ).resolves.toMatchObject({
+      success: false,
+      errorCode: 'response_too_large',
+    });
+    await expect(
+      ingestCandidateWithResult('org_1', candidate, [], 'req-extra', ingestOptions()),
+    ).resolves.toMatchObject({
+      success: false,
+      errorCode: 'invalid_contract',
+    });
+  });
+
+  it('refuses redirects and enforces the five-second deadline', async () => {
+    const redirectFetch = vi.fn().mockRejectedValue(new TypeError('redirect refused'));
+    vi.stubGlobal('fetch', redirectFetch);
+    const { ingestCandidateWithResult } = await import('../activegraph-client');
+    await expect(
+      ingestCandidateWithResult('org_1', candidate, [], 'req-redirect', ingestOptions()),
+    ).resolves.toMatchObject({ success: false, errorCode: 'transport' });
+    expect(redirectFetch.mock.calls[0]?.[1]?.redirect).toBe('error');
+
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(
+        async (_url, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+          }),
+      ),
+    );
+    const pending = ingestCandidateWithResult(
+      'org_1',
+      candidate,
+      [],
+      'req-timeout',
+      ingestOptions(),
+    );
+    await vi.advanceTimersByTimeAsync(5_001);
+    await expect(pending).resolves.toMatchObject({
+      success: false,
+      errorCode: 'transport',
+    });
+  });
+
+  it('rejects malformed canonical IDs from ingest and identity lookup', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(async (_url, init) => {
+        const body = JSON.parse(String(init?.body));
+        return okJson(sourcedResponse(body, { global_candidate_id: 'not-a-uuid' }));
+      })
       .mockResolvedValueOnce(
         okJson({
           surface: "public_v1",
@@ -543,7 +644,7 @@ describe("ActiveGraph public Memory contracts", () => {
     } = await import("../activegraph-client");
 
     await expect(
-      ingestCandidateWithResult("org_1", candidate, ["python"], "bad-ingest"),
+      ingestCandidateWithResult('org_1', candidate, ['python'], 'bad-ingest', ingestOptions()),
     ).resolves.toMatchObject({
       success: false,
       globalCandidateId: null,

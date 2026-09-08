@@ -45,7 +45,13 @@ function input(
       crustdata: { crustdata_person_id: 123 },
       snapshot: null,
     },
-    options: {},
+    options: {
+      profileObservedAt: new Date('2026-09-07T12:00:00.000Z'),
+      acquisitionGeneration: 1,
+      acquisitionReceiptId: 'receipt:exact:one',
+      acquisitionSlot: 'exact',
+      expectedGlobalCandidateId,
+    },
     expectedGlobalCandidateId,
   };
 }
@@ -97,9 +103,9 @@ describe("public Memory ingest outbox enqueue", () => {
         personal_email: "top@example.com",
       },
     } as typeof unsafe.candidate.crustdata;
-    const { enqueuePublicMemoryIngestOutbox } = await import(
-      "../public-memory-ingest-outbox"
-    );
+    const { enqueuePublicMemoryIngestOutbox, hydrateOutboxCandidate, hydrateOutboxIngestOptions } =
+      await import('../public-memory-ingest-outbox');
+    const { buildActiveGraphCandidatePayload } = await import('../activegraph-client');
 
     await enqueuePublicMemoryIngestOutbox({
       tenantId: "org_1",
@@ -121,6 +127,22 @@ describe("public Memory ingest outbox enqueue", () => {
     expect(serialized).not.toContain("98765-43210");
     expect(serialized).toContain("[redacted]");
     expect(rows[0]?.payload.candidate.crustdata.contact).toBeUndefined();
+
+    const direct = buildActiveGraphCandidatePayload(
+      'org_1',
+      unsafe.candidate,
+      [],
+      'request-1',
+      unsafe.options,
+    );
+    const replayed = buildActiveGraphCandidatePayload(
+      'org_1',
+      hydrateOutboxCandidate(rows[0].payload),
+      [],
+      'request-1',
+      hydrateOutboxIngestOptions(rows[0].payload.options),
+    );
+    expect(JSON.stringify(replayed)).toBe(JSON.stringify(direct));
   });
 
   it("round-trips the paid observation time and acquisition generation", async () => {
@@ -129,6 +151,8 @@ describe("public Memory ingest outbox enqueue", () => {
     timed.options = {
       profileObservedAt: observedAt,
       acquisitionGeneration: 4,
+      acquisitionReceiptId: 'receipt:spill:four',
+      acquisitionSlot: 'spill',
     };
     const {
       enqueuePublicMemoryIngestOutbox,
@@ -145,12 +169,18 @@ describe("public Memory ingest outbox enqueue", () => {
     expect(rows[0]?.payload.options).toEqual({
       profileObservedAt: observedAt.toISOString(),
       acquisitionGeneration: 4,
+      acquisitionReceiptId: 'receipt:spill:four',
+      acquisitionSlot: 'spill',
+      expectedGlobalCandidateId: null,
     });
     expect(
       hydrateOutboxIngestOptions(rows[0].payload.options),
     ).toEqual({
       profileObservedAt: observedAt,
       acquisitionGeneration: 4,
+      acquisitionReceiptId: 'receipt:spill:four',
+      acquisitionSlot: 'spill',
+      expectedGlobalCandidateId: null,
     });
   });
 

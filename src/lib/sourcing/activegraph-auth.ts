@@ -21,6 +21,8 @@ export type ActiveGraphScope =
   | 'contact:read'
   | 'contact:write';
 
+const SOURCED_CANDIDATE_TENANT = /^org_[1-9][0-9]*$/;
+
 function decodePemMaybeBase64(pem: string): string {
   return pem.includes('-----BEGIN') ? pem : Buffer.from(pem, 'base64').toString('utf-8');
 }
@@ -44,7 +46,10 @@ export async function signActiveGraphJWT(
     request_id: requestId,
     scopes,
   })
-    .setProtectedHeader({ alg: 'RS256', kid: process.env.SIGNAL_JWT_ACTIVE_KID || 'v1' })
+    .setProtectedHeader({
+      alg: 'RS256',
+      kid: process.env.SIGNAL_JWT_ACTIVE_KID || 'v1',
+    })
     .setIssuer('signal')
     .setAudience(ACTIVEGRAPH_JWT_AUDIENCE)
     .setSubject('sourcing')
@@ -70,10 +75,46 @@ export async function signCandidatePrivacyJWT(): Promise<string> {
     scopes: 'candidate-privacy:read',
     actor_type: 'service',
   })
-    .setProtectedHeader({ alg: 'RS256', kid: process.env.SIGNAL_JWT_ACTIVE_KID || 'v1' })
+    .setProtectedHeader({
+      alg: 'RS256',
+      kid: process.env.SIGNAL_JWT_ACTIVE_KID || 'v1',
+    })
     .setIssuer('signal')
     .setAudience('activekg')
     .setSubject(actorId)
+    .setExpirationTime('5m')
+    .setIssuedAt()
+    .setJti(uuidv4())
+    .sign(key);
+}
+
+/** Dedicated authority for approved-provider global candidate evidence.
+ *
+ * This signer has no scope parameter by design: callers cannot use it to mint
+ * generic kg:write or contact authority. Memory independently verifies every
+ * claim below.
+ */
+export async function signSourcedCandidateIngestJWT(
+  tenantId: string,
+  requestId?: string,
+): Promise<string> {
+  if (!SOURCED_CANDIDATE_TENANT.test(tenantId)) {
+    throw new Error('sourced_candidate_tenant_invalid');
+  }
+  const key = await getSigningKey();
+  return new SignJWT({
+    tenant_id: tenantId,
+    request_id: requestId,
+    scopes: ['candidate-source:write'],
+    actor_type: 'service',
+  })
+    .setProtectedHeader({
+      alg: 'RS256',
+      kid: process.env.SIGNAL_JWT_ACTIVE_KID || 'v1',
+    })
+    .setIssuer('signal')
+    .setAudience('activekg')
+    .setSubject('signal-service')
     .setExpirationTime('5m')
     .setIssuedAt()
     .setJti(uuidv4())

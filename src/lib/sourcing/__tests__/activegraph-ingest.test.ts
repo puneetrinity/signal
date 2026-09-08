@@ -23,32 +23,41 @@ describe("ActiveGraph candidate ingest evidence time", () => {
       lastEnrichedAt: null,
       crustdata: {
         crustdata_person_id: 123,
-        contact: { email: "nested@example.com" },
+        basic_profile: {
+          name: 'Example Person',
+          headline: 'Backend Engineer',
+        },
+        contact: { email: 'nested@example.com' },
       },
     } as CandidateForRanking & {
       linkedinUrl: string;
       name: string;
     };
 
-    const payload = buildActiveGraphCandidatePayload(
-      "org_1",
-      candidate,
-      ["python"],
-      "request-1",
-      {
-        profileObservedAt: observedAt,
-        acquisitionGeneration: 4,
-      },
-    );
+    const payload = buildActiveGraphCandidatePayload('org_1', candidate, ['python'], 'request-1', {
+      profileObservedAt: observedAt,
+      acquisitionGeneration: 4,
+      acquisitionReceiptId: 'receipt:one',
+      acquisitionSlot: 'exact',
+      expectedGlobalCandidateId: globalCandidateId,
+    });
     expect(payload).toMatchObject({
-      signal_candidate_id:
-        "https://www.linkedin.com/in/example-person",
-      tenant_id: "org_1",
-      request_id: "request-1",
-      profile_observed_at: observedAt.toISOString(),
+      schema_version: 1,
+      provider_namespace: 'crustdata',
+      record_type: 'person',
+      adapter_version: 'crustdata_person_v1',
+      provider_record_id: '123',
+      linkedin_url: 'https://linkedin.com/in/example-person',
+      expected_global_candidate_id: globalCandidateId,
+      acquisition_receipt_id: 'receipt:one',
       acquisition_generation: 4,
-      crustdata: { crustdata_person_id: 123 },
-      source_metadata: { public_memory_surface: "public_v1" },
+      acquisition_slot: 'exact',
+      acquired_at: observedAt.toISOString(),
+      provider_observed_at: observedAt.toISOString(),
+      normalized_profile: {
+        display_name: 'Example Person',
+        headline: 'Backend Engineer',
+      },
     });
     expect(JSON.stringify(payload)).not.toContain("person@example.com");
     expect(JSON.stringify(payload)).not.toContain("+1-415-555-0123");
@@ -93,11 +102,15 @@ describe("ActiveGraph candidate ingest evidence time", () => {
   it("does not confirm a mismatched canonical identity", () => {
     const result = {
       success: true,
-      signalCandidateId: "signal-1",
-      memoryCandidateId: "candidate-1",
+      signalCandidateId: 'signal-1',
+      memoryCandidateId: null,
       globalCandidateId,
-      sourceRecordId: "signal-1",
-      resolutionStatus: "matched",
+      sourceRecordId: 'a'.repeat(64),
+      resolutionStatus: 'matched',
+      deliveryStatus: 'recorded' as const,
+      sourceIdentityId: '33333333-3333-4333-8333-333333333333',
+      sourceObservationId: '44444444-4444-4444-8444-444444444444',
+      ingestReceiptId: 'a'.repeat(64),
       errorCode: null,
     };
 
@@ -113,19 +126,19 @@ describe("ActiveGraph candidate ingest evidence time", () => {
     expect(
       isConfirmedCandidateIngestResult({
         ...result,
-        resolutionStatus: "review_required",
+        resolutionStatus: 'unknown',
       }),
     ).toBe(false);
     expect(
       isConfirmedCandidateIngestResult({
         ...result,
-        sourceRecordId: " ",
+        ingestReceiptId: ' ',
       }),
     ).toBe(false);
     expect(
       isConfirmedCandidateIngestResult({
         ...result,
-        sourceRecordId: "signal-2",
+        sourceObservationId: 'not-a-uuid',
       }),
     ).toBe(false);
     expect(

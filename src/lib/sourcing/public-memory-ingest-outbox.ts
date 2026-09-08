@@ -99,8 +99,17 @@ export function dedupePublicMemoryOutboxInputs(
   const bySignalCandidateId = new Map<string, PublicMemoryOutboxEnqueueInput>();
   for (const input of candidates) {
     const existing = bySignalCandidateId.get(input.candidate.id);
-    const existingExpected = existing?.expectedGlobalCandidateId ?? null;
-    const nextExpected = input.expectedGlobalCandidateId ?? null;
+    const existingExpected =
+      existing?.expectedGlobalCandidateId ?? existing?.options.expectedGlobalCandidateId ?? null;
+    const nextExpected =
+      input.expectedGlobalCandidateId ?? input.options.expectedGlobalCandidateId ?? null;
+    if (
+      input.expectedGlobalCandidateId &&
+      input.options.expectedGlobalCandidateId &&
+      input.expectedGlobalCandidateId !== input.options.expectedGlobalCandidateId
+    ) {
+      throw new Error(`Conflicting Memory identity receipts for ${input.candidate.id}`);
+    }
     if (existingExpected && nextExpected && existingExpected !== nextExpected) {
       throw new Error(
         `Conflicting Memory identity receipts for ${input.candidate.id}`,
@@ -109,6 +118,10 @@ export function dedupePublicMemoryOutboxInputs(
     bySignalCandidateId.set(input.candidate.id, {
       ...input,
       expectedGlobalCandidateId: nextExpected || existingExpected,
+      options: {
+        ...input.options,
+        expectedGlobalCandidateId: nextExpected || existingExpected,
+      },
     });
   }
   return Array.from(bySignalCandidateId.values());
@@ -208,20 +221,32 @@ export async function enqueuePublicMemoryIngestOutbox({
     admissionProofs.has(candidate.id),
   );
   if (allowedCandidates.length === 0) return 0;
-  const rows = allowedCandidates.map(
-    ({ candidate, options, expectedGlobalCandidateId }) => ({
+  const rows = allowedCandidates.map(({ candidate, options, expectedGlobalCandidateId }) => {
+    if (
+      !options.acquisitionReceiptId ||
+      !options.acquisitionSlot ||
+      !options.profileObservedAt ||
+      !options.acquisitionGeneration
+    ) {
+      throw new Error('sourced_candidate_acquisition_identity_missing');
+    }
+    const expected = expectedGlobalCandidateId ?? null;
+    return {
       id: randomUUID(),
       receipt_id: randomUUID(),
       tenant_id: tenantId,
       signal_candidate_id: candidate.id,
       sourcing_request_id: sourcingRequestId,
       payload: {
-        expectedGlobalCandidateId: expectedGlobalCandidateId ?? null,
+        expectedGlobalCandidateId: expected,
         candidate: serializeCandidate(candidate),
-        options: serializeIngestOptions(options),
+        options: serializeIngestOptions({
+          ...options,
+          expectedGlobalCandidateId: expected,
+        }),
       },
-    }),
-  );
+    };
+  });
 
   return prisma.$transaction(async (tx) => {
     for (const { candidate } of allowedCandidates) {

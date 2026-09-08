@@ -5,24 +5,114 @@ import { describe, expect, it } from 'vitest';
 const root = process.cwd();
 
 const enforcementContracts = [
-  ['route-source-restrictive', 'src/app/api/v3/jobs/[id]/source/route.ts', ['requireHealthyCandidatePrivacyContext()', 'request.json()']],
-  ['route-contact-restrictive', 'src/app/api/v3/candidates/[id]/find-contact/route.ts', ['requireCandidatePrivacyAllowed(', 'findOrCreateContactOperation(']],
-  ['route-backfill-prelimit', 'src/app/api/v3/pool/backfill/route.ts', ['candidatePrivacyAllowedRelationWhere(privacyContext)', 'take: 5000']],
-  ['queued-source-restrictive', 'src/lib/sourcing/queue/index.ts', ['requireHealthyCandidatePrivacyContext()', 'runSourcingOrchestrator(']],
-  ['orchestrator-prelimit', 'src/lib/sourcing/orchestrator.ts', ['JOIN "candidate_privacy_projection"', 'LIMIT ${config.poolLayer1Cap}']],
-  ['serper-zero-call', 'src/lib/sourcing/discovery.ts', ['requireHealthyCandidatePrivacyContext()', 'searchLinkedInProfilesWithMeta(']],
-  ['crustdata-zero-persistence', 'src/lib/sourcing/crustdata-acquisition.ts', ['privacyFilterCrustdataResult(', 'dependencies.store.complete(']],
-  ['result-persist-restrictive', 'src/lib/sourcing/sourcing-candidate-persistence.ts', ['filterCandidateIdsBeforeLimit(', 'deleteMany(']],
-  ['callback-last-moment', 'src/lib/sourcing/callback.ts', ['requireHealthyCandidatePrivacyContext()', 'fetch(callbackUrl']],
-  ['rescore-zero-call', 'src/lib/sourcing/rescore.ts', ['requireCandidatePrivacyAllowed(', 'resolveRolesBatch(']],
-  ['novelty-prelimit', 'src/lib/sourcing/novelty.ts', ['requireHealthyCandidatePrivacyContext()', 'candidate: candidatePrivacyAllowedRelationWhere(privacyContext)']],
-  ['memory-result-admission', 'src/lib/sourcing/activegraph-client.ts', ['assertMemoryCandidatesPrivacyAllowed(', 'return results']],
-  ['materialization-admission', 'src/lib/sourcing/public-memory-materialization.ts', ['createCandidateAdmissionProofs(', 'upsertDiscoveredCandidates(']],
-  ['outbox-last-moment', 'src/lib/sourcing/public-memory-ingest-worker.ts', ['requireCandidatePrivacyAllowed(', 'const result = await ingest(row)']],
-  ['graph-stale-job', 'src/lib/integrations/candidate-graph-worker.ts', ['await assertStillAllowed()', 'upsertGlobalCandidate(']],
-  ['contact-claim-prelimit', 'src/lib/contact-enrichment/store.ts', ['JOIN "candidate_privacy_projection"', 'LIMIT ${limit}']],
-  ['contact-provider-zero-call', 'src/lib/contact-enrichment/worker.ts', ['requireCandidatePrivacyAllowed(', 'providers.startFullEnrich(']],
-  ['late-webhook-restrictive', 'src/lib/contact-enrichment/webhook-handler.ts', ['requireCandidatePrivacyAllowed(', 'applyFullEnrichWebhookTransition(']],
+  [
+    'route-source-restrictive',
+    'src/app/api/v3/jobs/[id]/source/route.ts',
+    ['requireHealthyCandidatePrivacyContext()', 'request.json()'],
+  ],
+  [
+    'route-contact-restrictive',
+    'src/app/api/v3/candidates/[id]/find-contact/route.ts',
+    ['requireCandidatePrivacyAllowed(', 'findOrCreateContactOperation('],
+  ],
+  [
+    'route-backfill-prelimit',
+    'src/app/api/v3/pool/backfill/route.ts',
+    ['candidatePrivacyAllowedRelationWhere(privacyContext)', 'take: 5000'],
+  ],
+  [
+    'queued-source-restrictive',
+    'src/lib/sourcing/queue/index.ts',
+    ['requireHealthyCandidatePrivacyContext()', 'runSourcingOrchestrator('],
+  ],
+  [
+    'orchestrator-prelimit',
+    'src/lib/sourcing/orchestrator.ts',
+    ['JOIN "candidate_privacy_projection"', 'LIMIT ${config.poolLayer1Cap}'],
+  ],
+  [
+    'approved-source-convergence',
+    'src/lib/sourcing/orchestrator.ts',
+    ['enqueuePublicMemoryIngestOutbox(', 'ingestCandidateBatchWithResults('],
+  ],
+  [
+    'approved-source-adapter',
+    'src/lib/sourcing/sourced-candidate-adapter.ts',
+    ['provider_namespace: PROVIDER_NAMESPACE', 'normalized_profile: buildProfile('],
+  ],
+  [
+    'approved-source-last-moment',
+    'src/lib/sourcing/activegraph-client.ts',
+    ['requireNewCandidateAllowed(', 'signSourcedCandidateIngestJWT('],
+  ],
+  [
+    'serper-zero-call',
+    'src/lib/sourcing/discovery.ts',
+    ['requireHealthyCandidatePrivacyContext()', 'searchLinkedInProfilesWithMeta('],
+  ],
+  [
+    'crustdata-zero-persistence',
+    'src/lib/sourcing/crustdata-acquisition.ts',
+    ['privacyFilterCrustdataResult(', 'dependencies.store.complete('],
+  ],
+  [
+    'result-persist-restrictive',
+    'src/lib/sourcing/sourcing-candidate-persistence.ts',
+    ['filterCandidateIdsBeforeLimit(', 'deleteMany('],
+  ],
+  [
+    'callback-last-moment',
+    'src/lib/sourcing/callback.ts',
+    ['requireHealthyCandidatePrivacyContext()', 'fetch(callbackUrl'],
+  ],
+  [
+    'rescore-zero-call',
+    'src/lib/sourcing/rescore.ts',
+    ['requireCandidatePrivacyAllowed(', 'resolveRolesBatch('],
+  ],
+  [
+    'novelty-prelimit',
+    'src/lib/sourcing/novelty.ts',
+    [
+      'requireHealthyCandidatePrivacyContext()',
+      'candidate: candidatePrivacyAllowedRelationWhere(privacyContext)',
+    ],
+  ],
+  [
+    'memory-result-admission',
+    'src/lib/sourcing/activegraph-client.ts',
+    ['assertMemoryCandidatesPrivacyAllowed(', 'return results'],
+  ],
+  [
+    'materialization-admission',
+    'src/lib/sourcing/public-memory-materialization.ts',
+    ['createCandidateAdmissionProofs(', 'upsertDiscoveredCandidates('],
+  ],
+  [
+    'outbox-last-moment',
+    'src/lib/sourcing/public-memory-ingest-worker.ts',
+    ['requireCandidatePrivacyAllowed(', 'const result = await ingest(row)'],
+  ],
+  [
+    'graph-stale-job',
+    'src/lib/integrations/candidate-graph-worker.ts',
+    ['await assertStillAllowed()', 'upsertGlobalCandidate('],
+  ],
+  [
+    'contact-claim-prelimit',
+    'src/lib/contact-enrichment/store.ts',
+    ['JOIN "candidate_privacy_projection"', 'LIMIT ${limit}'],
+  ],
+  [
+    'contact-provider-zero-call',
+    'src/lib/contact-enrichment/worker.ts',
+    ['requireCandidatePrivacyAllowed(', 'providers.startFullEnrich('],
+  ],
+  [
+    'late-webhook-restrictive',
+    'src/lib/contact-enrichment/webhook-handler.ts',
+    ['requireCandidatePrivacyAllowed(', 'applyFullEnrichWebhookTransition('],
+  ],
 ] as const;
 
 // Some contract ids are exercised in the focused Memory/JWT tests or the
@@ -32,6 +122,7 @@ const enforcementContracts = [
 const registeredSurfaceTestIds = new Set([
   ...enforcementContracts.map(([testId]) => testId),
   'admission-atomic',
+  'approved-source-jwt',
   'no-leak-canary',
   'privacy-config-contract',
   'privacy-jwt-contract',

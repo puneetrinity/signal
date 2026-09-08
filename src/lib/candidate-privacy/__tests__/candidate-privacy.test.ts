@@ -7,7 +7,10 @@ import {
   HttpCandidatePrivacyMemoryClient,
 } from '../memory-client';
 import { anchorToEligibilitySubject } from '../models';
-import { signCandidatePrivacyJWT } from '@/lib/sourcing/activegraph-auth';
+import {
+  signCandidatePrivacyJWT,
+  signSourcedCandidateIngestJWT,
+} from '@/lib/sourcing/activegraph-auth';
 
 const originalEnvironment = { ...process.env };
 
@@ -56,28 +59,40 @@ describe('Discover candidate privacy contract', () => {
       eligibilityBatchSize: 200,
       feedPageSize: 500,
     });
-    expect(() => loadCandidatePrivacyConfig({ NODE_ENV: 'test', ACTIVEGRAPH_URL: 'https://u:p@example.test' }))
-      .toThrow('candidate_privacy_configuration_invalid');
-    expect(() => loadCandidatePrivacyConfig({
-      NODE_ENV: 'test',
-      ACTIVEGRAPH_URL: 'https://example.test',
-      SIGNAL_CANDIDATE_PRIVACY_STALE_MS: '300001',
-    })).toThrow('candidate_privacy_configuration_invalid');
-    expect(() => loadCandidatePrivacyConfig({
-      NODE_ENV: 'test',
-      ACTIVEGRAPH_URL: 'https://example.test',
-      SIGNAL_CANDIDATE_PRIVACY_REBUILD_LEASE_MS: '59999',
-    })).toThrow('candidate_privacy_configuration_invalid');
-    expect(() => loadCandidatePrivacyConfig({
-      NODE_ENV: 'test',
-      ACTIVEGRAPH_URL: 'https://example.test',
-      SIGNAL_CANDIDATE_PRIVACY_REBUILD_LEASE_MS: '900001',
-    })).toThrow('candidate_privacy_configuration_invalid');
-    expect(() => loadCandidatePrivacyConfig({
-      NODE_ENV: 'test',
-      ACTIVEGRAPH_URL: 'https://example.test',
-      SIGNAL_CANDIDATE_PRIVACY_ACTOR_ID: 'sourcing',
-    })).toThrow('candidate_privacy_configuration_invalid');
+    expect(() =>
+      loadCandidatePrivacyConfig({
+        NODE_ENV: 'test',
+        ACTIVEGRAPH_URL: 'https://u:p@example.test',
+      }),
+    ).toThrow('candidate_privacy_configuration_invalid');
+    expect(() =>
+      loadCandidatePrivacyConfig({
+        NODE_ENV: 'test',
+        ACTIVEGRAPH_URL: 'https://example.test',
+        SIGNAL_CANDIDATE_PRIVACY_STALE_MS: '300001',
+      }),
+    ).toThrow('candidate_privacy_configuration_invalid');
+    expect(() =>
+      loadCandidatePrivacyConfig({
+        NODE_ENV: 'test',
+        ACTIVEGRAPH_URL: 'https://example.test',
+        SIGNAL_CANDIDATE_PRIVACY_REBUILD_LEASE_MS: '59999',
+      }),
+    ).toThrow('candidate_privacy_configuration_invalid');
+    expect(() =>
+      loadCandidatePrivacyConfig({
+        NODE_ENV: 'test',
+        ACTIVEGRAPH_URL: 'https://example.test',
+        SIGNAL_CANDIDATE_PRIVACY_REBUILD_LEASE_MS: '900001',
+      }),
+    ).toThrow('candidate_privacy_configuration_invalid');
+    expect(() =>
+      loadCandidatePrivacyConfig({
+        NODE_ENV: 'test',
+        ACTIVEGRAPH_URL: 'https://example.test',
+        SIGNAL_CANDIDATE_PRIVACY_ACTOR_ID: 'sourcing',
+      }),
+    ).toThrow('candidate_privacy_configuration_invalid');
   });
 
   it('privacy-jwt-contract: signs only the Memory read identity', async () => {
@@ -94,6 +109,26 @@ describe('Discover candidate privacy contract', () => {
     expect(String(payload.scopes)).not.toContain('write');
     expect(payload.jti).toEqual(expect.any(String));
     expect((payload.exp ?? 0) - (payload.iat ?? 0)).toBe(300);
+  });
+
+  it('approved-source-jwt: signs only the fixed source-writer identity', async () => {
+    const token = await signSourcedCandidateIngestJWT('org_42', 'request-42');
+    const payload = decodeJwt(token);
+    expect(payload).toMatchObject({
+      iss: 'signal',
+      sub: 'signal-service',
+      aud: 'activekg',
+      tenant_id: 'org_42',
+      actor_type: 'service',
+      scopes: ['candidate-source:write'],
+      request_id: 'request-42',
+    });
+    expect(String(payload.scopes)).not.toContain('kg:write');
+    expect(payload.jti).toEqual(expect.any(String));
+    expect((payload.exp ?? 0) - (payload.iat ?? 0)).toBe(300);
+    await expect(signSourcedCandidateIngestJWT('platform')).rejects.toThrow(
+      'sourced_candidate_tenant_invalid',
+    );
   });
 
   it('privacy-memory-contract: validates a complete eligibility response', async () => {

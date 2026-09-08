@@ -9,9 +9,11 @@ import {
   markCrustdataReceiptMemoryIngested,
   prismaCrustdataReceiptStore,
 } from '../crustdata-acquisition';
+import { buildActiveGraphCandidatePayload } from '../activegraph-client';
 import {
   enqueuePublicMemoryIngestOutbox,
   hydrateOutboxCandidate,
+  hydrateOutboxIngestOptions,
   type PublicMemoryOutboxEnqueueInput,
   type PublicMemoryOutboxPayload,
 } from '../public-memory-ingest-outbox';
@@ -56,11 +58,13 @@ function outboxInput({
   linkedinId,
   globalCandidateId,
   crustdataPersonId,
+  acquisitionReceiptId,
 }: {
   signalCandidateId: string;
   linkedinId: string;
   globalCandidateId: string;
   crustdataPersonId: number;
+  acquisitionReceiptId: string;
 }): PublicMemoryOutboxEnqueueInput {
   return {
     candidate: {
@@ -106,6 +110,9 @@ function outboxInput({
     options: {
       profileObservedAt: new Date('2026-07-29T00:00:00.000Z'),
       acquisitionGeneration: 1,
+      acquisitionReceiptId,
+      acquisitionSlot: 'exact',
+      expectedGlobalCandidateId: globalCandidateId,
     },
     expectedGlobalCandidateId: globalCandidateId,
   };
@@ -275,45 +282,89 @@ describePostgres(
       });
       expect(fresh.reused).toBe(false);
 
+      const ingestInputs = [
+        outboxInput({
+          signalCandidateId: goodSignalId,
+          linkedinId: 'good-person',
+          globalCandidateId: GOOD_GLOBAL_ID,
+          crustdataPersonId: 101,
+          acquisitionReceiptId: fresh.receiptId,
+        }),
+        outboxInput({
+          signalCandidateId: badSignalId,
+          linkedinId: 'bad-person',
+          globalCandidateId: BAD_GLOBAL_ID,
+          crustdataPersonId: 202,
+          acquisitionReceiptId: fresh.receiptId,
+        }),
+      ];
       await enqueuePublicMemoryIngestOutbox({
         tenantId,
         sourcingRequestId: requestId,
-        candidates: [
-          outboxInput({
-            signalCandidateId: goodSignalId,
-            linkedinId: 'good-person',
-            globalCandidateId: GOOD_GLOBAL_ID,
-            crustdataPersonId: 101,
-          }),
-          outboxInput({
-            signalCandidateId: badSignalId,
-            linkedinId: 'bad-person',
-            globalCandidateId: BAD_GLOBAL_ID,
-            crustdataPersonId: 202,
-          }),
-        ],
+        candidates: ingestInputs,
       });
+
+      const durableKeys = new Set<string>();
+      const deliveryStatuses: string[] = [];
+      const deliver = (
+        candidate: PublicMemoryOutboxEnqueueInput['candidate'],
+        options: PublicMemoryOutboxEnqueueInput['options'],
+      ) => {
+        const payload = buildActiveGraphCandidatePayload(
+          tenantId,
+          candidate,
+          [],
+          requestId,
+          options,
+        );
+        const deliveryStatus = durableKeys.has(payload.idempotency_key)
+          ? 'replayed'
+          : 'recorded';
+        durableKeys.add(payload.idempotency_key);
+        deliveryStatuses.push(deliveryStatus);
+        return {
+          success: true,
+          signalCandidateId: candidate.id,
+          memoryCandidateId: null,
+          globalCandidateId: options.expectedGlobalCandidateId ?? null,
+          sourceRecordId: payload.idempotency_key,
+          resolutionStatus: 'matched',
+          deliveryStatus: deliveryStatus as 'recorded' | 'replayed',
+          sourceIdentityId: randomUUID(),
+          sourceObservationId: randomUUID(),
+          ingestReceiptId: payload.idempotency_key,
+          errorCode: null,
+        };
+      };
+
+      // The synchronous send lands first. The durable outbox reconstructs the
+      // same acquisition identities and therefore receives replay receipts.
+      for (const input of ingestInputs) {
+        expect(deliver(input.candidate, input.options).deliveryStatus).toBe(
+          'recorded',
+        );
+      }
 
       const confirmed = await runPublicMemoryIngestCycle({
         concurrency: 2,
-        ingest: async (row) => ({
-          success: true,
-          signalCandidateId: row.signalCandidateId,
-          memoryCandidateId: `memory-${row.signalCandidateId}`,
-          globalCandidateId:
-            row.signalCandidateId === goodSignalId
-              ? GOOD_GLOBAL_ID
-              : BAD_GLOBAL_ID,
-          sourceRecordId: row.signalCandidateId,
-          resolutionStatus: 'created',
-          errorCode: null,
-        }),
+        ingest: async (row) =>
+          deliver(
+            hydrateOutboxCandidate(row.payload),
+            hydrateOutboxIngestOptions(row.payload.options),
+          ),
       });
       expect(confirmed).toEqual({
         claimed: 2,
         confirmed: 2,
         failed: 0,
       });
+      expect(deliveryStatuses).toEqual([
+        'recorded',
+        'recorded',
+        'replayed',
+        'replayed',
+      ]);
+      expect(durableKeys.size).toBe(2);
       expect(
         await markCrustdataReceiptMemoryIngested(
           tenantId,
@@ -321,6 +372,13 @@ describePostgres(
           { candidateCount: 2 },
         ),
       ).toBe(true);
+      expect(
+        await markCrustdataReceiptMemoryIngested(
+          tenantId,
+          fresh.receiptId,
+          { candidateCount: 2 },
+        ),
+      ).toBe(false);
 
       const outboxRows = await prisma.publicMemoryIngestOutbox.findMany({
         where: { tenantId },

@@ -22,6 +22,7 @@ jobs:
       - run: npm run test:schema-control
       - run: npm run test:candidate-privacy-surfaces
       - run: npm run test:candidate-privacy
+      - run: npm run test:sourced-candidate-ingest
       - run: npm run typecheck
       - run: npm test
 
