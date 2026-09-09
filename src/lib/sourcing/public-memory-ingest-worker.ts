@@ -41,8 +41,33 @@ export interface PublicMemoryIngestWorkerOptions {
 function sanitizeFailureCode(result: CandidateIngestResult): string {
   const code = result.errorCode?.toLowerCase();
   if (code && /^[a-z0-9_]{1,80}$/.test(code)) return code;
-  if (result.success && !result.globalCandidateId) return 'missing_global_id';
+  if (
+    result.success &&
+    !result.globalCandidateId &&
+    result.resolutionStatus !== 'conflict_review_required'
+  ) {
+    return 'missing_global_id';
+  }
   return 'resolve_failed';
+}
+
+function isTerminalFailure(result: CandidateIngestResult): boolean {
+  const code = sanitizeFailureCode(result);
+  if (
+    [
+      'auth_configuration',
+      'invalid_adapter_input',
+      'invalid_contract',
+      'response_too_large',
+      'identity_mismatch',
+    ].includes(code)
+  ) {
+    return true;
+  }
+  const statusMatch = /^http_(\d{3})$/.exec(code);
+  if (!statusMatch) return false;
+  const status = Number(statusMatch[1]);
+  return status >= 400 && status < 500 && ![408, 425, 429].includes(status);
 }
 
 async function processRow({
@@ -96,6 +121,7 @@ async function processRow({
     if (
       isConfirmedCandidateIngestResult(result) &&
       expectedGlobalCandidateId &&
+      result.resolutionStatus !== 'conflict_review_required' &&
       result.globalCandidateId !== expectedGlobalCandidateId
     ) {
       await store.fail({
@@ -120,6 +146,7 @@ async function processRow({
       row,
       errorCode: sanitizeFailureCode(result),
       maxAttempts,
+      terminal: isTerminalFailure(result),
       now: now(),
     });
     return false;
@@ -160,7 +187,10 @@ export async function runPublicMemoryIngestCycle(
       candidate,
       generateTagsFromCandidate(candidate),
       row.sourcingRequestId ?? undefined,
-      hydrateOutboxIngestOptions(row.payload.options),
+      {
+        ...hydrateOutboxIngestOptions(row.payload.options),
+        expectedGlobalCandidateId: row.payload.expectedGlobalCandidateId,
+      },
     );
   };
   const ingest = options.ingest ?? defaultIngest;

@@ -375,21 +375,34 @@ function median(values: number[]): number {
 }
 
 function summarizeSourceMetrics(
-  candidates: Array<{ sourceType: CandidateSourceType; fitScore: number | null }>,
+  candidates: Array<{
+    sourceType: CandidateSourceType;
+    fitScore: number | null;
+  }>,
 ): Record<CandidateSourceType, SourceMetricEntry> {
-  return Object.fromEntries(CANDIDATE_SOURCE_TYPES.map((sourceType) => {
-    const matching = candidates.filter((candidate) => candidate.sourceType === sourceType);
-    const scores = matching
-      .map((candidate) => candidate.fitScore)
-      .filter((score): score is number => Number.isFinite(score));
-    return [sourceType, {
-      count: matching.length,
-      share: candidates.length === 0 ? 0 : matching.length / candidates.length,
-      fitScore: scores.length === 0
-        ? null
-        : { min: Math.min(...scores), median: median(scores), max: Math.max(...scores) },
-    }];
-  })) as Record<CandidateSourceType, SourceMetricEntry>;
+  return Object.fromEntries(
+    CANDIDATE_SOURCE_TYPES.map((sourceType) => {
+      const matching = candidates.filter((candidate) => candidate.sourceType === sourceType);
+      const scores = matching
+        .map((candidate) => candidate.fitScore)
+        .filter((score): score is number => Number.isFinite(score));
+      return [
+        sourceType,
+        {
+          count: matching.length,
+          share: candidates.length === 0 ? 0 : matching.length / candidates.length,
+          fitScore:
+            scores.length === 0
+              ? null
+              : {
+                  min: Math.min(...scores),
+                  median: median(scores),
+                  max: Math.max(...scores),
+                },
+        },
+      ];
+    }),
+  ) as Record<CandidateSourceType, SourceMetricEntry>;
 }
 
 function formatUtcDay(date = new Date()): string {
@@ -414,7 +427,13 @@ async function getDiscoveryQueryBudget(
   skippedReason: OrchestratorResult['discoverySkippedReason'];
 }> {
   if (dailyCap <= 0) {
-    return { allowed: true, maxQueries, key: null, reservedQueries: 0, skippedReason: null };
+    return {
+      allowed: true,
+      maxQueries,
+      key: null,
+      reservedQueries: 0,
+      skippedReason: null,
+    };
   }
 
   try {
@@ -1318,15 +1337,21 @@ export async function runSourcingOrchestrator(
       'ActiveGraph home pool disabled (legacy and public hydration flags are false)',
     );
   }
-  publicMemory.platformExclusionActive =
-    canApplyPlatformPublicExclusions({
-      excludeKnownEnabled: config.excludeKnownEnabled,
-      publicMemoryHydrationEnabled:
-        config.publicMemoryHydrationEnabled,
-      platformExclusionEnabled: config.platformExclusionEnabled,
-      publicSearchAvailable: publicMemory.searchAvailable,
-    });
-  log.info({ requestId, addedFromHome, homeSearchMode, totalPool: poolForRanking.length }, 'Merged ActiveGraph candidates into ranking pool');
+  publicMemory.platformExclusionActive = canApplyPlatformPublicExclusions({
+    excludeKnownEnabled: config.excludeKnownEnabled,
+    publicMemoryHydrationEnabled: config.publicMemoryHydrationEnabled,
+    platformExclusionEnabled: config.platformExclusionEnabled,
+    publicSearchAvailable: publicMemory.searchAvailable,
+  });
+  log.info(
+    {
+      requestId,
+      addedFromHome,
+      homeSearchMode,
+      totalPool: poolForRanking.length,
+    },
+    'Merged ActiveGraph candidates into ranking pool',
+  );
 
   const materializedPublicLocalIds = new Set<string>();
   const materializedPrivateLocalIds = new Set<string>();
@@ -1661,7 +1686,11 @@ export async function runSourcingOrchestrator(
       poolPreResolvedRoles = batchResult.resolutions;
     }
     log.info(
-      { requestId, mode: config.roleGroqShadowMode ? 'shadow' : 'active', ...batchResult.metrics },
+      {
+        requestId,
+        mode: config.roleGroqShadowMode ? 'shadow' : 'active',
+        ...batchResult.metrics,
+      },
       'Role batch resolution complete (pool)',
     );
   }
@@ -2376,8 +2405,9 @@ export async function runSourcingOrchestrator(
                     submittedExclusionCount: spillExclusionIds.length,
                     ...(spillExclusion
                       ? {
-                          publicExclusionTelemetry:
-                            { ...spillExclusion.telemetry },
+                          publicExclusionTelemetry: {
+                            ...spillExclusion.telemetry,
+                          },
                         }
                       : {}),
                   },
@@ -2755,36 +2785,38 @@ export async function runSourcingOrchestrator(
             try {
               await assertCurrentExecution();
               const queued = await enqueuePublicMemoryIngestOutbox({
-                  tenantId,
-                  sourcingRequestId: requestId,
-                  candidates: mappedForRanking.map((candidate) => {
-                    const acquisition =
-                      candidate.acquisitionRung === 'exact'
-                        ? exactAcquisition
-                        : spillAcquisition;
-                    if (!acquisition) {
-                      throw new CrustdataAcquisitionSafetyError(
-                        'memory_ingest_failed',
-                        `No acquisition receipt matched rung ${candidate.acquisitionRung}`,
-                      );
-                    }
-                    return {
+                tenantId,
+                sourcingRequestId: requestId,
+                candidates: mappedForRanking.map((candidate) => {
+                  const acquisition =
+                    candidate.acquisitionRung === 'exact' ? exactAcquisition : spillAcquisition;
+                  if (!acquisition) {
+                    throw new CrustdataAcquisitionSafetyError(
+                      'memory_ingest_failed',
+                      `No acquisition receipt matched rung ${candidate.acquisitionRung}`,
+                    );
+                  }
+                  return {
+                    candidate,
+                    options: {
+                      publicMarket: candidate.publicMarket,
+                      publicCandidateRoleFamily: candidate.publicCandidateRoleFamily,
+                      profileObservedAt: acquisition.acquiredAt,
+                      acquisitionGeneration,
+                      acquisitionReceiptId: acquisition.receiptId,
+                      acquisitionSlot: candidate.acquisitionRung === 'exact' ? 'exact' : 'spill',
+                      expectedGlobalCandidateId: expectedGlobalCandidateIdForCandidate(
+                        candidate,
+                        publicGlobalIdByIdentity,
+                      ),
+                    },
+                    expectedGlobalCandidateId: expectedGlobalCandidateIdForCandidate(
                       candidate,
-                      options: {
-                        publicMarket: candidate.publicMarket,
-                        publicCandidateRoleFamily:
-                          candidate.publicCandidateRoleFamily,
-                        profileObservedAt: acquisition.acquiredAt,
-                        acquisitionGeneration,
-                      },
-                      expectedGlobalCandidateId:
-                        expectedGlobalCandidateIdForCandidate(
-                          candidate,
-                          publicGlobalIdByIdentity,
-                        ),
-                    };
-                  }),
-                });
+                      publicGlobalIdByIdentity,
+                    ),
+                  };
+                }),
+              });
               publicMemory.ingestQueued += queued;
               publicMemory.ingestPending += queued;
             } catch {
@@ -2988,6 +3020,12 @@ export async function runSourcingOrchestrator(
                       publicOptions?.publicCandidateRoleFamily,
                     profileObservedAt: acquisition.acquiredAt,
                     acquisitionGeneration,
+                    acquisitionReceiptId: acquisition.receiptId,
+                    acquisitionSlot: acquisition.metadata.rungId === 'exact' ? 'exact' : 'spill',
+                    expectedGlobalCandidateId: expectedGlobalCandidateIdForCandidate(
+                      candidate,
+                      publicGlobalIdByIdentity,
+                    ),
                   };
                 },
               );
@@ -3511,7 +3549,14 @@ export async function runSourcingOrchestrator(
             crustdataAcquisition,
           };
 
-          log.info({ requestId, resolvedTrack: trackDecision?.track ?? null, ...result }, 'Orchestrator complete via Crustdata direct sync pathway');
+          log.info(
+            {
+              requestId,
+              resolvedTrack: trackDecision?.track ?? null,
+              ...result,
+            },
+            'Orchestrator complete via Crustdata direct sync pathway',
+          );
           return result;
         }
 
@@ -4184,7 +4229,11 @@ export async function runSourcingOrchestrator(
     : null;
 
   // 2. Role guard (tech only) — max techTop20RoleCap candidates with roleScore < techTop20RoleMin
-  let roleGuardResult = { demoted: 0, noReplacementCount: 0, epsilonBlockedCount: 0 };
+  let roleGuardResult = {
+    demoted: 0,
+    noReplacementCount: 0,
+    epsilonBlockedCount: 0,
+  };
   if (guardsEnabled) {
     roleGuardResult = guardedTopKSwap({
       items: assembled,
@@ -4208,7 +4257,11 @@ export async function runSourcingOrchestrator(
   }
 
   // 3. Skill floor (tech only) — prefer skillScore >= techTop20SkillMin
-  let skillFloorResult = { demoted: 0, noReplacementCount: 0, epsilonBlockedCount: 0 };
+  let skillFloorResult = {
+    demoted: 0,
+    noReplacementCount: 0,
+    epsilonBlockedCount: 0,
+  };
   if (guardsEnabled) {
     skillFloorResult = guardedTopKSwap({
       items: assembled,
@@ -4348,7 +4401,10 @@ export async function runSourcingOrchestrator(
 
     const scoredEntry = scoredPool.find((sc) => sc.candidateId === a.candidateId);
     if (scoredEntry) {
-      const bucket = skillScoreSumBySource[a.sourceType] ?? { sum: 0, count: 0 };
+      const bucket = skillScoreSumBySource[a.sourceType] ?? {
+        sum: 0,
+        count: 0,
+      };
       bucket.sum += scoredEntry.fitBreakdown.skillScore;
       bucket.count++;
       skillScoreSumBySource[a.sourceType] = bucket;

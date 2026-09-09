@@ -30,6 +30,9 @@ try {
   const retiredPath = resolve(copyRoot, 'src/lib/legacy-retirement.ts');
   const clientPath = resolve(copyRoot, 'src/lib/candidate-privacy/memory-client.ts');
   const processorPath = resolve(copyRoot, 'src/lib/candidate-privacy/processor.ts');
+  const sourceAuthPath = resolve(copyRoot, 'src/lib/sourcing/activegraph-auth.ts');
+  const sourceClientPath = resolve(copyRoot, 'src/lib/sourcing/activegraph-client.ts');
+  const sourceAdapterPath = resolve(copyRoot, 'src/lib/sourcing/sourced-candidate-adapter.ts');
 
   const mutations = [
     async () => {
@@ -118,6 +121,49 @@ try {
         )}${source.slice(end)}`;
       await writeFile(processorPath, mutated);
       return { paths: [[processorPath, original]] };
+    },
+    async () => {
+      const original = await readFile(sourceAuthPath);
+      await writeFile(
+        sourceAuthPath,
+        original
+          .toString('utf8')
+          .replace(/scopes:\s*\[["']candidate-source:write["']\]/, 'scopes: ["kg:write"]'),
+      );
+      return { paths: [[sourceAuthPath, original]] };
+    },
+    async () => {
+      const original = await readFile(sourceClientPath);
+      await writeFile(
+        sourceClientPath,
+        original
+          .toString('utf8')
+          .replace('await requireNewCandidateAllowed({', 'await Promise.resolve({'),
+      );
+      return { paths: [[sourceClientPath, original]] };
+    },
+    async () => {
+      const original = await readFile(sourceClientPath);
+      await writeFile(
+        sourceClientPath,
+        original
+          .toString('utf8')
+          .replace('/sourced-candidates/ingest', '/candidates/resolve/signal/candidate'),
+      );
+      return { paths: [[sourceClientPath, original]] };
+    },
+    async () => {
+      const original = await readFile(sourceAdapterPath);
+      await writeFile(
+        sourceAdapterPath,
+        original
+          .toString('utf8')
+          .replace(
+            'normalized_profile: buildProfile(candidate, linkedinUrl, options)',
+            'normalized_profile: candidate.crustdata',
+          ),
+      );
+      return { paths: [[sourceAdapterPath, original]] };
     },
   ];
   mutationCount = mutations.length;

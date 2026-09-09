@@ -22,6 +22,7 @@
     "test:candidate-privacy-surfaces": "node scripts/test-candidate-privacy-surfaces.mjs",
     "test:candidate-privacy": "vitest run src/lib/candidate-privacy/__tests__/candidate-privacy.test.ts src/lib/candidate-privacy/__tests__/surface-contract.test.ts",
     "test:candidate-privacy:pg": "RUN_SIGNAL_CANDIDATE_PRIVACY_POSTGRES=1 vitest run src/lib/candidate-privacy/__tests__/candidate-privacy-postgres.integration.test.ts --no-file-parallelism",
+    "test:sourced-candidate-ingest": "SIGNAL_CANDIDATE_PRIVACY_TEST_ADAPTER=disposable_passthrough vitest run src/lib/sourcing/__tests__/sourced-candidate-adapter.test.ts src/lib/sourcing/__tests__/activegraph-client.test.ts src/lib/sourcing/__tests__/activegraph-ingest.test.ts src/lib/sourcing/__tests__/public-memory-ingest-outbox.test.ts src/lib/sourcing/__tests__/public-memory-ingest-worker.test.ts src/lib/candidate-privacy/__tests__/candidate-privacy.test.ts src/lib/candidate-privacy/__tests__/surface-contract.test.ts --no-file-parallelism",
     "db:schema:adopt-existing": "node scripts/schema-control/adopt-existing.mjs",
     "db:schema:provision-runtime-role": "node scripts/schema-control/provision-runtime-role.mjs",
     "db:migrate:release": "node scripts/schema-control/migrate-release.mjs",

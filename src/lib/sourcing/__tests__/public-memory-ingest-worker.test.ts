@@ -29,7 +29,13 @@ function payload(
       crustdata: null,
       snapshot: null,
     },
-    options: {},
+    options: {
+      profileObservedAt: '2026-09-07T12:00:00.000Z',
+      acquisitionGeneration: 1,
+      acquisitionReceiptId: 'receipt:exact:one',
+      acquisitionSlot: 'exact',
+      expectedGlobalCandidateId,
+    },
   };
 }
 
@@ -58,10 +64,14 @@ function ingestResult(
   return {
     success,
     signalCandidateId,
-    memoryCandidateId: success ? 'memory' : null,
+    memoryCandidateId: null,
     globalCandidateId,
-    sourceRecordId: success ? signalCandidateId : null,
+    sourceRecordId: success ? 'a'.repeat(64) : null,
     resolutionStatus: success ? 'matched' : null,
+    deliveryStatus: success ? 'recorded' : null,
+    sourceIdentityId: success ? '33333333-3333-4333-8333-333333333333' : null,
+    sourceObservationId: success ? '44444444-4444-4444-8444-444444444444' : null,
+    ingestReceiptId: success ? 'a'.repeat(64) : null,
     errorCode: success ? null : 'resolve_failed',
   };
 }
@@ -201,15 +211,54 @@ describe('public Memory ingest worker', () => {
     ]);
   });
 
+  it('acknowledges durable conflict evidence without creating a global link identity', async () => {
+    const store = new FakeStore([row('conflict', GLOBAL_ONE)]);
+    const result: CandidateIngestResult = {
+      success: true,
+      signalCandidateId: 'signal-conflict',
+      memoryCandidateId: null,
+      globalCandidateId: null,
+      sourceRecordId: 'a'.repeat(64),
+      resolutionStatus: 'conflict_review_required',
+      deliveryStatus: 'recorded',
+      sourceIdentityId: null,
+      sourceObservationId: '44444444-4444-4444-8444-444444444444',
+      ingestReceiptId: 'a'.repeat(64),
+      errorCode: null,
+    };
+
+    const summary = await runPublicMemoryIngestCycle({
+      store,
+      ingest: vi.fn().mockResolvedValue(result),
+    });
+
+    expect(summary).toEqual({ claimed: 1, confirmed: 1, failed: 0 });
+    expect(store.acknowledged).toEqual(['conflict']);
+    expect(store.failures).toEqual([]);
+  });
+
+  it.each([
+    ['http_451', true],
+    ['transport', false],
+    ['http_429', false],
+  ])('classifies %s with terminal=%s', async (errorCode, terminal) => {
+    const store = new FakeStore([row(errorCode)]);
+    const result = ingestResult(null, false, `signal-${errorCode}`);
+    result.errorCode = errorCode;
+
+    await runPublicMemoryIngestCycle({
+      store,
+      ingest: vi.fn().mockResolvedValue(result),
+    });
+
+    expect(store.failures).toEqual([{ id: errorCode, errorCode, terminal }]);
+  });
+
   it('does not ACK a result without a durable source record', async () => {
     const store = new FakeStore([row('missing-source')]);
     const result = {
-      ...ingestResult(
-        GLOBAL_ONE,
-        true,
-        'signal-missing-source',
-      ),
-      sourceRecordId: null,
+      ...ingestResult(GLOBAL_ONE, true, 'signal-missing-source'),
+      ingestReceiptId: null,
     };
 
     const summary = await runPublicMemoryIngestCycle({

@@ -75,6 +75,33 @@ const REQUIRED_PATTERNS = new Map([
     /JOIN "candidate_privacy_projection"/,
   ]],
   ['src/lib/sourcing/public-memory-ingest-worker.ts', [/requireCandidatePrivacyAllowed\(/]],
+  [
+    'src/lib/sourcing/sourced-candidate-adapter.ts',
+    [
+      /provider_namespace:\s*PROVIDER_NAMESPACE/,
+      /normalized_profile:\s*buildProfile\(/,
+      /sourced_candidate_private_value_refused/,
+    ],
+  ],
+  [
+    'src/lib/sourcing/activegraph-auth.ts',
+    [
+      /signSourcedCandidateIngestJWT/,
+      /scopes:\s*\[["']candidate-source:write["']\]/,
+      /actor_type:\s*["']service["']/,
+      /\.setSubject\(["']signal-service["']\)/,
+      /tenant_id:\s*tenantId/,
+    ],
+  ],
+  [
+    'src/lib/sourcing/activegraph-client.ts',
+    [
+      /requireNewCandidateAllowed\(/,
+      /signSourcedCandidateIngestJWT\(/,
+      /\/sourced-candidates\/ingest/,
+      /redirect:\s*["']error["']/,
+    ],
+  ],
   ['src/lib/integrations/candidate-graph-sync.ts', [/requireCandidatePrivacyAllowed\(/]],
   ['src/lib/integrations/candidate-graph-worker.ts', [/requireCandidatePrivacyAllowed\(/]],
   ['src/lib/contact-enrichment/store.ts', [
@@ -180,7 +207,10 @@ export async function evaluateCandidatePrivacySurfaces(root) {
     if (!source.includes(row.symbol)) {
       offenders.push(`candidate privacy surface symbol is missing: ${identity}`);
     }
-    if (!surfaceContractTests.includes(`'${row.testId}'`)) {
+    if (
+      !surfaceContractTests.includes(`'${row.testId}'`) &&
+      !surfaceContractTests.includes(`"${row.testId}"`)
+    ) {
       offenders.push(`candidate privacy surface test id is unregistered: ${row.testId}`);
     }
   }
@@ -230,6 +260,35 @@ export async function evaluateCandidatePrivacySurfaces(root) {
   );
   if (/sign(?:ActiveGraph|Service)JWT/.test(privacyClient)) {
     offenders.push('candidate privacy client uses a generic signer');
+  }
+  const sourceClient = await readFile(
+    resolve(root, 'src/lib/sourcing/activegraph-client.ts'),
+    'utf8',
+  );
+  const sourceIngestStart = sourceClient.indexOf(
+    'export async function ingestCandidateWithResult(',
+  );
+  const sourceIngestEnd = sourceClient.indexOf(
+    'export async function ingestCandidate(',
+    sourceIngestStart,
+  );
+  const sourceIngest = sourceClient.slice(sourceIngestStart, sourceIngestEnd);
+  const sourcePrivacy = sourceIngest.indexOf('await requireNewCandidateAllowed(');
+  const sourceSigner = sourceIngest.indexOf('await signSourcedCandidateIngestJWT(');
+  const sourceSend = sourceIngest.indexOf('`${ACTIVEGRAPH_URL}/sourced-candidates/ingest`');
+  if (
+    sourceIngestStart < 0 ||
+    sourcePrivacy < 0 ||
+    sourceSigner < 0 ||
+    sourceSend < 0 ||
+    sourcePrivacy > sourceSigner ||
+    sourceSigner > sourceSend ||
+    sourceIngest.includes('/candidates/resolve/signal/candidate') ||
+    sourceIngest.includes('signActiveGraphJWT(')
+  ) {
+    offenders.push(
+      'approved-provider ingest lost dedicated signer/privacy-before-send/new-route authority',
+    );
   }
   const privacyConfig = await readFile(
     resolve(root, 'src/lib/candidate-privacy/config.ts'),
