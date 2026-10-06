@@ -1,7 +1,32 @@
 import { describe, expect, it } from "vitest";
-import { decideSourcingRetry } from "../request-retry";
+import { decideSourcingRetry,canResumeGovernedPurchase } from "../request-retry";
+
+describe('bounded completed-purchase recovery',()=>{
+  it('allows at most two redrives and preserves only completed purchase state',()=>{
+    const exact={slot:'exact',status:'complete'};
+    for(const receipts of [[exact],[exact,{slot:'spill',status:'complete'}]]){
+      expect(canResumeGovernedPurchase(0,3,receipts)).toBe(true);
+      expect(canResumeGovernedPurchase(1,3,receipts)).toBe(true);
+      expect(canResumeGovernedPurchase(2,3,receipts)).toBe(false);
+      expect(canResumeGovernedPurchase(2,100,receipts)).toBe(false);
+    }
+  });
+  it.each(['started','uncertain','no_dispatch','released'])('never redrives an ambiguous or cancelled %s slot',status=>{
+    expect(canResumeGovernedPurchase(0,3,[{slot:'exact',status}])).toBe(false);
+    expect(canResumeGovernedPurchase(0,3,[{slot:'exact',status:'complete'},{slot:'spill',status}])).toBe(false);
+    expect(canResumeGovernedPurchase(0,3,[])).toBe(false);
+  });
+});
 
 describe("sourcing request acquisition generations", () => {
+  it('never requeues a governed request through legacy refresh or force',()=>{
+    for(const status of ['queued','processing','complete','failed']){
+      for(const callbackStatus of [null,'pending','failed','delivered']){
+        expect(decideSourcingRetry({status,callbackStatus,governed:true,refreshRequested:true,forceSourcingRequested:true}))
+          .toEqual({retryable:false,startsNewAcquisition:false});
+      }
+    }
+  });
   it("keeps the generation for a failed downstream retry", () => {
     expect(
       decideSourcingRetry({

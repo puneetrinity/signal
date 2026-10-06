@@ -10,6 +10,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { verifyServiceJWT } from '@/lib/auth/service-jwt';
 import { requireScope } from '@/lib/auth/service-scopes';
 import { prisma } from '@/lib/prisma';
+import {GovernedRepository} from '@/lib/sourcing/governed-authority';
 import { summarizeIdentitySignals } from '@/lib/sourcing/identity-summary';
 import {
   classifyMatchStrength,
@@ -490,7 +491,19 @@ export async function GET(
     };
   });
 
+  let governed:unknown;
+  if(sourcingRequest.flowRunId) {
+    // Governed delivery always binds the full page of at most100, never a
+    // caller-selected partial list which would fabricate another revision.
+    if(limit!==100)return NextResponse.json({error:'governed_full_delivery_required'},{status:400});
+    try {
+      governed=await new GovernedRepository().call('delivery',[tenantId,sourcingRequest.id,sourcingRequest.executionAttemptId,
+        candidateResults.map((c:{candidate:{id:string}})=>c.candidate.id),sourcingRequest.lastRerankedAt?.toISOString()??null]);
+      if(!governed)throw Error('binding');
+    }catch{return NextResponse.json({error:'governed_delivery_unavailable'},{status:503});}
+  }
   return NextResponse.json({
+    ...(governed?{governed}:{}),
     requestId: sourcingRequest.id,
     externalJobId: sourcingRequest.externalJobId,
     resultCount: persistedRunScores.length,

@@ -6,9 +6,20 @@ on:
     branches: [main]
 
 jobs:
-  quality:
+  sourcing-production-collation:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        locale: ['C', 'en_US.utf8']
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: '55489'
+      PGUSER: postgres
+      PGPASSWORD: local-test-only
+      SIGNAL_SOURCING_DISPOSABLE: '1'
+      SIGNAL_SOURCING_EXPECT_LOCALE: ${{ matrix.locale }}
+      SIGNAL_SOURCING_OWNER_URL: postgresql://signal_collation_owner_test:local-test-only@127.0.0.1:55489/signal_collation_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -16,13 +27,54 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      - name: Create isolated restricted owner database
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-common ca-certificates locales
+          . /etc/os-release
+          pg_keyring=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+          if [ ! -r "$pg_keyring" ]; then
+            pg_keyring=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          fi
+          test -r "$pg_keyring"
+          printf 'deb [signed-by=%s] https://apt.postgresql.org/pub/repos/apt %s-pgdg main\n' "$pg_keyring" "${VERSION_CODENAME:?}" | sudo tee /etc/apt/sources.list.d/wave5b-pgdg.list
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-17
+          sudo locale-gen en_US.UTF-8
+          /usr/lib/postgresql/17/bin/initdb -D "$RUNNER_TEMP/wave5b-pg17" -U postgres --auth-local=trust --auth-host=trust --locale="$SIGNAL_SOURCING_EXPECT_LOCALE" --encoding=UTF8
+          /usr/lib/postgresql/17/bin/pg_ctl -D "$RUNNER_TEMP/wave5b-pg17" -l "$RUNNER_TEMP/wave5b-pg17.log" -o "-h 127.0.0.1 -k $RUNNER_TEMP -p 55489 -c shared_buffers=32MB -c max_connections=30 -c max_parallel_workers=0" -w start
+          psql -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE signal_collation_owner_test LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD 'local-test-only';
+          CREATE DATABASE signal_collation_test OWNER signal_collation_owner_test;
+          SQL
+      - run: npm run test:governed-sourcing:pg
+      - name: Stop owned PostgreSQL 17
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/wave5b-pg17/postmaster.pid"; then
+            /usr/lib/postgresql/17/bin/pg_ctl -D "$RUNNER_TEMP/wave5b-pg17" -m fast -w stop
+          fi
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
       - run: npm run check:no-db-push
       - run: npm run check:schema-control
+      - run: npm run check:governed-sourcing
       - run: npm run check:candidate-privacy
       - run: npm run test:schema-control
       - run: npm run test:candidate-privacy-surfaces
       - run: npm run test:candidate-privacy
       - run: npm run test:sourced-candidate-ingest
+      - run: npm run test:governed-sourcing
       - run: npm run typecheck
       - run: npm test
 
@@ -125,3 +177,23 @@ jobs:
           RUN_SIGNAL_SCHEMA_CONTROL_POSTGRES: "1"
           SIGNAL_SCHEMA_TEST_DATABASE_URL: postgresql://signal_schema_control_test_runner:runner-test-only@127.0.0.1:5432/signal_schema_control_test_ci
         run: npm run test:schema-control:pg
+      - name: Run governed sourcing under a non-superuser owner
+        env:
+          SIGNAL_SOURCING_DISPOSABLE: '1'
+          SIGNAL_SOURCING_OWNER_URL: postgresql://signal_sourcing_owner_test:sourcing-test-only@127.0.0.1:5432/signal_sourcing_test
+        run: |
+          sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE signal_sourcing_owner_test LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD 'sourcing-test-only';
+          CREATE DATABASE signal_sourcing_test OWNER signal_sourcing_owner_test;
+          SQL
+          npm run test:governed-sourcing:pg
+      - name: Prove shared provider capacity on isolated Redis
+        env:
+          SIGNAL_SOURCING_REDIS_DISPOSABLE: '1'
+          SIGNAL_SOURCING_REDIS_URL: redis://127.0.0.1:56487
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y redis-server
+          redis-server --bind 127.0.0.1 --port 56487 --save '' --appendonly no --maxmemory 32mb --daemonize yes
+          trap 'redis-cli -h 127.0.0.1 -p 56487 shutdown nosave' EXIT
+          npx vitest run --maxWorkers=1 --minWorkers=1 --no-file-parallelism src/lib/sourcing/__tests__/crustdata-rate-gate.test.ts

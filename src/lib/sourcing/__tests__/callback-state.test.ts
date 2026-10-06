@@ -51,7 +51,7 @@ describe("callback delivery state fencing", () => {
 
     expect(buildStaleCallbackWhere(cutoff, "tenant-a")).toEqual({
       callbackStatus: { in: ["failed", "pending"] },
-      status: "complete",
+      OR: [{status:"complete"},{status:"failed",flowRunId:{not:null}}],
       completedAt: { lt: cutoff },
       tenantId: "tenant-a",
     });

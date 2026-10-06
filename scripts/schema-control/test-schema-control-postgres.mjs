@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { ROOT_DIR } from '../lib/database-bootstrap.mjs';
 import { CONTROL_SCHEMA, RUNTIME_ROLE } from './constants.mjs';
 import { beginBoundedTransaction, createPrisma } from './database.mjs';
+import { GOVERNED_FUNCTIONS, GOVERNED_TABLES } from '../check-governed-sourcing.mjs';
 
 if (process.env.RUN_SIGNAL_SCHEMA_CONTROL_POSTGRES !== '1') {
   throw new Error('RUN_SIGNAL_SCHEMA_CONTROL_POSTGRES=1 is required');
@@ -29,6 +30,7 @@ runtimeParsed.password = runtimePassword;
 const runtimeUrl = runtimeParsed.toString();
 const admin = createPrisma(adminUrl);
 let temporaryRoot;
+let historicalRoot;
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -204,10 +206,27 @@ try {
   `);
   assert(afterAdoption[0].count === 0, 'Adoption changed a product row');
 
-  // Reproduce the production 22 -> 23 release boundary. Empty bootstrap has
-  // already proven the full 23-migration fresh-install path; this disposable
-  // rollback removes only the additive lease metadata and its Prisma ledger
-  // row so the real release wrapper must apply migration 23.
+  // Preserve the exact historical 22 -> 23 proof, then prove 23 -> 24.
+  // This is an empty, locally attested test database, never a rollback tool.
+  historicalRoot = await mkdtemp(join(tmpdir(), 'signal-schema-history-'));
+  await mkdir(resolve(historicalRoot, 'prisma/migrations'), { recursive: true });
+  await cp(resolve(ROOT_DIR, 'prisma/schema.prisma'), resolve(historicalRoot, 'prisma/schema.prisma'));
+  const historicalLock = JSON.parse(await readFile(resolve(ROOT_DIR, 'prisma/migrations.lock.json'), 'utf8'));
+  const governedMigration = '20261004000000_governed_sourcing';
+  assert(historicalLock.migrations.at(-1).name === governedMigration, 'Unexpected current migration tail');
+  historicalLock.migrations.pop();
+  for (const migration of historicalLock.migrations) {
+    await cp(resolve(ROOT_DIR, 'prisma/migrations', migration.name), resolve(historicalRoot, 'prisma/migrations', migration.name), { recursive: true });
+  }
+  await writeFile(resolve(historicalRoot, 'prisma/migrations.lock.json'), `${JSON.stringify(historicalLock, null, 2)}\n`);
+  for (const table of GOVERNED_TABLES) {
+    const [row] = await admin.$queryRawUnsafe(`SELECT count(*)::integer count FROM public.${table}`);
+    assert(row.count === 0, 'Historical rehearsal requires empty governed tables');
+  }
+  for (const signature of GOVERNED_FUNCTIONS) await admin.$executeRawUnsafe(`DROP FUNCTION public.${signature}`);
+  for (const table of [...GOVERNED_TABLES].reverse()) await admin.$executeRawUnsafe(`DROP TABLE public.${table}`);
+  await admin.$executeRawUnsafe('ALTER TABLE public.job_sourcing_requests DROP COLUMN flow_run_id, DROP COLUMN artifact_hash, DROP COLUMN protocol_version');
+  await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1', governedMigration);
   await admin.$executeRawUnsafe('DROP INDEX public.candidate_privacy_rebuild_lease_idx');
   await admin.$executeRawUnsafe(`
     ALTER TABLE public.candidate_privacy_sync_state
@@ -219,7 +238,11 @@ try {
     WHERE migration_name = '20260824000000_add_candidate_privacy_rebuild_lease'
   `);
   await requireSuccess(
-    await runNode('scripts/schema-control/migrate-release.mjs', releaseEnvironment),
+    await runNode('scripts/schema-control/migrate-release.mjs', {
+      ...releaseEnvironment,
+      SIGNAL_SCHEMA_CONTROL_TEST_ROOT: historicalRoot,
+      SIGNAL_SCHEMA_DISPOSABLE_SINGLE_CREDENTIAL: '1',
+    }),
     '22-to-23 privacy release',
   );
   const [leaseUpgrade] = await admin.$queryRawUnsafe(`
@@ -250,6 +273,19 @@ try {
       leaseUpgrade.lease_index_exists &&
       leaseUpgrade.successful_rows === 1,
     'Release wrapper did not apply migration 23 exactly once',
+  );
+
+  await requireSuccess(
+    await runNode('scripts/schema-control/migrate-release.mjs', releaseEnvironment),
+    '23-to-24 governed sourcing release',
+  );
+  await requireSuccess(
+    await runNode('scripts/schema-control/provision-runtime-role.mjs', {
+      ...commonIdentity, DIRECT_URL: adminUrl,
+      SIGNAL_RUNTIME_DATABASE_URL: runtimeUrl,
+      SIGNAL_RUNTIME_ROLE_PASSWORD: runtimePassword,
+    }),
+    'post-release governed runtime-role provision',
   );
 
   await requireSuccess(
@@ -399,4 +435,5 @@ try {
 } finally {
   await admin.$disconnect();
   if (temporaryRoot) await rm(temporaryRoot, { recursive: true, force: true });
+  if (historicalRoot) await rm(historicalRoot, { recursive: true, force: true });
 }

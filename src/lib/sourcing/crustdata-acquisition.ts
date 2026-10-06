@@ -6,6 +6,11 @@ import type { JobRequirements } from "./jd-digest";
 import type { CrustdataSearchResult } from "./crustdata-client";
 import { createCandidateAdmissionProofs } from "@/lib/candidate-privacy/decision";
 import { requireHealthyCandidatePrivacyContext } from "@/lib/candidate-privacy/repository";
+import type {SourcingExecutionFence} from './callback';
+import {z} from 'zod';
+import {GovernedRepository,sendFlowSourcingEvidence} from './governed-authority';
+import {governedEnabled,governedSourceSchema} from './governed-contracts';
+import {acquireCrustdataAccountCapacity,CrustdataNoDispatchError} from './crustdata-rate-gate';
 
 export type CrustdataAcquisitionSlot = "exact" | "spill";
 
@@ -14,6 +19,7 @@ export class CrustdataAcquisitionSafetyError extends Error {
     | "receipt_in_progress"
     | "receipt_missing"
     | "receipt_uncertain"
+    | "receipt_no_dispatch"
     | "receipt_invalid"
     | "receipt_persistence_failed"
     | "memory_ingest_failed";
@@ -64,6 +70,7 @@ export interface CrustdataReceiptStore {
   }): Promise<StoredReceipt>;
   complete(id: string, result: CrustdataSearchResult): Promise<void>;
   markUncertain(id: string, error: string): Promise<void>;
+  markNoDispatch?(id: string): Promise<void>;
 }
 
 interface AcquireDependencies {
@@ -77,12 +84,14 @@ interface AcquireDependencies {
   waitAttempts?: number;
   waitIntervalMs?: number;
   requirePrivacyHealth?: () => Promise<unknown>;
+  beforeReserve?: () => Promise<void>;
 }
 
 export interface AcquireCrustdataSearchInput {
   tenantId: string;
   sourcingRequestId: string;
   acquisitionGeneration: number;
+  executionFence?:SourcingExecutionFence;
   slot: CrustdataAcquisitionSlot;
   requirements: JobRequirements;
   limit: number;
@@ -314,6 +323,7 @@ async function resolveStoredReceipt(
     current = refreshed;
   }
 
+  if(current.status==='no_dispatch')throw new CrustdataAcquisitionSafetyError('receipt_no_dispatch','Provider transport was not invoked');
   if (current.status === "uncertain") {
     throw new CrustdataAcquisitionSafetyError(
       "receipt_uncertain",
@@ -367,6 +377,9 @@ export async function acquireCrustdataSearch(
     );
   }
 
+  // Rate capacity precedes both the Flow grant and durable provider start.
+  // A timeout here has no acquisition receipt and can be fenced/cancelled.
+  await dependencies.beforeReserve?.();
   let receipt: StoredReceipt;
   try {
     receipt = await dependencies.store.reserve({
@@ -405,6 +418,11 @@ export async function acquireCrustdataSearch(
     });
   } catch (error) {
     const message = errorMessage(error);
+    if(error instanceof CrustdataNoDispatchError){
+      if(!dependencies.store.markNoDispatch)throw new CrustdataAcquisitionSafetyError('receipt_persistence_failed','No-dispatch persistence unavailable');
+      await dependencies.store.markNoDispatch(receipt.id);
+      throw new CrustdataAcquisitionSafetyError('receipt_no_dispatch','Provider transport was not invoked');
+    }
     await dependencies.store.markUncertain(receipt.id, message).catch(() => {});
     throw new CrustdataAcquisitionSafetyError(
       "receipt_uncertain",
@@ -447,6 +465,10 @@ export async function acquireCrustdataSearch(
 }
 
 export const prismaCrustdataReceiptStore: CrustdataReceiptStore = {
+  async markNoDispatch(id){
+    const result=await prisma.crustdataAcquisitionReceipt.updateMany({where:{id,status:'started'},data:{status:'no_dispatch',error:'CRUSTDATA_NO_DISPATCH'}});
+    if(result.count!==1)throw Error('CRUSTDATA_NO_DISPATCH_PERSISTENCE_FAILED');
+  },
   async find(tenantId, sourcingRequestId, acquisitionGeneration, slot) {
     return prisma.crustdataAcquisitionReceipt.findUnique({
       where: {
@@ -530,9 +552,69 @@ export async function acquireCrustdataSearchForRequest(
   input: AcquireCrustdataSearchInput,
 ): Promise<AcquiredCrustdataSearch> {
   const { searchPeople } = await import("./crustdata-client");
+  const repository=new GovernedRepository();
+  const request=await prisma.jobSourcingRequest.findFirst({where:{id:input.sourcingRequestId,tenantId:input.tenantId},select:{jobContext:true}});
+  if(!request)throw new CrustdataAcquisitionSafetyError('receipt_invalid','Sourcing request is absent');
+  const rawBinding=await repository.call('execution',[input.tenantId,input.sourcingRequestId,request.jobContext,input.executionFence??null]);
+  if(rawBinding) {
+    const binding=governedSourceSchema.parse(rawBinding),fence=input.executionFence!;
+    const identity={tenantId:input.tenantId,requestId:input.sourcingRequestId,executionAttemptId:fence.executionAttemptId};
+    // Recover lost Flow acknowledgements from actual database receipt state,
+    // never from a worker's assertion or the current requested query shape.
+    const report=async()=>{
+      const evidence=await repository.call('evidence',[input.tenantId,input.sourcingRequestId,input.slot]);
+      if(evidence)await sendFlowSourcingEvidence(binding,identity,evidence);
+    };
+    await report();
+    let active:{grantId:string;providerInputHash:string;expiresAt:string;state:string}|undefined;
+    let receiptId:string|undefined;
+    const transition=(state:string,id?:string)=>{
+      if(!active)throw Error('GOVERNED_GRANT_REQUIRED');
+      return {...active,state,executionAttemptId:fence.executionAttemptId,processingLeaseId:fence.processingLeaseId,...(id?{receiptId:id}:{})};
+    };
+    const store:CrustdataReceiptStore={...prismaCrustdataReceiptStore,
+      async reserve(reservation){
+        if(!governedEnabled())throw Error('GOVERNED_DISABLED');
+        const grantCommand={action:'grant',protocolVersion:1,flowRunId:binding.flowRunId,artifactHash:binding.artifactHash,
+          discoverRequestId:input.sourcingRequestId,executionAttemptId:fence.executionAttemptId,slot:input.slot,
+          rungId:input.metadata.rungId,providerInput:reservation.requestInput};
+        active=z.object({grantId:z.string().uuid(),providerInputHash:z.string().regex(/^[a-f0-9]{64}$/),expiresAt:z.string().datetime({offset:true}),
+          state:z.enum(['issued','started','uncertain','no_dispatch'])}).strict().parse(await sendFlowSourcingEvidence(binding,identity,grantCommand));
+        if(active.state!=='issued' || active.providerInputHash!==reservation.requestFingerprint)throw Error('GOVERNED_GRANT_REFUSED');
+        await repository.call('grantTransition',[input.tenantId,binding.flowRunId,input.slot,transition('issued')]);
+        const stored=await prisma.$transaction(async tx=>{
+          const row=await tx.crustdataAcquisitionReceipt.create({data:{tenantId:input.tenantId,sourcingRequestId:input.sourcingRequestId,
+            acquisitionGeneration:1,slot:input.slot,status:'started',requestFingerprint:reservation.requestFingerprint,
+            requestInput:toJsonValue(reservation.requestInput),requestMetadata:toJsonValue(reservation.requestMetadata)}});
+          await tx.$queryRawUnsafe('SELECT public.signal_sourcing_grant_transition($1,$2::uuid,$3,$4::jsonb)',
+            input.tenantId,binding.flowRunId,input.slot,JSON.stringify(transition('started',row.id)));
+          return row;
+        },{maxWait:2000,timeout:5000});
+        receiptId=stored.id;
+        // The durable local start is enough to prohibit reacquisition. Flow
+        // evidence is recoverable after dispatch; its availability must not
+        // consume a run while preventing the provider HTTP from starting.
+        return stored;
+      },
+      async complete(id,result){await prismaCrustdataReceiptStore.complete(id,result);await report();},
+      async markUncertain(id){
+        await prismaCrustdataReceiptStore.markUncertain(id,'GOVERNED_PROVIDER_UNCERTAIN');
+        await report();
+      },
+    };
+    return acquireCrustdataSearch({...input,reuseOnly:input.reuseOnly||!governedEnabled()},{store,beforeReserve:acquireCrustdataAccountCapacity,
+      search:(requirements,limit,options)=>searchPeople(requirements,limit,{...options,capacityAcquired:true,governed:true,beforeDispatch:async()=>{
+        if(!receiptId || !active || !governedEnabled())throw Error('GOVERNED_GRANT_REQUIRED');
+        // Rate waiting can outlive a grant. Recheck its server-clock deadline
+        // and the current processing lease after waiting, immediately before HTTP.
+        await repository.call('grantTransition',[input.tenantId,binding.flowRunId,input.slot,transition('started',receiptId)]);
+      }}),
+    });
+  }
   return acquireCrustdataSearch(input, {
     store: prismaCrustdataReceiptStore,
-    search: searchPeople,
+    beforeReserve:acquireCrustdataAccountCapacity,
+    search:(requirements,limit,options)=>searchPeople(requirements,limit,{...options,capacityAcquired:true}),
   });
 }
 
