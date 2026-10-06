@@ -1,10 +1,12 @@
 import { createLogger } from '@/lib/logger';
 import { type JobRequirements } from './jd-digest';
+import {acquireCrustdataAccountCapacity,CrustdataNoDispatchError} from './crustdata-rate-gate';
 
 const log = createLogger('CrustdataClient');
 
 const CRUSTDATA_API_KEY = process.env.CRUSTDATA_API_KEY;
-const API_URL = 'https://api.crustdata.com/person/search';
+export const CRUSTDATA_SEARCH_URL = 'https://api.crustdata.com/person/search';
+export const CRUSTDATA_API_VERSION = '2025-11-01';
 
 // ─── Response Types (matching actual Crustdata API response) ─────────────────
 
@@ -227,7 +229,7 @@ function resolveSeniorityBands(seniorityLevel: string | null): string[] {
  * Strict ranking against the full JD happens locally after retrieval.
  * This maximises Crustdata hit rate and avoids over-filtering at the API level.
  */
-export async function searchPeople(
+export function buildCrustdataRequest(
   requirements: JobRequirements,
   limit: number = 300,
   options?: {
@@ -240,11 +242,7 @@ export async function searchPeople(
      */
     excludePersonIds?: number[];
   },
-): Promise<CrustdataSearchResult> {
-  if (!CRUSTDATA_API_KEY) {
-    throw new Error('CRUSTDATA_API_KEY is not configured');
-  }
-
+){
   const conditions: (CrustdataCondition | CrustdataGroup)[] = [];
 
   const excludeIds = (options?.excludePersonIds ?? []).filter((n) => Number.isFinite(n));
@@ -354,6 +352,25 @@ export async function searchPeople(
     requestBody.filters = { op: 'and', conditions };
   }
 
+  return {requestBody,titleFilterUsed,seniorityFilterUsed,excludedKnown:excludeIds.length};
+}
+
+/** Same filter builder as acquisition; preview never applies known-ID exclusions. */
+export function buildCrustdataPreviewRequest(requirements: JobRequirements) {
+  const {requestBody} = buildCrustdataRequest(requirements,1);
+  return {...requestBody,fields:['crustdata_person_id']};
+}
+
+export async function searchPeople(
+  requirements: JobRequirements,
+  limit: number = 300,
+  options?: {excludePersonIds?: number[];beforeDispatch?:()=>Promise<void>;capacityAcquired?:boolean;governed?:boolean},
+): Promise<CrustdataSearchResult> {
+  if (!CRUSTDATA_API_KEY) throw new CrustdataNoDispatchError();
+  let built:ReturnType<typeof buildCrustdataRequest>;
+  try{built=buildCrustdataRequest(requirements,limit,options);}catch{throw new CrustdataNoDispatchError();}
+  const {requestBody,titleFilterUsed,seniorityFilterUsed,excludedKnown} = built;
+
   console.log('\n' + '='.repeat(60));
   console.log('📡 [CRUSTDATA] CONNECTED — OFFICIAL NESTED SCHEMA API');
   console.log(`🎯 [CRUSTDATA] TITLE FILTER: ${titleFilterUsed}`);
@@ -365,18 +382,24 @@ export async function searchPeople(
   console.log('='.repeat(60) + '\n');
 
   log.info(
-    { limit, titleFilterUsed, seniorityFilterUsed, excludedKnown: excludeIds.length },
+    { limit, titleFilterUsed, seniorityFilterUsed, excludedKnown },
     'Searching Crustdata (official person/search)'
   );
 
-  const response = await fetch(API_URL, {
+  try {
+    if(!options?.capacityAcquired)await acquireCrustdataAccountCapacity();
+    await options?.beforeDispatch?.();
+  }catch{throw new CrustdataNoDispatchError();}
+  const response = await fetch(CRUSTDATA_SEARCH_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${CRUSTDATA_API_KEY}`,
-      'x-api-version': '2025-11-01',
+      'x-api-version': CRUSTDATA_API_VERSION,
     },
     body: JSON.stringify(requestBody),
+    // Preserve the shipped legacy transport contract when governance is off.
+    ...(options?.governed?{signal:AbortSignal.timeout(30000),redirect:'error' as const}:{}),
   });
 
   if (!response.ok) {

@@ -23,6 +23,7 @@ import {
   stopContactEnrichmentWorker,
 } from '@/lib/contact-enrichment/worker';
 import { loadCandidatePrivacyConfig } from '@/lib/candidate-privacy/config';
+import {governedEnabled} from './governed-contracts';
 import {
   startCandidatePrivacyProcessor,
   stopCandidatePrivacyProcessor,
@@ -74,6 +75,7 @@ const CALLBACK_REDELIVERY_BATCH_SIZE = parsePositiveInt(
 log.info({ concurrency: CONCURRENCY, redisConfigured: !!process.env.REDIS_URL }, 'Starting sourcing worker');
 
 loadCandidatePrivacyConfig(process.env, { requireProcessor: true });
+governedEnabled(); // Strict startup flag parsing; absent remains OFF.
 startCandidatePrivacyProcessor();
 const worker = startSourcingWorker({ concurrency: CONCURRENCY });
 const PUBLIC_MEMORY_INGEST_ENABLED =

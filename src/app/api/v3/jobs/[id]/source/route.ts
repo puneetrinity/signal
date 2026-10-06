@@ -18,8 +18,10 @@ import { buildJobRequirements, type SourcingJobContextInput } from '@/lib/sourci
 import { resolveTrack } from '@/lib/sourcing/track-resolver';
 import { releaseAbandonedCrustdataReceiptPayloads } from '@/lib/sourcing/crustdata-acquisition';
 import { decideSourcingRetry } from '@/lib/sourcing/request-retry';
-import type { SourcingJobData } from '@/lib/sourcing/types';
+import type { SourceSourcingJobData as SourcingJobData } from '@/lib/sourcing/types';
 import { requireHealthyCandidatePrivacyContext } from '@/lib/candidate-privacy/repository';
+import {GovernedRepository,bindGovernedSource,governedAdmissionRefusal} from '@/lib/sourcing/governed-authority';
+import {governedEnabled,readSourcingBody} from '@/lib/sourcing/governed-contracts';
 
 const log = createLogger('SourcingSourceRoute');
 
@@ -110,16 +112,43 @@ export async function POST(
 
   // Parse body
   let body: z.infer<typeof bodySchema>;
-  try {
-    const raw = await request.json();
-    body = bodySchema.parse(raw);
-  } catch (err) {
-    const message = err instanceof z.ZodError ? err.errors : 'Invalid request body';
-    return NextResponse.json({ success: false, error: message }, { status: 400 });
-  }
-
+  let governedRequest=false;
   const { id: externalJobId } = await params;
   const tenantId = auth.context.tenantId;
+  try {
+    const raw = await readSourcingBody(request);
+    const repository=new GovernedRepository(),tenant=await repository.tenant(tenantId);
+    if(tenant.latched || (raw && typeof raw==='object' && 'protocolVersion' in raw)) {
+      governedRequest=true;
+      // Never strip an envelope into the legacy schema. A durable latch also
+      // refuses old clients after rollout, even while the feature is off.
+      if(!governedEnabled())return NextResponse.json({error:'GOVERNED_DISABLED'},{status:409});
+      if(!tenant.latched || !tenant.callbackUrl)return NextResponse.json({error:'GOVERNED_TENANT_REQUIRED'},{status:409});
+      const bound=await bindGovernedSource(repository,tenantId,raw,{externalJobId,callbackUrl:tenant.callbackUrl,production:process.env.NODE_ENV==='production'}) as
+        {requestId:string;status:string;executionAttemptId:string;acquisitionGeneration:1}|null;
+      if(!bound)throw Error('GOVERNED_UNAVAILABLE');
+      if(bound.status==='queued')await getSourcingQueue().add('source',{
+        kind:'source',requestId:bound.requestId,tenantId,externalJobId,callbackUrl:tenant.callbackUrl,
+        acquisitionGeneration:bound.acquisitionGeneration,executionAttemptId:bound.executionAttemptId,
+      },{jobId:`${bound.requestId}-${bound.executionAttemptId}`,attempts:3,backoff:{type:'exponential',delay:5000}});
+      // A lost response replays the same database binding and queue identity.
+      // Never mark it failed or manufacture a new execution after queue doubt.
+      return NextResponse.json(bound,{status:bound.status==='queued'?202:200});
+    }
+    // Preserve the shipped legacy validation response; governed failures keep
+    // their closed error contract and never fall through to legacy admission.
+    const parsed=bodySchema.safeParse(raw);
+    if(!parsed.success)return NextResponse.json({success:false,error:parsed.error.errors},{status:400});
+    body = parsed.data;
+  } catch (err) {
+    if(err instanceof Error && err.message==='GOVERNED_BODY_TOO_LARGE')return NextResponse.json({error:'GOVERNED_BODY_TOO_LARGE'},{status:413});
+    if(err instanceof SyntaxError && !governedRequest)return NextResponse.json({success:false,error:'Invalid request body'},{status:400});
+    if(err instanceof z.ZodError || err instanceof SyntaxError)return NextResponse.json({error:'Invalid request body'},{status:400});
+    const refusal=governedAdmissionRefusal(err);
+    if(refusal)return NextResponse.json({error:refusal.error},{status:refusal.status});
+    return NextResponse.json({error:'SOURCING_ADMISSION_UNAVAILABLE'},{status:503});
+  }
+
   const jobContextHash = computeJobContextHash(body.jobContext as Record<string, unknown>);
   const executionAttemptId = randomUUID();
 
@@ -150,6 +179,7 @@ export async function POST(
   if (existing) {
     // Allow re-queue for terminal failure states, or if refresh is explicitly requested
     const { retryable, startsNewAcquisition } = decideSourcingRetry({
+      governed:existing.flowRunId!=null,
       status: existing.status,
       callbackStatus: existing.callbackStatus,
       refreshRequested: body.jobContext.refresh === true,

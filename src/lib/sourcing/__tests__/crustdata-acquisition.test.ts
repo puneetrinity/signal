@@ -4,6 +4,9 @@ import type { JobRequirements } from "../jd-digest";
 import type { CrustdataSearchResult } from "../crustdata-client";
 import {
   acquireCrustdataSearch,
+  acquireCrustdataSearchForRequest,
+  prismaCrustdataReceiptStore,
+  buildCrustdataRequestFingerprint,
   applyCrustdataReceiptEffectOnce,
   CrustdataAcquisitionSafetyError,
   markCrustdataReceiptMemoryIngested,
@@ -14,6 +17,11 @@ import {
   type StoredReceipt,
 } from "../crustdata-acquisition";
 import { ladderObservationIsStale } from "../crustdata-ladder-effect";
+import {CrustdataNoDispatchError} from '../crustdata-rate-gate';
+import * as rateGate from '../crustdata-rate-gate';
+import * as authority from '../governed-authority';
+import * as provider from '../crustdata-client';
+import {artifactHash} from '../governed-contracts';
 
 const requirements: JobRequirements = {
   title: "Backend Engineer",
@@ -110,6 +118,11 @@ class InMemoryReceiptStore implements CrustdataReceiptStore {
     receipt.status = "uncertain";
     receipt.error = error;
   }
+  async markNoDispatch(id:string):Promise<void>{
+    const receipt=[...this.receipts.values()].find(row=>row.id===id);
+    if(!receipt||receipt.status!=='started')throw Error('invalid no-dispatch');
+    receipt.status='no_dispatch';
+  }
 }
 
 function acquisitionInput(
@@ -140,9 +153,86 @@ beforeEach(() => {
 afterEach(() => {
   delete process.env.SIGNAL_CANDIDATE_PRIVACY_TEST_ADAPTER;
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+});
+
+describe('real governed acquisition branch with transport-only substitutes',()=>{
+  function governedFixture(){
+    vi.stubEnv('FLOW_SOURCING_V1_ENABLED','true');
+    const id='10000000-0000-4000-8000-000000000001',hash='a'.repeat(64),events:string[]=[];
+    const artifact={compilerVersion:'1',digestVersion:3,jobContext:{title:'Backend Engineer',location:'Bengaluru',jdDigest:'{}',skills:['Python'],goodToHaveSkills:[]},
+      criterionMap:[{criterionId:id,use:'assessment',field:null}],briefVersionId:id,materialHash:hash,sourceHash:hash,digestBasisHash:hash,previewQueryHash:hash,queryHash:hash};
+    artifact.queryHash=artifactHash(artifact as Parameters<typeof artifactHash>[0]);
+    const binding={protocolVersion:1,flowRunId:id,organizationRef:'28',externalJobId:'vanta:jobs:147',briefVersionId:id,materialHash:hash,
+      artifactHash:artifact.queryHash,compilerVersion:'1',queryArtifact:artifact,callbackUrl:'https://flow.example/api/webhooks/signal/callback'};
+    let receipt:StoredReceipt|null=null;
+    vi.spyOn(prisma.jobSourcingRequest,'findFirst').mockResolvedValue({jobContext:{}} as never);
+    vi.spyOn(authority.GovernedRepository.prototype,'call').mockImplementation(async operation=>{
+      if(operation==='execution')return binding;
+      if(operation==='evidence')return receipt?.status==='complete'?{action:'receipt',state:'complete'}:null;
+      if(operation==='grantTransition'){events.push('grant-check');return {};}
+      throw Error('UNEXPECTED_QUERY');
+    });
+    const capacity=vi.spyOn(rateGate,'acquireCrustdataAccountCapacity').mockImplementation(async()=>{events.push('capacity');});
+    vi.spyOn(prismaCrustdataReceiptStore,'find').mockImplementation(async()=>receipt);
+    vi.spyOn(prismaCrustdataReceiptStore,'complete').mockImplementation(async(_id,result)=>{events.push('durable-complete');receipt!.status='complete';receipt!.result=result;});
+    vi.spyOn(prisma,'$transaction').mockImplementation((async(fn:(transaction:unknown)=>Promise<unknown>)=>fn({
+      crustdataAcquisitionReceipt:{create:async({data}:{data:Record<string,unknown>})=>{
+        events.push('durable-start');receipt={id:'receipt-governed',status:'started',startedAt:new Date(),requestFingerprint:data.requestFingerprint as string,
+          requestMetadata:data.requestMetadata,result:null,error:null,effectsAppliedAt:null,effectMetadata:null};return receipt;
+      }},$queryRawUnsafe:async()=>{events.push('transaction-grant-start');return [];},
+    })) as never);
+    const send=vi.spyOn(authority,'sendFlowSourcingEvidence').mockImplementation(async(_binding,_identity,body)=>{
+      if((body as {action:string}).action==='grant'){
+        events.push('flow-grant');return {grantId:id,providerInputHash:buildCrustdataRequestFingerprint(input),expiresAt:new Date(Date.now()+60000).toISOString(),state:'issued'};
+      }
+      events.push('flow-receipt');return {};
+    });
+    const search=vi.spyOn(provider,'searchPeople').mockImplementation(async(_r,_l,options)=>{
+      expect(options?.capacityAcquired).toBe(true);expect(options?.governed).toBe(true);
+      await options?.beforeDispatch?.();events.push('http');return exactResult;
+    });
+    const input=acquisitionInput({executionFence:{acquisitionGeneration:1,executionAttemptId:id,processingLeaseId:id}});
+    return{input,events,capacity,send,search};
+  }
+  it('obtains rate capacity before Flow grant, persists start before HTTP, then reports completion',async()=>{
+    const f=governedFixture();await acquireCrustdataSearchForRequest(f.input);
+    expect(f.events).toEqual(['capacity','flow-grant','grant-check','durable-start','transaction-grant-start','grant-check','http','durable-complete','flow-receipt']);
+  });
+  it('gate failure requests no grant and performs no purchase',async()=>{
+    const f=governedFixture();f.capacity.mockRejectedValueOnce(new CrustdataNoDispatchError());
+    await expect(acquireCrustdataSearchForRequest(f.input)).rejects.toBeInstanceOf(CrustdataNoDispatchError);
+    expect(f.send).not.toHaveBeenCalled();expect(f.search).not.toHaveBeenCalled();
+  });
+  it('a lost accounting acknowledgement reuses the durable completed receipt, never purchasing again',async()=>{
+    const f=governedFixture(),normal=f.send.getMockImplementation()!;
+    let failed=false;
+    f.send.mockImplementation(async(...args)=>{
+      if((args[2] as {action:string}).action==='receipt'&&!failed){failed=true;throw Error('Flow unavailable');}
+      return normal(...args);
+    });
+    await expect(acquireCrustdataSearchForRequest(f.input)).rejects.toMatchObject({code:'receipt_persistence_failed'});
+    await acquireCrustdataSearchForRequest(f.input);
+    expect(f.search).toHaveBeenCalledTimes(1);expect(f.capacity).toHaveBeenCalledTimes(1);
+    expect(f.events.filter(e=>e==='durable-start')).toHaveLength(1);
+  });
 });
 
 describe("request-scoped Crustdata acquisition receipts", () => {
+  it('waits for rate capacity before reserving a receipt and never calls transport on gate failure',async()=>{
+    const store=new InMemoryReceiptStore(),reserve=vi.spyOn(store,'reserve'),search=vi.fn();
+    const beforeReserve=vi.fn(async()=>{expect(reserve).not.toHaveBeenCalled();throw new CrustdataNoDispatchError();});
+    await expect(acquireCrustdataSearch(acquisitionInput(),{store,search,beforeReserve})).rejects.toBeInstanceOf(CrustdataNoDispatchError);
+    expect(store.receipts.size).toBe(0);expect(search).not.toHaveBeenCalled();
+  });
+  it('retains a no-dispatch receipt without reporting uncertainty or retrying it as a purchase',async()=>{
+    const store=new InMemoryReceiptStore(),search=vi.fn().mockRejectedValue(new CrustdataNoDispatchError()),uncertain=vi.spyOn(store,'markUncertain');
+    await expect(acquireCrustdataSearch(acquisitionInput(),{store,search})).rejects.toMatchObject({code:'receipt_no_dispatch'});
+    expect([...store.receipts.values()]).toMatchObject([{status:'no_dispatch'}]);
+    expect(uncertain).not.toHaveBeenCalled();
+    await expect(acquireCrustdataSearch(acquisitionInput(),{store,search})).rejects.toMatchObject({code:'receipt_no_dispatch'});
+    expect(search).toHaveBeenCalledTimes(1);
+  });
   it("makes zero provider or receipt calls when privacy health is unavailable", async () => {
     delete process.env.SIGNAL_CANDIDATE_PRIVACY_TEST_ADAPTER;
     const store = new InMemoryReceiptStore();

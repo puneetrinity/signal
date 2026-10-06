@@ -8,7 +8,7 @@ const enforcementContracts = [
   [
     'route-source-restrictive',
     'src/app/api/v3/jobs/[id]/source/route.ts',
-    ['requireHealthyCandidatePrivacyContext()', 'request.json()'],
+    ['requireHealthyCandidatePrivacyContext()', 'readSourcingBody(request)'],
   ],
   [
     'route-contact-restrictive',
@@ -187,14 +187,14 @@ describe('candidate privacy surface contracts', () => {
     }
   });
 
-  it('preserves the exact 17 Next route registrations', async () => {
+  it('preserves the exact 18 Next route registrations including the bounded preview', async () => {
     const files = await routeFiles(resolve(root, 'src/app/api'));
     let registrations = 0;
     for (const file of files) {
       const source = await readFile(file, 'utf8');
       registrations += (source.match(/export async function (?:GET|POST|PUT|PATCH|DELETE)\b/g) ?? []).length;
     }
-    expect(registrations).toBe(17);
+    expect(registrations).toBe(18);
   });
 
   it('worker-start-order: privacy starts before candidate-bearing loops', async () => {

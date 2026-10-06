@@ -654,12 +654,17 @@ model JobSourcingRequest {
   lastRerankedAt        DateTime? @map("last_reranked_at") @db.Timestamptz(6)
   acquisitionGeneration Int       @default(1) @map("acquisition_generation")
   executionAttemptId    String?   @map("execution_attempt_id")
+  flowRunId             String?   @map("flow_run_id") @db.Uuid
+  artifactHash          String?   @map("artifact_hash")
+  protocolVersion       Int?      @map("protocol_version")
   processingLeaseId     String?   @map("processing_lease_id")
 
   candidates        JobSourcingCandidate[]
   crustdataReceipts CrustdataAcquisitionReceipt[]
+  governedBindings GovernedSourcingBinding[]
 
   @@unique([tenantId, externalJobId, jobContextHash])
+  @@unique([tenantId,flowRunId],map:"gov_request_flow_uq")
   @@unique([id, tenantId])
   @@index([tenantId, status])
   @@map("job_sourcing_requests")
@@ -710,4 +715,68 @@ model JobSourcingCandidate {
   @@index([sourcingRequestId])
   @@index([candidateId])
   @@map("job_sourcing_candidates")
+}
+
+model GovernedSourcingTenant {
+  tenantId String @id(map: "gov_tenant_pk") @map("tenant_id")
+  enabledAt DateTime @map("enabled_at") @db.Timestamptz(6)
+  policyHash String @map("policy_hash")
+  organizationRef String @map("organization_ref")
+  callbackUrl String @map("callback_url")
+  allowNew Boolean @default(false) @map("allow_new")
+  bindings GovernedSourcingBinding[]
+  @@map("governed_sourcing_tenants")
+}
+
+model GovernedSourcingBinding {
+  tenantId String @map("tenant_id")
+  flowRunId String @map("flow_run_id") @db.Uuid
+  requestId String @unique(map: "gov_binding_request_uq") @map("request_id")
+  artifactHash String @map("artifact_hash")
+  organizationRef String @map("organization_ref")
+  externalJobId String @map("external_job_id")
+  command Json
+  cancellation Json?
+  deliveryRevision Int @default(0) @map("delivery_revision")
+  deliveryIds Json? @map("delivery_ids")
+  createdAt DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(6)
+  tenant GovernedSourcingTenant @relation(fields:[tenantId],references:[tenantId],onDelete:Restrict,onUpdate:NoAction,map:"gov_binding_tenant_fk")
+  request JobSourcingRequest @relation(fields:[requestId,tenantId],references:[id,tenantId],onDelete:Restrict,onUpdate:NoAction,map:"gov_binding_request_fk")
+  grants GovernedSourcingGrant[]
+  @@id([tenantId,flowRunId],map:"gov_binding_pk")
+  @@map("governed_sourcing_bindings")
+}
+
+model GovernedSourcingGrant {
+  tenantId String @map("tenant_id")
+  flowRunId String @map("flow_run_id") @db.Uuid
+  slot String
+  grantId String @unique(map:"gov_grant_id_uq") @map("grant_id") @db.Uuid
+  providerInputSha256 String @map("provider_input_sha256")
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  state String
+  receiptId String? @map("receipt_id")
+  updatedAt DateTime @default(dbgenerated("clock_timestamp()")) @map("updated_at") @db.Timestamptz(6)
+  binding GovernedSourcingBinding @relation(fields:[tenantId,flowRunId],references:[tenantId,flowRunId],onDelete:Restrict,onUpdate:NoAction,map:"gov_grant_binding_fk")
+  @@id([tenantId,flowRunId,slot],map:"gov_grant_pk")
+  @@map("governed_sourcing_grants")
+}
+
+model GovernedSourcingPreview {
+  tenantId String @map("tenant_id")
+  previewId String @map("preview_id") @db.Uuid
+  externalJobId String @map("external_job_id")
+  artifactHash String @map("artifact_hash")
+  requestSha256 String @map("request_sha256")
+  command Json
+  state String
+  count BigInt?
+  countRelation String? @map("count_relation")
+  creditsUsed Decimal? @map("credits_used")
+  leaseId String? @map("lease_id") @db.Uuid
+  leaseUntil DateTime? @map("lease_until") @db.Timestamptz(6)
+  createdAt DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(dbgenerated("clock_timestamp()")) @map("updated_at") @db.Timestamptz(6)
+  @@id([tenantId,previewId],map:"gov_preview_pk")
+  @@map("governed_sourcing_previews")
 }

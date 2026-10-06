@@ -47,7 +47,8 @@ export type SourcingRequestStatus =
 
 export type CallbackDeliveryStatus = 'pending' | 'delivered' | 'failed';
 
-export interface SourcingJobData {
+export interface SourceSourcingJobData {
+  kind?: 'source';
   requestId: string;
   tenantId: string;
   externalJobId: string;
@@ -56,6 +57,13 @@ export interface SourcingJobData {
   executionAttemptId: string;
   resolvedTrack?: TrackDecision;
 }
+
+export interface PreviewSourcingJobData {
+  kind: 'preview';
+  tenantId: string;
+  previewId: string;
+}
+export type SourcingJobData = SourceSourcingJobData | PreviewSourcingJobData;
 
 export interface SourcingJobResult {
   requestId: string;
@@ -66,6 +74,7 @@ export interface SourcingJobResult {
 }
 
 export interface SourcingCallbackPayload {
+  governed?: {protocolVersion:1;flowRunId:string;artifactHash:string};
   version: 1;
   requestId: string;
   externalJobId: string;

@@ -12,6 +12,8 @@ import {
   releaseDeliveredCrustdataReceiptPayloads,
 } from './crustdata-acquisition';
 import type { SourcingCallbackPayload } from './types';
+import {GovernedRepository,flushGovernedEvidence} from './governed-authority';
+import {governedSourceSchema} from './governed-contracts';
 import {
   candidatePrivacyAllowedRelationWhere,
   requireCandidatePrivacyAllowed,
@@ -63,7 +65,7 @@ export function buildStaleCallbackWhere(
 ): Prisma.JobSourcingRequestWhereInput {
   return {
     callbackStatus: { in: ['failed', 'pending'] },
-    status: 'complete',
+    OR:[{status:'complete'},{status:'failed',flowRunId:{not:null}}],
     completedAt: { lt: cutoff },
     ...(tenantId ? { tenantId } : {}),
   };
@@ -160,6 +162,13 @@ export async function deliverCallback(
   updateStatus = true,
   executionFence?: SourcingExecutionFence,
 ): Promise<boolean> {
+  const authority=new GovernedRepository();
+  const rawBinding=await authority.call('boundCommand',[tenantId,requestId]);
+  const binding=rawBinding?governedSourceSchema.parse(rawBinding):null;
+  if(binding&&(payload.requestId!==requestId||payload.externalJobId!==binding.externalJobId||
+    payload.acquisitionGeneration!==1||!payload.executionAttemptId||callbackUrl!==binding.callbackUrl)){
+    throw Error('GOVERNED_CALLBACK_BINDING_MISMATCH');
+  }
   const privacyContext = await requireHealthyCandidatePrivacyContext();
   const candidateData = payload.candidateData as
     | { candidateId?: unknown }
@@ -180,6 +189,7 @@ export async function deliverCallback(
   const privacySafePayload: SourcingCallbackPayload = {
     ...payload,
     candidateCount: allowedCandidateCount,
+    ...(binding?{governed:{protocolVersion:1,flowRunId:binding.flowRunId,artifactHash:binding.artifactHash}}:{}),
   };
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     // Wait before retry (skip on first attempt)
@@ -188,6 +198,7 @@ export async function deliverCallback(
     }
 
     try {
+      await flushGovernedEvidence(new GovernedRepository(),tenantId,requestId);
       if (
         !(await executionFenceIsCurrent(
           requestId,
@@ -338,7 +349,7 @@ export async function redeliverStaleCallbacks(opts: {
       externalJobId: req.externalJobId,
       acquisitionGeneration: req.acquisitionGeneration,
       executionAttemptId: req.executionAttemptId ?? undefined,
-      status: 'complete',
+      status: req.status==='failed'?'failed':'complete',
       candidateCount: req.resultCount ?? 0,
     };
 

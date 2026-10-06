@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from 'crypto';
-import { Worker, Job } from 'bullmq';
+import { Worker, Job, DelayedError } from 'bullmq';
 import { prisma } from '@/lib/prisma';
 import { createLogger } from '@/lib/logger';
 import { toJsonValue } from '@/lib/prisma/json';
@@ -13,7 +13,12 @@ import { deliverCallback } from '../callback';
 import { runSourcingOrchestrator } from '../orchestrator';
 import type { SourcingJobData, SourcingJobResult, SourcingCallbackPayload } from '../types';
 import type { SourcingJobContextInput } from '../jd-digest';
+import {buildJobRequirements} from '../jd-digest';
+import {resolveTrack} from '../track-resolver';
+import {canResumeGovernedPurchase} from '../request-retry';
 import { requireHealthyCandidatePrivacyContext } from '@/lib/candidate-privacy/repository';
+import {GovernedRepository,runGovernedPreview,flushGovernedEvidence} from '../governed-authority';
+import {z} from 'zod';
 
 const log = createLogger('SourcingQueue');
 
@@ -24,10 +29,28 @@ import { getRedisConnection, getSourcingQueue, SOURCING_QUEUE_NAME } from './pro
 // Job processor
 // ---------------------------------------------------------------------------
 
-async function processSourcingJob(
+export async function processSourcingJob(
   job: Job<SourcingJobData, SourcingJobResult>,
+  token?: string,
 ): Promise<SourcingJobResult> {
-  await requireHealthyCandidatePrivacyContext();
+  if(job.data.kind==='preview') {
+    const data=z.object({kind:z.literal('preview'),tenantId:z.string().min(1).max(160),previewId:z.string().uuid()}).strict().parse(job.data);
+    const start=Date.now();
+    // Preview work never reaches orchestration, candidate materialization or
+    // outreach. Its only durable result is count evidence in its own table.
+    if(start-job.timestamp>15*60_000) return {requestId:data.previewId,status:'failed',candidateCount:0,durationMs:0,error:'PREVIEW_QUEUE_EXPIRED'};
+    const result=await runGovernedPreview(new GovernedRepository(),getRedisConnection(),data.tenantId,data.previewId);
+    if(result.state==='waiting') {
+      await job.moveToDelayed(Date.now()+Math.max(1000,result.retryAfterMs),token);
+      throw new DelayedError();
+    }
+    return {requestId:data.previewId,status:result.state==='unknown'?'failed':'complete',candidateCount:0,durationMs:Date.now()-start};
+  }
+  // Legacy producers omit kind. Preserve their pre-claim privacy refusal;
+  // governed admissions explicitly enqueue kind:'source'. This discriminator
+  // changes failure handling only, never database execution authority.
+  const legacyPrivacyChecked=job.data.kind!=='source';
+  if(legacyPrivacyChecked)await requireHealthyCandidatePrivacyContext();
   const { requestId, tenantId, externalJobId, callbackUrl } = job.data;
   const startTime = Date.now();
   const processingLeaseId = randomUUID();
@@ -38,43 +61,58 @@ async function processSourcingJob(
 
   log.info({ jobId: job.id, requestId, tenantId, externalJobId }, 'Processing sourcing job');
 
-  // Claim only the execution attempt that the source route enqueued. A stale
-  // worker from an older refresh/retry must not mutate the current request.
-  const claimed = await prisma.jobSourcingRequest.updateMany({
-    where: {
-      id: requestId,
-      tenantId,
-      acquisitionGeneration: routeFence.acquisitionGeneration,
-      executionAttemptId: routeFence.executionAttemptId,
-      status: { in: ['queued', 'processing'] },
-    },
-    data: { status: 'processing', processingLeaseId },
-  });
-  if (claimed.count !== 1) {
-    log.info(
-      { jobId: job.id, requestId, routeFence },
-      'Ignoring superseded sourcing execution',
-    );
-    return {
-      requestId,
-      status: 'failed',
-      candidateCount: 0,
-      durationMs: Date.now() - startTime,
-      error: 'Sourcing execution was superseded',
-    };
-  }
   const executionFence = { ...routeFence, processingLeaseId };
-
+  let governed=false;
+  let ownsLease=false;
   try {
+    // Claim only the execution attempt that the source route enqueued. A stale
+    // worker from an older refresh/retry must not mutate the current request.
+    const claimed = await prisma.jobSourcingRequest.updateMany({
+      where: {
+        id: requestId,
+        tenantId,
+        acquisitionGeneration: routeFence.acquisitionGeneration,
+        executionAttemptId: routeFence.executionAttemptId,
+        status: { in: ['queued', 'processing'] },
+      },
+      data: { status: 'processing', processingLeaseId },
+    });
+    if (claimed.count !== 1) {
+      log.info(
+        { jobId: job.id, requestId, routeFence },
+        'Ignoring superseded sourcing execution',
+      );
+      return {
+        requestId,
+        status: 'failed',
+        candidateCount: 0,
+        durationMs: Date.now() - startTime,
+        error: 'Sourcing execution was superseded',
+      };
+    }
+    ownsLease=true;
     const jobRequest = await prisma.jobSourcingRequest.findUniqueOrThrow({
       where: { id: requestId },
     });
     const jobContext = jobRequest.jobContext as unknown as SourcingJobContextInput;
+    governed=Boolean(await new GovernedRepository().call('execution',[tenantId,requestId,jobContext,executionFence]));
+    // Acquire only execution metadata before this gate. No candidate reads,
+    // provider calls or orchestration may run without healthy privacy state.
+    // A failed gate must use the same bounded retry/terminal callback path as
+    // any other failure, including after an already-paid acquisition.
+    if(!legacyPrivacyChecked)await requireHealthyCandidatePrivacyContext();
+    const resolvedTrack=job.data.resolvedTrack??(governed?await resolveTrack(jobContext,buildJobRequirements(jobContext)):undefined);
+    if(governed && resolvedTrack) {
+      const observed=jobRequest.diagnostics && typeof jobRequest.diagnostics==='object' && !Array.isArray(jobRequest.diagnostics)?jobRequest.diagnostics:{};
+      const saved=await prisma.jobSourcingRequest.updateMany({where:{id:requestId,tenantId,...executionFence,status:'processing'},
+        data:{diagnostics:toJsonValue({...observed,trackDecision:resolvedTrack})}});
+      if(saved.count!==1)throw Error('GOVERNED_EXECUTION_STALE');
+    }
     const orchestratorResult = await runSourcingOrchestrator(
       requestId,
       tenantId,
       jobContext,
-      job.data.resolvedTrack,
+      resolvedTrack,
       job.data.acquisitionGeneration,
       job.data.executionAttemptId,
       processingLeaseId,
@@ -102,7 +140,7 @@ async function processSourcingJob(
         queriesExecuted: orchestratorResult.queriesExecuted,
         diagnostics: toJsonValue({
           // Preserve trackDecision written at enqueue time
-          ...(job.data.resolvedTrack ? { trackDecision: job.data.resolvedTrack } : {}),
+          ...(resolvedTrack ? { trackDecision: resolvedTrack } : {}),
           avgFitTopK: orchestratorResult.avgFitTopK,
           countAboveThreshold: orchestratorResult.countAboveThreshold,
           strictTopKCount: orchestratorResult.strictTopKCount,
@@ -224,8 +262,41 @@ async function processSourcingJob(
     log.info({ jobId: job.id, requestId, durationMs }, 'Sourcing job completed');
     return result;
   } catch (err) {
+    if(!ownsLease) {
+      if(job.attemptsMade+1<(job.opts.attempts??1))throw err;
+      // Last retry: reconcile a failed claim only if the row is still queued
+      // without a lease, or our exact claim committed but its response was lost.
+      // Never steal another worker's lease. If the DB is still unavailable this
+      // throws (visible failed queue job), never a false successful completion.
+      const recovered=await prisma.jobSourcingRequest.updateMany({where:{id:requestId,tenantId,...routeFence,
+        OR:[{status:'queued',processingLeaseId:null},{status:'processing',processingLeaseId}]},
+        data:{status:'processing',processingLeaseId}});
+      if(recovered.count!==1)throw err;
+      governed=Boolean(await new GovernedRepository().call('boundCommand',[tenantId,requestId]));
+    }
     const errorMsg = err instanceof Error ? err.message : 'Unknown error';
     const durationMs = Date.now() - startTime;
+
+    if(governed){
+      // Retry only recovery of an already completed purchase, never a new
+      // generation or an ambiguous provider dispatch. The acquisition layer
+      // reuses its durable exact receipt; three attempts bound this recovery.
+      const receipts=await prisma.crustdataAcquisitionReceipt.findMany({where:{tenantId,sourcingRequestId:requestId,acquisitionGeneration:1},select:{slot:true,status:true}});
+      if(canResumeGovernedPurchase(job.attemptsMade,job.opts.attempts??1,receipts)) {
+        const retry=await prisma.jobSourcingRequest.updateMany({where:{id:requestId,tenantId,...executionFence,status:'processing'},
+          data:{status:'queued',processingLeaseId:null}});
+        if(retry.count===1)throw err;
+      }
+      try{
+        const repository=new GovernedRepository(),cancelled=await repository.call('cancel',[tenantId,requestId,executionFence]);
+        if(cancelled){
+          await flushGovernedEvidence(repository,tenantId,requestId).catch(()=>undefined);
+          // The durable pending callback repairs a lost accounting ack. The
+          // cancellation has fenced this lease; do not rewrite it below.
+          return {requestId,status:'failed',candidateCount:0,durationMs,error:'GOVERNED_CANCELLED_NO_DISPATCH'};
+        }
+      }catch{log.warn({requestId},'Governed cancellation not proven; retaining allowance');}
+    }
 
     const failed = await prisma.jobSourcingRequest.updateMany({
       where: {
@@ -238,6 +309,7 @@ async function processSourcingJob(
       },
       data: {
         status: 'failed',
+        ...(governed?{callbackStatus:'pending',completedAt:new Date()}:{}),
         qualityGateTriggered: false,
         queriesExecuted: 0,
         // Keep enqueue-time and asynchronously reconciled diagnostics. The

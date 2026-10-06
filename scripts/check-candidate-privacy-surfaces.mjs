@@ -238,7 +238,9 @@ export async function evaluateCandidatePrivacySurfaces(root) {
     resolve(root, 'src/app/api/v3/jobs/[id]/source/route.ts'),
     'utf8',
   );
-  if (sourceRoute.indexOf('requireHealthyCandidatePrivacyContext()') > sourceRoute.indexOf('request.json()')) {
+  const sourcePrivacyGate = sourceRoute.indexOf('requireHealthyCandidatePrivacyContext()');
+  const sourceBodyRead = sourceRoute.indexOf('readSourcingBody(request)');
+  if (sourcePrivacyGate < 0 || sourceBodyRead < 0 || sourcePrivacyGate > sourceBodyRead) {
     offenders.push('source route parses its body before the privacy health gate');
   }
   const worker = await readFile(resolve(root, 'src/lib/sourcing/worker.ts'), 'utf8');

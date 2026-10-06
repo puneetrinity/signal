@@ -3,6 +3,8 @@ import { extractLinkedInIdFromUrl } from './discovery';
 import { Prisma } from '@prisma/client';
 import { redis } from '@/lib/redis/client';
 import { toJsonValue } from '@/lib/prisma/json';
+import {GovernedRepository} from './governed-authority';
+import {governedEnabled,type GovernedSource} from './governed-contracts';
 import { createLogger } from '@/lib/logger';
 import { buildJobRequirements, type SourcingJobContextInput } from './jd-digest';
 import { rankCandidates } from './ranking-new';
@@ -487,6 +489,11 @@ export async function runSourcingOrchestrator(
   processingLeaseId?: string,
 ): Promise<OrchestratorResult> {
   const privacyContext = await requireHealthyCandidatePrivacyContext();
+  // This guard is inside the orchestrator, not just its HTTP producer. Old
+  // queued work and direct callers cannot bypass a tenant's activation latch.
+  const governedCommand=await new GovernedRepository().call<GovernedSource>('execution',[
+    tenantId,requestId,jobContext,executionAttemptId&&processingLeaseId?
+      {acquisitionGeneration,executionAttemptId,processingLeaseId}:null]);
   const config = getSourcingConfig();
   const requirements = buildJobRequirements(jobContext);
   const publicMemory: PublicMemoryTelemetry = {
@@ -2314,6 +2321,7 @@ export async function runSourcingOrchestrator(
             tenantId,
             sourcingRequestId: requestId,
             acquisitionGeneration,
+            executionFence,
             slot: 'exact',
             requirements,
             limit: CRUSTDATA_REQUEST_LIMIT,
@@ -2326,6 +2334,7 @@ export async function runSourcingOrchestrator(
                 ...exactExclusion.telemetry,
               },
             },
+            reuseOnly:Boolean(governedCommand&&!governedEnabled()),
           });
           const exactReceiptExclusion =
             parseReceiptPublicExclusionTelemetry(
@@ -2394,6 +2403,7 @@ export async function runSourcingOrchestrator(
                   tenantId,
                   sourcingRequestId: requestId,
                   acquisitionGeneration,
+                  executionFence,
                   slot: 'spill',
                   requirements: selectedSpillRung?.requirements ?? requirements,
                   limit: Math.max(1, remainingCapacity),
@@ -2411,7 +2421,7 @@ export async function runSourcingOrchestrator(
                         }
                       : {}),
                   },
-                  reuseOnly: Boolean(existingSpillReceipt),
+                  reuseOnly: Boolean(existingSpillReceipt || (governedCommand&&!governedEnabled())),
                 });
                 spillSearch = spillAcquisition.result;
                 spillRungId = spillAcquisition.metadata.rungId;
@@ -3356,6 +3366,7 @@ export async function runSourcingOrchestrator(
           }
         } catch (err) {
           if (
+            governedCommand ||
             err instanceof PublicMemoryOutboxError ||
             err instanceof CrustdataAcquisitionSafetyError ||
             exactAcquisition
