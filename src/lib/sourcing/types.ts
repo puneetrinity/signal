@@ -74,7 +74,7 @@ export interface SourcingJobResult {
 }
 
 export interface SourcingCallbackPayload {
-  governed?: {protocolVersion:1;flowRunId:string;artifactHash:string};
+  governed?: {protocolVersion:1|2;flowRunId:string;artifactHash:string};
   version: 1;
   requestId: string;
   externalJobId: string;

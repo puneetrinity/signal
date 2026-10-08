@@ -1,0 +1,411 @@
+{
+  "schemaVersion": 1,
+  "synthetic": true,
+  "asOf": "2025-01-01T00:00:00.000Z",
+  "jobs": [
+    {
+      "jobId": "synthetic-backend",
+      "poolBasis": "full-synthetic",
+      "payload": {
+        "schemaVersion": 2,
+        "compilerVersion": 2,
+        "taxonomyVersion": 2,
+        "criteria": [
+          {
+            "id": "20000000-0000-4000-8000-000000000001",
+            "label": "title",
+            "class": "preferred",
+            "subject": "title",
+            "requirement": {
+              "kind": "accepted_titles",
+              "values": [
+                "Backend Engineer",
+                "Backend Developer"
+              ]
+            },
+            "evidenceKinds": [
+              "profile_evidence"
+            ],
+            "use": "assessment",
+            "provenance": {
+              "kind": "recruiter_edit"
+            }
+          },
+          {
+            "id": "20000000-0000-4000-8000-000000000002",
+            "label": "experience_years",
+            "class": "must_have",
+            "subject": "experience_years",
+            "requirement": {
+              "kind": "experience_range",
+              "minimum": 6,
+              "maximum": 10
+            },
+            "evidenceKinds": [
+              "profile_evidence"
+            ],
+            "use": "assessment",
+            "provenance": {
+              "kind": "recruiter_edit"
+            }
+          },
+          {
+            "id": "20000000-0000-4000-8000-000000000003",
+            "label": "skill",
+            "class": "must_have",
+            "subject": "skill",
+            "requirement": {
+              "kind": "text",
+              "value": "Java"
+            },
+            "evidenceKinds": [
+              "profile_evidence"
+            ],
+            "use": "assessment",
+            "provenance": {
+              "kind": "recruiter_edit"
+            }
+          },
+          {
+            "id": "20000000-0000-4000-8000-000000000004",
+            "label": "skill",
+            "class": "must_have",
+            "subject": "skill",
+            "requirement": {
+              "kind": "text",
+              "value": "Kafka"
+            },
+            "evidenceKinds": [
+              "profile_evidence"
+            ],
+            "use": "assessment",
+            "provenance": {
+              "kind": "recruiter_edit"
+            }
+          }
+        ]
+      },
+      "candidates": [
+        {
+          "candidateId": "inside",
+          "organizationRef": "1",
+          "profile": {
+            "basic_profile": {
+              "headline": "Context only"
+            },
+            "experience": {
+              "employment_details": {
+                "past": [
+                  {
+                    "title": "Senior Backend Developer",
+                    "start_date": "2017-01-01",
+                    "end_date": "2025-01-01"
+                  }
+                ]
+              }
+            },
+            "skills": {
+              "professional_network_skills": [
+                "Java",
+                "Kafka"
+              ]
+            }
+          }
+        },
+        {
+          "candidateId": "wider",
+          "organizationRef": "1",
+          "profile": {
+            "basic_profile": {
+              "headline": "Context only"
+            },
+            "experience": {
+              "employment_details": {
+                "past": [
+                  {
+                    "title": "Backend Engineer",
+                    "start_date": "2014-01-01",
+                    "end_date": "2025-01-01"
+                  }
+                ]
+              }
+            },
+            "skills": {
+              "professional_network_skills": [
+                "Java",
+                "Kafka"
+              ]
+            }
+          }
+        },
+        {
+          "candidateId": "wider-unknown",
+          "organizationRef": "1",
+          "profile": {
+            "basic_profile": {
+              "headline": "Context only"
+            },
+            "experience": {
+              "employment_details": {
+                "past": [
+                  {
+                    "title": "Backend Engineer",
+                    "start_date": "2014-01-01",
+                    "end_date": "2025-01-01"
+                  }
+                ]
+              }
+            },
+            "skills": {
+              "professional_network_skills": [
+                "Java"
+              ]
+            }
+          }
+        },
+        {
+          "candidateId": "far-out",
+          "organizationRef": "1",
+          "profile": {
+            "basic_profile": {
+              "headline": "Context only"
+            },
+            "experience": {
+              "employment_details": {
+                "past": [
+                  {
+                    "title": "Backend Engineer",
+                    "start_date": "2009-01-01",
+                    "end_date": "2025-01-01"
+                  }
+                ]
+              }
+            },
+            "skills": {
+              "professional_network_skills": [
+                "Java",
+                "Kafka"
+              ]
+            }
+          }
+        },
+        {
+          "candidateId": "missing-dates",
+          "organizationRef": "1",
+          "profile": {
+            "basic_profile": {
+              "headline": "Context only"
+            },
+            "experience": {
+              "employment_details": {
+                "past": []
+              }
+            },
+            "skills": {
+              "professional_network_skills": [
+                "Java",
+                "Kafka"
+              ]
+            }
+          }
+        }
+      ],
+      "expectedSelectedIds": [
+        "inside",
+        "wider"
+      ]
+    },
+    {
+      "jobId": "synthetic-nontech",
+      "poolBasis": "full-synthetic",
+      "payload": {
+        "schemaVersion": 2,
+        "compilerVersion": 2,
+        "taxonomyVersion": 2,
+        "criteria": [
+          {
+            "id": "20000000-0000-4000-8000-000000000005",
+            "label": "title",
+            "class": "preferred",
+            "subject": "title",
+            "requirement": {
+              "kind": "accepted_titles",
+              "values": [
+                "Account Executive",
+                "Enterprise Account Executive"
+              ]
+            },
+            "evidenceKinds": [
+              "profile_evidence"
+            ],
+            "use": "assessment",
+            "provenance": {
+              "kind": "recruiter_edit"
+            }
+          },
+          {
+            "id": "20000000-0000-4000-8000-000000000006",
+            "label": "experience_years",
+            "class": "must_have",
+            "subject": "experience_years",
+            "requirement": {
+              "kind": "experience_range",
+              "minimum": 4,
+              "maximum": 8
+            },
+            "evidenceKinds": [
+              "profile_evidence"
+            ],
+            "use": "assessment",
+            "provenance": {
+              "kind": "recruiter_edit"
+            }
+          },
+          {
+            "id": "20000000-0000-4000-8000-000000000007",
+            "label": "skill",
+            "class": "must_have",
+            "subject": "skill",
+            "requirement": {
+              "kind": "text",
+              "value": "MEDDIC"
+            },
+            "evidenceKinds": [
+              "profile_evidence"
+            ],
+            "use": "assessment",
+            "provenance": {
+              "kind": "recruiter_edit"
+            }
+          },
+          {
+            "id": "20000000-0000-4000-8000-000000000008",
+            "label": "skill",
+            "class": "must_have",
+            "subject": "skill",
+            "requirement": {
+              "kind": "text",
+              "value": "Salesforce"
+            },
+            "evidenceKinds": [
+              "profile_evidence"
+            ],
+            "use": "assessment",
+            "provenance": {
+              "kind": "recruiter_edit"
+            }
+          }
+        ]
+      },
+      "candidates": [
+        {
+          "candidateId": "sales-inside",
+          "organizationRef": "1",
+          "profile": {
+            "basic_profile": {
+              "headline": "Context only"
+            },
+            "experience": {
+              "employment_details": {
+                "past": [
+                  {
+                    "title": "Senior Account Executive",
+                    "start_date": "2019-01-01",
+                    "end_date": "2025-01-01"
+                  }
+                ]
+              }
+            },
+            "skills": {
+              "professional_network_skills": [
+                "MEDDIC",
+                "SFDC"
+              ]
+            }
+          }
+        },
+        {
+          "candidateId": "sales-wider",
+          "organizationRef": "1",
+          "profile": {
+            "basic_profile": {
+              "headline": "Context only"
+            },
+            "experience": {
+              "employment_details": {
+                "past": [
+                  {
+                    "title": "Enterprise Account Executive",
+                    "start_date": "2016-01-01",
+                    "end_date": "2025-01-01"
+                  }
+                ]
+              }
+            },
+            "skills": {
+              "professional_network_skills": [
+                "MEDDIC",
+                "Salesforce"
+              ]
+            }
+          }
+        },
+        {
+          "candidateId": "sales-not-equivalent",
+          "organizationRef": "1",
+          "profile": {
+            "basic_profile": {
+              "headline": "Context only"
+            },
+            "experience": {
+              "employment_details": {
+                "past": [
+                  {
+                    "title": "Account Manager",
+                    "start_date": "2019-01-01",
+                    "end_date": "2025-01-01"
+                  }
+                ]
+              }
+            },
+            "skills": {
+              "professional_network_skills": [
+                "consultative selling"
+              ]
+            }
+          }
+        },
+        {
+          "candidateId": "sales-missing-skill",
+          "organizationRef": "1",
+          "profile": {
+            "basic_profile": {
+              "headline": "Context only"
+            },
+            "experience": {
+              "employment_details": {
+                "past": [
+                  {
+                    "title": "Account Executive",
+                    "start_date": "2016-01-01",
+                    "end_date": "2025-01-01"
+                  }
+                ]
+              }
+            },
+            "skills": {
+              "professional_network_skills": [
+                "Salesforce"
+              ]
+            }
+          }
+        }
+      ],
+      "expectedSelectedIds": [
+        "sales-inside",
+        "sales-not-equivalent",
+        "sales-wider"
+      ]
+    }
+  ]
+}

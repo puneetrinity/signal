@@ -10,7 +10,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { verifyServiceJWT } from '@/lib/auth/service-jwt';
 import { requireScope } from '@/lib/auth/service-scopes';
 import { prisma } from '@/lib/prisma';
-import {GovernedRepository} from '@/lib/sourcing/governed-authority';
+import {GovernedRepository,governedAdmissionRefusal} from '@/lib/sourcing/governed-authority';
+import { RankingRepository, type RankingRead } from '@/lib/sourcing/rubric/repository';
 import { summarizeIdentitySignals } from '@/lib/sourcing/identity-summary';
 import {
   classifyMatchStrength,
@@ -150,10 +151,42 @@ export async function GET(
   }
 
   const candidates = (sourcingRequest as any).candidates || [];
+  let governed:any;
+  let ranking:RankingRead|undefined;
+  if(sourcingRequest.flowRunId && sourcingRequest.protocolVersion===2) {
+    if(limit!==100)return NextResponse.json({error:'governed_full_delivery_required'},{status:400});
+    if(['queued','processing'].includes(sourcingRequest.status))return NextResponse.json({error:'governed_results_pending'},{status:202});
+    if(sourcingRequest.status!=='complete')return NextResponse.json({error:'governed_run_failed'},{status:409});
+    try {
+      const repository=new GovernedRepository();
+      {
+        // These private IDs are the sealed delivery, not a second result pool.
+        // Privacy-admitted cards below remain a subsequence with original ranks.
+        const full=await prisma.jobSourcingCandidate.findMany({where:{tenantId,sourcingRequestId:sourcingRequest.id},
+          orderBy:{rank:'asc'},select:{candidateId:true}});
+        governed=await repository.call('delivery',[tenantId,sourcingRequest.id,sourcingRequest.executionAttemptId,
+          full.map(c=>c.candidateId),sourcingRequest.lastRerankedAt?.toISOString()??null]);
+        if(!governed||governed.protocolVersion!==2)throw Error('RANKING_OUTPUT_CONFLICT');
+        ranking=await new RankingRepository().read(tenantId,governed.flowRunId,governed.rankingRevision);
+        if(ranking.outputHash!==governed.rankingHash||ranking.contractHash!==governed.contractHash||
+          JSON.stringify(ranking.items.map(i=>i.candidateId))!==JSON.stringify(governed.orderedSignalIds))throw Error('RANKING_OUTPUT_CONFLICT');
+        const byId=new Map(ranking.items.map(i=>[i.candidateId,i]));
+        if(candidates.some((c:any)=>byId.get(c.candidateId)?.ordinal!==c.rank))throw Error('RANKING_OUTPUT_CONFLICT');
+        // The immutable full publication remains server-side. Only the current
+        // privacy-admitted subsequence may cross the service boundary.
+        const allowed=new Set(candidates.map((c:any)=>c.candidateId));
+        governed={...governed,orderedSignalIds:governed.orderedSignalIds.filter((id:string)=>allowed.has(id))};
+      }
+    }catch(error){
+      const conflict=governedAdmissionRefusal(error)?.status===409;
+      return NextResponse.json({error:conflict?'governed_ranking_conflict':'governed_ranking_unavailable'},{status:conflict?409:503});
+    }
+  }
+  const rankingById=new Map(ranking?.items.map(i=>[i.candidateId,i])??[]);
   const candidateIds = candidates.map((c: any) => c.candidateId);
   // Percentile cutoffs use the complete persisted run, never the requested
   // response slice. A limit=20 read must agree with a limit=100 read.
-  const persistedRunScores = await prisma.jobSourcingCandidate.findMany({
+  const persistedRunScores = ranking ? [] : await prisma.jobSourcingCandidate.findMany({
     where: {
       tenantId,
       sourcingRequestId: sourcingRequest.id,
@@ -430,6 +463,8 @@ export async function GET(
     const phoneAvailable = !!phoneIdentity || !!crustdataContact?.has_phone_number;
 
     return {
+      ...(ranking?{ranking:{protocolVersion:2,revisionId:ranking.revisionId,contractHash:ranking.contractHash,
+        outputHash:ranking.outputHash,asOf:ranking.asOf,...rankingById.get(sc.candidateId)}}:{}),
       // --- NEW UNIFIED CARD SCHEMA ---
       candidate: {
         id: sc.candidate.id,
@@ -451,7 +486,7 @@ export async function GET(
       },
       sourcingContext: {
         rank: sc.rank,
-        matchStrength,
+        matchStrength: ranking ? null : matchStrength,
         locationStatus,
       },
       cardSignals: {
@@ -474,8 +509,8 @@ export async function GET(
       // never emitted, so Flow's `|| 'discovered'` fallback re-labeled every
       // candidate as newly-discovered regardless of what Signal persisted.
       sourceType: sc.sourceType,
-      fitScore: sc.fitScore,
-      fitBreakdown,
+      fitScore: ranking ? null : sc.fitScore,
+      fitBreakdown: ranking ? null : fitBreakdown,
       matchTier,
       locationMatchType,
       dataConfidence,
@@ -491,8 +526,7 @@ export async function GET(
     };
   });
 
-  let governed:unknown;
-  if(sourcingRequest.flowRunId) {
+  if(sourcingRequest.flowRunId&&!ranking) {
     // Governed delivery always binds the full page of at most100, never a
     // caller-selected partial list which would fabricate another revision.
     if(limit!==100)return NextResponse.json({error:'governed_full_delivery_required'},{status:400});
@@ -506,8 +540,8 @@ export async function GET(
     ...(governed?{governed}:{}),
     requestId: sourcingRequest.id,
     externalJobId: sourcingRequest.externalJobId,
-    resultCount: persistedRunScores.length,
-    matchStrengthBands,
+    resultCount: ranking ? candidateResults.length : persistedRunScores.length,
+    matchStrengthBands: ranking ? null : matchStrengthBands,
     data: candidateResults,
   });
 }

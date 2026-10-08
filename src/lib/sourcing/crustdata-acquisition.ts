@@ -88,6 +88,7 @@ interface AcquireDependencies {
 }
 
 export interface AcquireCrustdataSearchInput {
+  rankingProtocol?: 2;
   tenantId: string;
   sourcingRequestId: string;
   acquisitionGeneration: number;
@@ -101,6 +102,8 @@ export interface AcquireCrustdataSearchInput {
 }
 
 export interface AcquiredCrustdataSearch {
+  /** Private paid capacity; never copy into serving diagnostics or callbacks. */
+  rawAccounting?: RawAcquisitionAccounting;
   result: CrustdataSearchResult;
   receiptId: string;
   reused: boolean;
@@ -112,6 +115,18 @@ export interface AcquiredCrustdataSearch {
 }
 
 const DEFAULT_WAIT_ATTEMPTS = 240;
+const rawAccountingSchema=z.object({version:z.literal(1),receiptId:z.string().min(1).max(200),requestFingerprint:z.string().regex(/^[a-f0-9]{64}$/),
+  providerTotal:z.number().int().nonnegative().safe().nullable(),relation:z.enum(['eq','gte','approximate']).nullable(),
+  rawReturnedCount:z.number().int().min(0).max(300),requestedLimit:z.number().int().min(1).max(300),
+}).strict().refine(v=>v.rawReturnedCount<=v.requestedLimit,'Provider over-return');
+export type RawAcquisitionAccounting=z.infer<typeof rawAccountingSchema>;
+function storedRawAccounting(receipt:StoredReceipt):RawAcquisitionAccounting {
+  const result=receipt.result as {rawAccounting?:unknown}|null;
+  const parsed=rawAccountingSchema.safeParse(result?.rawAccounting);
+  if(!parsed.success||parsed.data.receiptId!==receipt.id||parsed.data.requestFingerprint!==receipt.requestFingerprint)
+    throw new CrustdataAcquisitionSafetyError('receipt_invalid','Trusted raw acquisition accounting is unavailable');
+  return parsed.data;
+}
 const DEFAULT_WAIT_INTERVAL_MS = 250;
 
 function disposablePrivacyAdapterEnabled(): boolean {
@@ -341,6 +356,7 @@ async function resolveStoredReceipt(
 
   return {
     result: await privacyFilterCrustdataResult(parseResult(current.result)),
+    ...(input.rankingProtocol===2?{rawAccounting:storedRawAccounting(current)}:{}),
     receiptId: current.id,
     reused: true,
     requestFingerprint: current.requestFingerprint,
@@ -431,6 +447,17 @@ export async function acquireCrustdataSearch(
   }
 
   let privacySafeResult: CrustdataSearchResult;
+  let rawAccounting:RawAcquisitionAccounting|undefined;
+  if(input.rankingProtocol===2) {
+    try {
+      rawAccounting=rawAccountingSchema.parse({version:1,receiptId:receipt.id,requestFingerprint,
+        providerTotal:result.providerTotal,relation:result.providerTotalRelation??null,
+        rawReturnedCount:result.rawReturnedCount,requestedLimit:result.requestedLimit});
+    }catch{
+      await dependencies.store.markUncertain(receipt.id,'provider_accounting_invalid').catch(()=>{});
+      throw new CrustdataAcquisitionSafetyError('receipt_uncertain','Provider accounting invalid; refusing another purchase');
+    }
+  }
   try {
     privacySafeResult = await privacyFilterCrustdataResult(result);
   } catch {
@@ -444,7 +471,11 @@ export async function acquireCrustdataSearch(
   }
 
   try {
-    await dependencies.store.complete(receipt.id, privacySafeResult);
+    // Existing receipt evidence reads these private top-level counts. Keep
+    // approximate totals null there so Flow cannot authorize a speculative spill.
+    const storedResult=rawAccounting?{...privacySafeResult,rawAccounting,
+      rawReturnedCount:rawAccounting.rawReturnedCount,providerTotal:rawAccounting.relation==='eq'?rawAccounting.providerTotal:null}:privacySafeResult;
+    await dependencies.store.complete(receipt.id, storedResult);
   } catch (error) {
     const message = errorMessage(error);
     throw new CrustdataAcquisitionSafetyError(
@@ -454,6 +485,7 @@ export async function acquireCrustdataSearch(
   }
   return {
     result: privacySafeResult,
+    ...(rawAccounting?{rawAccounting}:{}),
     receiptId: receipt.id,
     reused: false,
     requestFingerprint,
@@ -602,8 +634,8 @@ export async function acquireCrustdataSearchForRequest(
         await report();
       },
     };
-    return acquireCrustdataSearch({...input,reuseOnly:input.reuseOnly||!governedEnabled()},{store,beforeReserve:acquireCrustdataAccountCapacity,
-      search:(requirements,limit,options)=>searchPeople(requirements,limit,{...options,capacityAcquired:true,governed:true,beforeDispatch:async()=>{
+    return acquireCrustdataSearch({...input,...(binding.protocolVersion===2?{rankingProtocol:2 as const}:{}),reuseOnly:input.reuseOnly||!governedEnabled()},{store,beforeReserve:acquireCrustdataAccountCapacity,
+      search:(requirements,limit,options)=>searchPeople(requirements,limit,{...options,...(binding.protocolVersion===2?{rankingProtocol:2 as const}:{}),capacityAcquired:true,governed:true,beforeDispatch:async()=>{
         if(!receiptId || !active || !governedEnabled())throw Error('GOVERNED_GRANT_REQUIRED');
         // Rate waiting can outlive a grant. Recheck its server-clock deadline
         // and the current processing lease after waiting, immediately before HTTP.

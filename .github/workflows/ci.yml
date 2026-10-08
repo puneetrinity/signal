@@ -20,6 +20,8 @@ jobs:
       SIGNAL_SOURCING_DISPOSABLE: '1'
       SIGNAL_SOURCING_EXPECT_LOCALE: ${{ matrix.locale }}
       SIGNAL_SOURCING_OWNER_URL: postgresql://signal_collation_owner_test:local-test-only@127.0.0.1:55489/signal_collation_test
+      SIGNAL_RANKING_DISPOSABLE: '1'
+      SIGNAL_RANKING_OWNER_URL: postgresql://signal_collation_owner_test:local-test-only@127.0.0.1:55489/signal_ranking_collation_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -46,8 +48,10 @@ jobs:
           psql -d postgres -v ON_ERROR_STOP=1 <<'SQL'
           CREATE ROLE signal_collation_owner_test LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD 'local-test-only';
           CREATE DATABASE signal_collation_test OWNER signal_collation_owner_test;
+          CREATE DATABASE signal_ranking_collation_test OWNER signal_collation_owner_test;
           SQL
       - run: npm run test:governed-sourcing:pg
+      - run: npm run test:rubric-ranking:pg
       - name: Stop owned PostgreSQL 17
         if: always()
         run: |
@@ -69,12 +73,15 @@ jobs:
       - run: npm run check:no-db-push
       - run: npm run check:schema-control
       - run: npm run check:governed-sourcing
+      - run: npm run check:rubric-ranking
       - run: npm run check:candidate-privacy
       - run: npm run test:schema-control
       - run: npm run test:candidate-privacy-surfaces
       - run: npm run test:candidate-privacy
       - run: npm run test:sourced-candidate-ingest
       - run: npm run test:governed-sourcing
+      - run: npm run test:rubric-ranking
+      - run: npm run eval:rubric-ranking
       - run: npm run typecheck
       - run: npm test
 

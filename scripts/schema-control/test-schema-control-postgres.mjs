@@ -7,6 +7,7 @@ import { ROOT_DIR } from '../lib/database-bootstrap.mjs';
 import { CONTROL_SCHEMA, RUNTIME_ROLE } from './constants.mjs';
 import { beginBoundedTransaction, createPrisma } from './database.mjs';
 import { GOVERNED_FUNCTIONS, GOVERNED_TABLES } from '../check-governed-sourcing.mjs';
+import { RANKING_FUNCTIONS, RANKING_PRIVATE_FUNCTIONS, RANKING_TABLES } from '../check-rubric-ranking.mjs';
 
 if (process.env.RUN_SIGNAL_SCHEMA_CONTROL_POSTGRES !== '1') {
   throw new Error('RUN_SIGNAL_SCHEMA_CONTROL_POSTGRES=1 is required');
@@ -206,19 +207,31 @@ try {
   `);
   assert(afterAdoption[0].count === 0, 'Adoption changed a product row');
 
-  // Preserve the exact historical 22 -> 23 proof, then prove 23 -> 24.
+  // Preserve 22 -> 23 and 23 -> 24 separately, then prove 24 -> 25.
   // This is an empty, locally attested test database, never a rollback tool.
   historicalRoot = await mkdtemp(join(tmpdir(), 'signal-schema-history-'));
   await mkdir(resolve(historicalRoot, 'prisma/migrations'), { recursive: true });
   await cp(resolve(ROOT_DIR, 'prisma/schema.prisma'), resolve(historicalRoot, 'prisma/schema.prisma'));
   const historicalLock = JSON.parse(await readFile(resolve(ROOT_DIR, 'prisma/migrations.lock.json'), 'utf8'));
   const governedMigration = '20261004000000_governed_sourcing';
-  assert(historicalLock.migrations.at(-1).name === governedMigration, 'Unexpected current migration tail');
+  const rankingMigration = '20261006000000_rubric_ranking';
+  assert(historicalLock.migrations.at(-1).name === rankingMigration, 'Unexpected current migration tail');
+  historicalLock.migrations.pop();
+  const governedLock = structuredClone(historicalLock);
+  assert(historicalLock.migrations.at(-1).name === governedMigration, 'Unexpected historical migration tail');
   historicalLock.migrations.pop();
   for (const migration of historicalLock.migrations) {
     await cp(resolve(ROOT_DIR, 'prisma/migrations', migration.name), resolve(historicalRoot, 'prisma/migrations', migration.name), { recursive: true });
   }
   await writeFile(resolve(historicalRoot, 'prisma/migrations.lock.json'), `${JSON.stringify(historicalLock, null, 2)}\n`);
+  for (const table of RANKING_TABLES) {
+    const [row] = await admin.$queryRawUnsafe(`SELECT count(*)::integer count FROM public.${table}`);
+    assert(row.count === 0, 'Historical rehearsal requires empty ranking tables');
+  }
+  for (const signature of RANKING_FUNCTIONS) await admin.$executeRawUnsafe(`DROP FUNCTION public.${signature}`);
+  for (const table of [...RANKING_TABLES].reverse()) await admin.$executeRawUnsafe(`DROP TABLE public.${table}`);
+  for (const signature of RANKING_PRIVATE_FUNCTIONS) await admin.$executeRawUnsafe(`DROP FUNCTION public.${signature}`);
+  await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1', rankingMigration);
   for (const table of GOVERNED_TABLES) {
     const [row] = await admin.$queryRawUnsafe(`SELECT count(*)::integer count FROM public.${table}`);
     assert(row.count === 0, 'Historical rehearsal requires empty governed tables');
@@ -275,9 +288,16 @@ try {
     'Release wrapper did not apply migration 23 exactly once',
   );
 
+  await cp(resolve(ROOT_DIR,'prisma/migrations',governedMigration),resolve(historicalRoot,'prisma/migrations',governedMigration),{recursive:true});
+  await writeFile(resolve(historicalRoot,'prisma/migrations.lock.json'),`${JSON.stringify(governedLock,null,2)}\n`);
+  await requireSuccess(
+    await runNode('scripts/schema-control/migrate-release.mjs', {...releaseEnvironment,
+      SIGNAL_SCHEMA_CONTROL_TEST_ROOT:historicalRoot,SIGNAL_SCHEMA_DISPOSABLE_SINGLE_CREDENTIAL:'1'}),
+    '23-to-24 governed sourcing release',
+  );
   await requireSuccess(
     await runNode('scripts/schema-control/migrate-release.mjs', releaseEnvironment),
-    '23-to-24 governed sourcing release',
+    '24-to-25 rubric ranking release',
   );
   await requireSuccess(
     await runNode('scripts/schema-control/provision-runtime-role.mjs', {

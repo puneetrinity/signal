@@ -4,6 +4,7 @@ import { assertCoreRelations, assertIdentity, assertRuntimePrivileges, beginBoun
   readIdentity, readPrismaLedger } from './database.mjs';
 import { assertPrismaLedger, loadMigrationLock } from './manifest.mjs';
 import {GOVERNED_TABLES,GOVERNED_FUNCTIONS,assertGovernedSourcingCatalog} from '../check-governed-sourcing.mjs';
+import {RANKING_TABLES,RANKING_FUNCTIONS,RANKING_PRIVATE_FUNCTIONS,assertRankingCatalog} from '../check-rubric-ranking.mjs';
 
 const identity = resolveIdentityEnvironment();
 const directUrl = requireValue(process.env, 'DIRECT_URL');
@@ -58,17 +59,19 @@ try {
     await tx.$executeRawUnsafe(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${RUNTIME_ROLE}`);
     await tx.$executeRawUnsafe(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO ${RUNTIME_ROLE}`);
     await tx.$executeRawUnsafe(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO ${RUNTIME_ROLE}`);
-    for(const table of GOVERNED_TABLES) {
+    for(const table of [...GOVERNED_TABLES,...RANKING_TABLES]) {
       await tx.$executeRawUnsafe(`REVOKE ALL PRIVILEGES ON public.${table} FROM ${RUNTIME_ROLE},PUBLIC`);
       const columns=await tx.$queryRawUnsafe("SELECT attname FROM pg_attribute WHERE attrelid=to_regclass($1) AND attnum>0 AND NOT attisdropped ORDER BY attnum",'public.'+table);
       const names=columns.map(row=>quoteIdentifier(row.attname)).join(',');
       await tx.$executeRawUnsafe(`REVOKE SELECT(${names}),INSERT(${names}),UPDATE(${names}),REFERENCES(${names}) ON public.${table} FROM ${RUNTIME_ROLE},PUBLIC`);
     }
-    for(const signature of GOVERNED_FUNCTIONS) {
+    for(const signature of [...GOVERNED_FUNCTIONS,...RANKING_FUNCTIONS]) {
       await tx.$executeRawUnsafe(`REVOKE ALL ON FUNCTION public.${signature} FROM ${RUNTIME_ROLE},PUBLIC`);
       await tx.$executeRawUnsafe(`GRANT EXECUTE ON FUNCTION public.${signature} TO ${RUNTIME_ROLE}`);
     }
     await assertGovernedSourcingCatalog(tx,{role:RUNTIME_ROLE});
+    for(const signature of RANKING_PRIVATE_FUNCTIONS)await tx.$executeRawUnsafe(`REVOKE ALL ON FUNCTION public.${signature} FROM ${RUNTIME_ROLE},PUBLIC`);
+    await assertRankingCatalog(tx,{role:RUNTIME_ROLE});
 
     if (existingIdentity !== null) {
       await tx.$executeRawUnsafe(`REVOKE ALL ON SCHEMA ${CONTROL_SCHEMA} FROM ${RUNTIME_ROLE}`);
@@ -103,6 +106,7 @@ try {
         await assertRuntimePrivileges(tx, { allowMissingControl: true });
       }
       await assertGovernedSourcingCatalog(tx);
+      await assertRankingCatalog(tx);
     }, { maxWait: 5_000, timeout: 15_000 });
   } finally {
     await runtime.$disconnect();

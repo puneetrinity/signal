@@ -22,6 +22,9 @@ import * as rateGate from '../crustdata-rate-gate';
 import * as authority from '../governed-authority';
 import * as provider from '../crustdata-client';
 import {artifactHash} from '../governed-contracts';
+import * as privacyRepository from '@/lib/candidate-privacy/repository';
+import * as privacyDecision from '@/lib/candidate-privacy/decision';
+import {isProviderShortfall} from '../relaxation-ladder';
 
 const requirements: JobRequirements = {
   title: "Backend Engineer",
@@ -219,6 +222,46 @@ describe('real governed acquisition branch with transport-only substitutes',()=>
 });
 
 describe("request-scoped Crustdata acquisition receipts", () => {
+  it('retains spill capacity through the real privacy filter even when every returned person is suppressed',async()=>{
+    delete process.env.SIGNAL_CANDIDATE_PRIVACY_TEST_ADAPTER;
+    vi.spyOn(privacyRepository,'requireHealthyCandidatePrivacyContext').mockResolvedValue({} as never);
+    vi.spyOn(privacyDecision,'createCandidateAdmissionProofs').mockResolvedValue(new Map());
+    const store=new InMemoryReceiptStore(),search=vi.fn().mockResolvedValue({...exactResult,
+      profiles:[{social_handles:{professional_network_identifier:{profile_url:'https://linkedin.com/in/synthetic-private'}}}],
+      providerTotal:1,providerTotalRelation:'eq',rawReturnedCount:1});
+    const acquired=await acquireCrustdataSearch(acquisitionInput({rankingProtocol:2}),{store,search});
+    expect(acquired.result.profiles).toEqual([]);expect(acquired.result.providerTotal).toBeNull();
+    expect(acquired.result.rawReturnedCount).toBe(0);
+    expect(isProviderShortfall(acquired.rawAccounting!.providerTotal,300)).toBe(true);
+    expect(300-acquired.rawAccounting!.rawReturnedCount).toBe(299);
+    expect(search).toHaveBeenCalledTimes(1);
+  });
+  it('seals protocol2 paid counts independently and reuses them without another purchase',async()=>{
+    const store=new InMemoryReceiptStore();
+    const search=vi.fn().mockResolvedValue({...exactResult,providerTotal:100,providerTotalRelation:'eq',rawReturnedCount:100});
+    const input=acquisitionInput({rankingProtocol:2});
+    const first=await acquireCrustdataSearch(input,{store,search});
+    expect(first.rawAccounting).toMatchObject({version:1,providerTotal:100,relation:'eq',rawReturnedCount:100,requestedLimit:300,receiptId:first.receiptId});
+    const second=await acquireCrustdataSearch(input,{store,search});
+    expect(second.rawAccounting).toEqual(first.rawAccounting);expect(search).toHaveBeenCalledTimes(1);
+  });
+  it('never promotes approximate totals into Flow spill permission',async()=>{
+    const store=new InMemoryReceiptStore();
+    const search=vi.fn().mockResolvedValue({...exactResult,providerTotal:100,providerTotalRelation:'approximate',rawReturnedCount:100});
+    const acquired=await acquireCrustdataSearch(acquisitionInput({rankingProtocol:2}),{store,search});
+    expect(acquired.rawAccounting?.relation).toBe('approximate');
+    expect([...store.receipts.values()][0].result).toMatchObject({providerTotal:null,rawReturnedCount:100});
+  });
+  it('refuses protocol2 over-return and legacy receipts without raw proof, never reacquiring',async()=>{
+    const store=new InMemoryReceiptStore(),search=vi.fn().mockResolvedValue(exactResult);
+    await acquireCrustdataSearch(acquisitionInput(),{store,search});
+    await expect(acquireCrustdataSearch(acquisitionInput({rankingProtocol:2}),{store,search})).rejects.toMatchObject({code:'receipt_invalid'});
+    expect(search).toHaveBeenCalledTimes(1);
+    const over=new InMemoryReceiptStore();
+    await expect(acquireCrustdataSearch(acquisitionInput({rankingProtocol:2}),{store:over,
+      search:vi.fn().mockResolvedValue({...exactResult,providerTotalRelation:'eq',rawReturnedCount:301})})).rejects.toMatchObject({code:'receipt_uncertain'});
+    expect([...over.receipts.values()][0].error).toBe('provider_accounting_invalid');
+  });
   it('waits for rate capacity before reserving a receipt and never calls transport on gate failure',async()=>{
     const store=new InMemoryReceiptStore(),reserve=vi.spyOn(store,'reserve'),search=vi.fn();
     const beforeReserve=vi.fn(async()=>{expect(reserve).not.toHaveBeenCalled();throw new CrustdataNoDispatchError();});

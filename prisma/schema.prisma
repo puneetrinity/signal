@@ -160,6 +160,7 @@ model Candidate {
   globalLink                 CandidateGlobalLink?
   contactEnrichmentOperation ContactEnrichmentOperation?
   privacyProjections         CandidatePrivacyProjection[]
+  rankingItems               GovernedRankingItem[]
 
   // Tenant-scoped unique constraints
   @@unique([tenantId, id])
@@ -743,8 +744,61 @@ model GovernedSourcingBinding {
   tenant GovernedSourcingTenant @relation(fields:[tenantId],references:[tenantId],onDelete:Restrict,onUpdate:NoAction,map:"gov_binding_tenant_fk")
   request JobSourcingRequest @relation(fields:[requestId,tenantId],references:[id,tenantId],onDelete:Restrict,onUpdate:NoAction,map:"gov_binding_request_fk")
   grants GovernedSourcingGrant[]
+  rankingRuns GovernedRankingRun[]
   @@id([tenantId,flowRunId],map:"gov_binding_pk")
   @@map("governed_sourcing_bindings")
+}
+
+model GovernedRankingRun {
+  tenantId String @map("tenant_id")
+  flowRunId String @map("flow_run_id") @db.Uuid
+  revisionId String @map("revision_id") @db.Uuid
+  inputSha256 String @map("input_sha256")
+  contractSha256 String @map("contract_sha256")
+  outputSha256 String? @map("output_sha256")
+  policyVersion String @map("policy_version")
+  taxonomyVersion String @map("taxonomy_version")
+  adapterVersion String @map("adapter_version")
+  tieVersion String @map("tie_version")
+  asOf DateTime @map("as_of") @db.Timestamptz(6)
+  inputCount Int @map("input_count")
+  state String
+  leaseId String? @map("lease_id") @db.Uuid
+  leaseUntil DateTime? @map("lease_until") @db.Timestamptz(6)
+  attemptCount Int @default(1) @map("attempt_count")
+  executionAttemptId String @map("execution_attempt_id")
+  processingLeaseId String @map("processing_lease_id")
+  createdAt DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(dbgenerated("clock_timestamp()")) @map("updated_at") @db.Timestamptz(6)
+  binding GovernedSourcingBinding @relation(fields:[tenantId,flowRunId],references:[tenantId,flowRunId],onDelete:Restrict,onUpdate:Restrict,map:"gr_run_binding_fk")
+  items GovernedRankingItem[]
+  @@id([tenantId,flowRunId,revisionId],map:"gr_run_pk")
+  @@unique([tenantId,flowRunId,inputSha256],map:"gr_run_input_uq")
+  @@unique([tenantId,flowRunId],map:"gr_run_one_uq")
+  @@map("governed_ranking_runs")
+}
+
+model GovernedRankingItem {
+  tenantId String @map("tenant_id")
+  flowRunId String @map("flow_run_id") @db.Uuid
+  revisionId String @map("revision_id") @db.Uuid
+  candidateId String @map("candidate_id")
+  evidence Json
+  evidenceSha256 String @map("evidence_sha256")
+  assessment Json?
+  scoreN Int? @map("score_n")
+  scoreD Int? @map("score_d")
+  localMatch Int? @map("local_match")
+  ordinal Int?
+  eligibilityCode String? @map("eligibility_code")
+  experienceEnvelope Json? @map("experience_envelope")
+  selectedOrdinal Int? @map("selected_ordinal")
+  run GovernedRankingRun @relation(fields:[tenantId,flowRunId,revisionId],references:[tenantId,flowRunId,revisionId],onDelete:Restrict,onUpdate:Restrict,map:"gr_item_run_fk")
+  candidate Candidate @relation(fields:[tenantId,candidateId],references:[tenantId,id],onDelete:Restrict,onUpdate:Restrict,map:"gr_item_candidate_fk")
+  @@id([tenantId,flowRunId,revisionId,candidateId],map:"gr_item_pk")
+  @@unique([tenantId,flowRunId,revisionId,ordinal],map:"gr_item_ordinal_uq")
+  @@unique([tenantId,flowRunId,revisionId,selectedOrdinal],map:"gr_item_selected_uq")
+  @@map("governed_ranking_items")
 }
 
 model GovernedSourcingGrant {
