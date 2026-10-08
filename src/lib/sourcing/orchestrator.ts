@@ -6,7 +6,7 @@ import { toJsonValue } from '@/lib/prisma/json';
 import {GovernedRepository} from './governed-authority';
 import {governedEnabled,type GovernedSource} from './governed-contracts';
 import {RankingRepository,type RankingRead,type RankingSourceType} from './rubric/repository';
-import {adaptProfile,type CanonicalEvidence,type EvidenceFact} from './rubric/evidence';
+import {adaptProfile,OversizedEvidenceError,type WithheldProfile,type CanonicalEvidence,type EvidenceFact} from './rubric/evidence';
 import {rankingHash} from './rubric/contracts';
 import { createLogger } from '@/lib/logger';
 import { buildJobRequirements, type SourcingJobContextInput } from './jd-digest';
@@ -3002,6 +3002,7 @@ export async function runSourcingOrchestrator(
             const profileByUrl = new Map(mappedForRanking.map((p) => [p.id, p]));
             const materializationLimit=governedCommand?.protocolVersion===2?2000:100;
             const governedEvidenceById=new Map<string,CanonicalEvidence>();
+            const governedWithheldById=new Map<string,WithheldProfile>();
             const governedSourceById=new Map<string,RankingSourceType>();
 
             // ── Durably ingest all paid profiles into Memory ───────────────
@@ -3309,11 +3310,18 @@ export async function runSourcingOrchestrator(
                 const permittedFacts:EvidenceFact[]=(privateEvidence?.skills??[]).map(value=>({field:'skill',value,
                   ref:'tenant_private_v1.skills',kind:'candidate_provided',sourceVersion:rankingHash(privateEvidence?.skills),
                   observedAt,scope:'organization',organizationRef:governedCommand.organizationRef}));
+                try {
                 const normalized=adaptProfile({candidateId:dbId,organizationRef:governedCommand.organizationRef,
                   profile:evidenceProfile,sourceVersion:rankingHash(evidenceProfile),observedAt,permittedFacts});
+                if(governedWithheldById.has(dbId))throw Error('RANKING_IDENTITY_CONFLICT');
                 if(governedEvidenceById.has(dbId)&&rankingHash(governedEvidenceById.get(dbId))!==rankingHash(normalized))throw Error('RANKING_IDENTITY_CONFLICT');
                 governedEvidenceById.set(dbId,normalized);
                 governedSourceById.set(dbId,sourceTypeForScored(sc));
+                } catch(error) {
+                  if(!(error instanceof OversizedEvidenceError))throw error;
+                  if(governedEvidenceById.has(dbId)||(governedWithheldById.has(dbId)&&rankingHash(governedWithheldById.get(dbId))!==rankingHash(error.record)))throw Error('RANKING_IDENTITY_CONFLICT');
+                  governedWithheldById.set(dbId,error.record);
+                }
               }
 
               return {
@@ -3349,7 +3357,7 @@ export async function runSourcingOrchestrator(
               await assertCurrentExecution();
               publishedRanking=await new RankingRepository().publish({tenantId,flowRunId:governedCommand.flowRunId,
                 contract:governedCommand.rankingContract,executionAttemptId,processingLeaseId,
-                evidence:[...governedEvidenceById.values()],sourceTypes:governedSourceById});
+                evidence:[...governedEvidenceById.values()],withheld:[...governedWithheldById.values()],sourceTypes:governedSourceById});
               const cards=new Map(allRankedWithIds.map(c=>[c.candidateId,c]));
               crustdataPrimaryList=publishedRanking.items.map(item=>{
                 const card=cards.get(item.candidateId);if(!card)throw Error('RANKING_OUTPUT_CONFLICT');

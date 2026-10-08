@@ -6,7 +6,7 @@ const root = process.cwd();
 
 const enforcementContracts = [
   ['rubric-contract-boundary','src/lib/sourcing/rubric/contracts.ts',['rankingContractSchema','rankingHash(body)!==contractHash']],
-  ['rubric-evidence-boundary','src/lib/sourcing/rubric/evidence.ts',['Foreign private evidence','evidenceSchema.parse']],
+  ['rubric-evidence-boundary','src/lib/sourcing/rubric/evidence.ts',['Foreign private evidence','evidenceShape.parse','new OversizedEvidenceError']],
   ['rubric-experience-boundary','src/lib/sourcing/rubric/experience.ts',['calculateExperience','roles.filter(role => !isInternship(role))']],
   ['rubric-score-boundary','src/lib/sourcing/rubric/score.ts',['evidenceSchema.parse','experienceEligibility']],
   ['rubric-repository-boundary','src/lib/sourcing/rubric/repository.ts',['pg_advisory_xact_lock','requireHealthyCandidatePrivacyContext(transaction)']],

@@ -26,6 +26,7 @@
     { "name": "20260823000000_add_candidate_privacy_projection", "sha256": "ab4245e53e7acc7e0ec3e2c2db93c89de3a5e375f7d6633816b14eaeb04c8fd9" },
     { "name": "20260824000000_add_candidate_privacy_rebuild_lease", "sha256": "79585b23ffbbdb617d13af6f48ec5049f4c4c6478555efd19dab903081dcc5ab" },
     { "name": "20261004000000_governed_sourcing", "sha256": "bc84fab48491284f90d6b9d6017023aaf17bf22569344d810b69a49192cffa93" },
-    { "name": "20261006000000_rubric_ranking", "sha256": "61002686f0b36fdc78a86e54786f3fea8a1d623cc67c432125d1549767ea1998" }
+    { "name": "20261006000000_rubric_ranking", "sha256": "61002686f0b36fdc78a86e54786f3fea8a1d623cc67c432125d1549767ea1998" },
+    {"name":"20261008000000_rubric_evidence_isolation","sha256":"ffc7d2a5944579fcc85c796123aef97464348d51ee8a76827bd062d7ca8c4d61"}
   ]
 }

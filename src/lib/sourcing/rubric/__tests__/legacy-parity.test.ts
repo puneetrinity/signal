@@ -11,11 +11,29 @@ import * as locations from '@/lib/taxonomy/location-service';
 import * as education from '@/lib/taxonomy/education';
 import {rankCandidates,type CandidateForRanking} from '../../ranking-new';
 import {evaluateOffline} from '../../../../../scripts/eval-rubric-ranking';
-import {adaptProfile} from '../evidence';
+import {adaptProfile,OversizedEvidenceError} from '../evidence';
 import {scoreEvidence} from '../score';
 import {createRankingContract,rankingHash} from '../contracts';
 
 describe('ranking boundary and synthetic replay',()=>{
+ it('executes the actual orchestration isolation branch without swallowing identity or validation failures',()=>{
+  const source=readFileSync('src/lib/sourcing/orchestrator.ts','utf8');
+  const start=source.indexOf('                try {\n                const normalized=adaptProfile');
+  const end=source.indexOf('\n              }\n\n              return {',start);
+  expect(start).toBeGreaterThan(0);expect(end).toBeGreaterThan(start);
+  const body=source.slice(start,end),governedEvidenceById=new Map(),governedWithheldById=new Map(),governedSourceById=new Map();
+  const context={adaptProfile,OversizedEvidenceError,rankingHash,dbId:'large',governedCommand:{organizationRef:'28'},
+   evidenceProfile:{skills:{professional_network_skills:Array.from({length:250},(_,i)=>`skill ${i} ${'x'.repeat(150)}`)}},
+   observedAt:'2020-01-01T00:00:00.000Z',permittedFacts:[],governedEvidenceById,governedWithheldById,governedSourceById,
+   sourceTypeForScored:()=> 'pool',sc:{}};
+  runInNewContext(body,context);expect(governedWithheldById.get('large').reason).toBe('evidence_too_large');
+  expect(governedEvidenceById.size).toBe(0);runInNewContext(body,context);expect(governedWithheldById.size).toBe(1);
+  context.evidenceProfile={skills:{professional_network_skills:['Java']}};
+  expect(()=>runInNewContext(body,context)).toThrow('RANKING_IDENTITY_CONFLICT');
+  context.dbId='normal';runInNewContext(body,context);expect(governedEvidenceById.has('normal')).toBe(true);
+  context.governedCommand.organizationRef='invalid';expect(()=>runInNewContext(body,context)).toThrow();
+  expect(governedWithheldById.size).toBe(1);
+ });
  it('executes the actual budget-refusal branch: protocol2 cannot fall through into legacy publication',()=>{
   const source=readFileSync('src/lib/sourcing/orchestrator.ts','utf8');
   const body=source.match(/if \(!budget.allowed \|\| budget.maxQueries <= 0\) \{([\s\S]*?)\n    \} else \{/)?.[1];

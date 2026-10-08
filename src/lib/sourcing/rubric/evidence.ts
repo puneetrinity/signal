@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { rankingHash } from './contracts';
+import { canonical, rankingHash } from './contracts';
 import { normalize } from './taxonomy';
 import type { EmploymentInterval } from './experience';
 
@@ -15,13 +15,36 @@ export const factSchema=z.object({
 export type EvidenceFact=z.infer<typeof factSchema>;
 const roleSchema=z.object({title:z.string().max(500).optional(),employmentType:z.string().max(100).optional(),
   start:z.string().max(40).nullable().optional(),end:z.string().max(40).nullable().optional(),ongoing:z.boolean().optional()}).strict();
-export const evidenceSchema=z.object({candidateId:z.string().min(1).max(200),organizationRef:z.string().regex(/^[1-9][0-9]*$/),
+export const EVIDENCE_MAX_BYTES=65_536;
+export const EVIDENCE_POOL_MAX_BYTES=134_217_728;
+// PostgreSQL jsonb::text uses one space after each comma/colon. Object key
+// order changes no byte count. Match its numeric and UTF8 string encoding.
+export function evidenceBytes(value:unknown):number {
+  // Optional undefined object properties are omitted on the JSON wire. Count
+  // recursively rather than allocating a second full 128MiB command string.
+  if(Array.isArray(value))return 2+Math.max(0,value.length-1)*2+value.reduce((n,v)=>n+evidenceBytes(v),0);
+  if(value!==null&&typeof value==='object'){
+    const entries=Object.entries(value).filter(([,v])=>v!==undefined);
+    return 2+Math.max(0,entries.length-1)*2+entries.reduce((n,[k,v])=>n+Buffer.byteLength(JSON.stringify(k),'utf8')+2+evidenceBytes(v),0);
+  }
+  return Buffer.byteLength(canonical(value),'utf8');
+}
+export const withheldProfileSchema=z.object({candidateId:z.string().min(1).max(200),
+  reason:z.literal('evidence_too_large'),evidenceHash:z.string().regex(/^[a-f0-9]{64}$/),bytes:z.number().int().min(EVIDENCE_MAX_BYTES+1).max(Number.MAX_SAFE_INTEGER),
+  limit:z.literal(EVIDENCE_MAX_BYTES)}).strict();
+export type WithheldProfile=z.infer<typeof withheldProfileSchema>;
+export class OversizedEvidenceError extends Error {
+  constructor(readonly record:WithheldProfile){super('RANKING_EVIDENCE_TOO_LARGE');}
+}
+const evidenceShape=z.object({candidateId:z.string().min(1).max(200),organizationRef:z.string().regex(/^[1-9][0-9]*$/),
   // Frozen display provenance only. Never read by a criterion or comparator.
   presentationSource:z.enum(['pool','pool_enriched','discovered']).optional(),
   facts:z.array(factSchema).max(1000),employment:z.array(roleSchema).max(500),version:z.literal('rubric-evidence-v1'),
 }).strict().superRefine((v,ctx)=>{
   if(v.facts.some(f=>f.scope==='organization'&&f.organizationRef!==v.organizationRef)) ctx.addIssue({code:z.ZodIssueCode.custom,message:'Foreign private evidence'});
-  if(Buffer.byteLength(JSON.stringify(v),'utf8')>32768) ctx.addIssue({code:z.ZodIssueCode.custom,message:'Evidence too large'});
+});
+export const evidenceSchema=evidenceShape.superRefine((v,ctx)=>{
+  if(evidenceBytes(v)>EVIDENCE_MAX_BYTES)ctx.addIssue({code:z.ZodIssueCode.custom,message:'Evidence too large'});
 });
 export type CanonicalEvidence=z.infer<typeof evidenceSchema>;
 const record=(v:unknown):Record<string,unknown>=>v!==null && typeof v==='object' && !Array.isArray(v)?v as Record<string,unknown>:{};
@@ -78,8 +101,13 @@ export function adaptProfile(input:{candidateId:string;organizationRef:string;pr
   const unique=[...new Map(facts.map(f=>[rankingHash(f),f])).values()].sort((a,b)=>{
     const x=rankingHash(a),y=rankingHash(b);return x<y?-1:x>y?1:0;
   });
-  return evidenceSchema.parse({candidateId:input.candidateId,organizationRef:input.organizationRef,
+  const result=evidenceShape.parse({candidateId:input.candidateId,organizationRef:input.organizationRef,
     facts:unique,employment,version:'rubric-evidence-v1'});
+  // Reserve the longest source label before classification; attaching display
+  // provenance later cannot push an admitted profile over the database cap.
+  const bytes=evidenceBytes({...result,presentationSource:'pool_enriched'});
+  if(bytes>EVIDENCE_MAX_BYTES)throw new OversizedEvidenceError({candidateId:input.candidateId,reason:'evidence_too_large',evidenceHash:rankingHash(result),bytes,limit:EVIDENCE_MAX_BYTES});
+  return result;
 }
 
 /** Select allowed, observed facts with scoped precedence. Missing conflicting

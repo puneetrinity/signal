@@ -762,6 +762,7 @@ model GovernedRankingRun {
   tieVersion String @map("tie_version")
   asOf DateTime @map("as_of") @db.Timestamptz(6)
   inputCount Int @map("input_count")
+  withheldProfiles Json @default("[]") @map("withheld_profiles")
   state String
   leaseId String? @map("lease_id") @db.Uuid
   leaseUntil DateTime? @map("lease_until") @db.Timestamptz(6)

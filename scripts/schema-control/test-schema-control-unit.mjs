@@ -12,8 +12,8 @@ function assert(condition, message) {
 }
 
 const migrations = await loadMigrationLock();
-assert(migrations.length === 25, `Expected 25 locked migrations, found ${migrations.length}`);
-assert(migrations.at(-1).name === '20261006000000_rubric_ranking', 'Expected rubric ranking at the locked tail');
+assert(migrations.length === 26, `Expected 26 locked migrations, found ${migrations.length}`);
+assert(migrations.at(-1).name === '20261008000000_rubric_evidence_isolation', 'Expected evidence isolation at the locked tail');
 const validRows = migrations.map((entry, index) => ({
   migration_name: entry.name,
   checksum: entry.sha256,

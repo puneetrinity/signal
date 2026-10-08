@@ -207,7 +207,7 @@ try {
   `);
   assert(afterAdoption[0].count === 0, 'Adoption changed a product row');
 
-  // Preserve 22 -> 23 and 23 -> 24 separately, then prove 24 -> 25.
+  // Preserve 22 -> 23, 23 -> 24 and 24 -> 25 separately, then prove 25 -> 26.
   // This is an empty, locally attested test database, never a rollback tool.
   historicalRoot = await mkdtemp(join(tmpdir(), 'signal-schema-history-'));
   await mkdir(resolve(historicalRoot, 'prisma/migrations'), { recursive: true });
@@ -215,6 +215,10 @@ try {
   const historicalLock = JSON.parse(await readFile(resolve(ROOT_DIR, 'prisma/migrations.lock.json'), 'utf8'));
   const governedMigration = '20261004000000_governed_sourcing';
   const rankingMigration = '20261006000000_rubric_ranking';
+  const isolationMigration = '20261008000000_rubric_evidence_isolation';
+  assert(historicalLock.migrations.at(-1).name === isolationMigration, 'Unexpected isolation tail');
+  historicalLock.migrations.pop();
+  const rankingLock = structuredClone(historicalLock);
   assert(historicalLock.migrations.at(-1).name === rankingMigration, 'Unexpected current migration tail');
   historicalLock.migrations.pop();
   const governedLock = structuredClone(historicalLock);
@@ -232,6 +236,7 @@ try {
   for (const table of [...RANKING_TABLES].reverse()) await admin.$executeRawUnsafe(`DROP TABLE public.${table}`);
   for (const signature of RANKING_PRIVATE_FUNCTIONS) await admin.$executeRawUnsafe(`DROP FUNCTION public.${signature}`);
   await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1', rankingMigration);
+  await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1', isolationMigration);
   for (const table of GOVERNED_TABLES) {
     const [row] = await admin.$queryRawUnsafe(`SELECT count(*)::integer count FROM public.${table}`);
     assert(row.count === 0, 'Historical rehearsal requires empty governed tables');
@@ -295,9 +300,16 @@ try {
       SIGNAL_SCHEMA_CONTROL_TEST_ROOT:historicalRoot,SIGNAL_SCHEMA_DISPOSABLE_SINGLE_CREDENTIAL:'1'}),
     '23-to-24 governed sourcing release',
   );
+  await cp(resolve(ROOT_DIR,'prisma/migrations',rankingMigration),resolve(historicalRoot,'prisma/migrations',rankingMigration),{recursive:true});
+  await writeFile(resolve(historicalRoot,'prisma/migrations.lock.json'),`${JSON.stringify(rankingLock,null,2)}\n`);
+  await requireSuccess(
+    await runNode('scripts/schema-control/migrate-release.mjs', {...releaseEnvironment,
+      SIGNAL_SCHEMA_CONTROL_TEST_ROOT:historicalRoot,SIGNAL_SCHEMA_DISPOSABLE_SINGLE_CREDENTIAL:'1'}),
+    '24-to-25 rubric ranking release',
+  );
   await requireSuccess(
     await runNode('scripts/schema-control/migrate-release.mjs', releaseEnvironment),
-    '24-to-25 rubric ranking release',
+    '25-to-26 evidence isolation release',
   );
   await requireSuccess(
     await runNode('scripts/schema-control/provision-runtime-role.mjs', {

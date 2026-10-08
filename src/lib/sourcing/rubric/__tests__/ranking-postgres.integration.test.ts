@@ -4,7 +4,7 @@ import {resolve} from 'node:path';
 import {Client} from 'pg';
 import {afterAll,afterEach,beforeAll,beforeEach,describe,expect,it} from 'vitest';
 import {createRankingContract,rankingHash} from '../contracts';
-import {adaptProfile} from '../evidence';
+import {adaptProfile,evidenceBytes,type WithheldProfile} from '../evidence';
 import {rankEvidence} from '../score';
 import {RankingRepository} from '../repository';
 import {RANKING_CATALOG_SQL,RANKING_CATALOG_SHA256} from '../../../../../scripts/check-rubric-ranking.mjs';
@@ -68,6 +68,73 @@ describe.skipIf(!enabled)('ranking atomic database publication',()=>{
  afterAll(async()=>{await db?.query('ROLLBACK');await db?.end();});
  it('matches the C-ordered catalog digest under the database locale',async()=>{
   expect((await db.query(RANKING_CATALOG_SQL)).rows[0].digest).toBe(RANKING_CATALOG_SHA256);
+ });
+ it('matches SQL byte sizing for nested unicode and escaped evidence',async()=>{
+  const f=await fixture();
+  const value={...f.evidence[0],extra:['é 😀 \n\t\"\\',{},[],1e-7]};
+  expect(await one('SELECT octet_length($1::jsonb::text) result',[value])).toBe(evidenceBytes(value));
+ });
+ it('accepts exactly 64KiB evidence in SQL and refuses one byte over without sealing a run',async()=>{
+  const f=await fixture(),e={...f.evidence[0],facts:Array.from({length:150},()=>({...f.evidence[0].facts[0],value:'x'.repeat(40)}))};
+  while(evidenceBytes(e)<65536){const room=65536-evidenceBytes(e),fact=e.facts.find(f=>f.value.length<500);if(!fact)throw Error('fixture capacity');fact.value+='x'.repeat(Math.min(room,500-fact.value.length));}
+  expect(await one('SELECT octet_length($1::jsonb::text) result',[e])).toBe(65536);
+  const over=structuredClone(e);over.facts.find(f=>f.value.length<500)!.value+='x';
+  await refusal(()=>one('SELECT signal_ranking_claim($1,$2,$3) result',[tenant,f.flow,{...f.command,evidence:[over]}]),'gr_item_shape_ck');
+  expect(await one('SELECT count(*)::integer result FROM governed_ranking_runs')).toBe(0);
+  const claimed=await one('SELECT signal_ranking_claim($1,$2,$3) result',[tenant,f.flow,{...f.command,evidence:[e]}]);
+  expect(claimed.evidence).toHaveLength(1);
+ });
+ it('upgrades a committed-0025 sealed run without rewriting its input or evidence',async()=>{
+  // Disposable savepoint only: reconstruct the prior functions/column layout,
+  // seal an old-format input, then exercise the real forward migration.
+  await db.query('ALTER TABLE governed_ranking_runs DROP COLUMN withheld_profiles');
+  const old=readFileSync('prisma/migrations/20261006000000_rubric_ranking/migration.sql','utf8');
+  await db.query(old.slice(old.indexOf('CREATE FUNCTION public.signal_ranking_claim'),old.indexOf('CREATE FUNCTION public.signal_ranking_read')).replaceAll('CREATE FUNCTION','CREATE OR REPLACE FUNCTION'));
+  const f=await fixture();f.command.evidence=f.evidence.map(e=>({...e,presentationSource:'pool' as const}));
+  const sealed=await f.claim();
+  await db.query(readFileSync('prisma/migrations/20261008000000_rubric_evidence_isolation/migration.sql','utf8'));
+  expect(await one('SELECT withheld_profiles result FROM governed_ranking_runs')).toEqual([]);
+  expect(await one('SELECT input_sha256 result FROM governed_ranking_runs')).toBe(sealed.inputHash);
+  const replacement=randomUUID();await db.query('UPDATE job_sourcing_requests SET processing_lease_id=$2 WHERE id=$1',[f.bound.requestId,replacement]);
+  const repo=new RankingRepository(async(sql,args)=>(await db.query(sql,args)).rows);
+  const result=await repo.resume({tenantId:tenant,flowRunId:f.flow,contract:f.ranking,executionAttemptId:f.bound.executionAttemptId,processingLeaseId:replacement});
+  expect(result?.revisionId).toBe(sealed.revisionId);expect(result?.items.map(i=>i.candidateId)).toEqual(['a','z']);
+ });
+ it.each([false,true])('isolates oversized candidates, seals retry and publishes counts only (all=%s)',async all=>{
+  const f=await fixture(),repo=new RankingRepository(async(sql,args)=>(await db.query(sql,args)).rows);
+  const withheld:WithheldProfile[]=(all?['a','z']:['z']).map(candidateId=>({candidateId,reason:'evidence_too_large',evidenceHash:hash,bytes:65537,limit:65536}));
+  const input={tenantId:tenant,flowRunId:f.flow,contract:f.ranking,executionAttemptId:f.bound.executionAttemptId,processingLeaseId:f.processingLeaseId,
+   evidence:all?[]:f.evidence.filter(e=>e.candidateId==='a'),withheld,sourceTypes:new Map([['a','pool' as const]])};
+  const result=await repo.publish(input);
+  expect(result.items.map(e=>e.candidateId)).toEqual(all?[]:['a']);expect(JSON.stringify(result)).not.toContain('evidence_too_large');
+  expect(await repo.publish(input)).toEqual(result);
+  expect(await one('SELECT withheld_profiles result FROM governed_ranking_runs')).toEqual(withheld);
+  const diagnostics=await one('SELECT diagnostics result FROM job_sourcing_requests WHERE id=$1',[f.bound.requestId]);
+  expect(diagnostics.rubricRanking).toMatchObject({consideredCount:2,withheldCount:withheld.length,publishedCount:all?0:1});
+  expect(JSON.stringify(diagnostics.rubricRanking)).not.toContain('candidateId');
+  await refusal(()=>repo.publish({...input,withheld:withheld.map(e=>({...e,bytes:65538}))}),'RANKING_INPUT_CONFLICT');
+  await refusal(()=>db.query("UPDATE governed_ranking_runs SET withheld_profiles='[]'"),'RANKING_IMMUTABLE');
+ });
+ it('refuses foreign, duplicate and invalid withholding and requires current privacy projections',async()=>{
+  const f=await fixture(),withheld={candidateId:'z',reason:'evidence_too_large',evidenceHash:hash,bytes:65537,limit:65536};
+  const claim=(w:unknown)=>one('SELECT signal_ranking_claim($1,$2,$3) result',[tenant,f.flow,{...f.command,evidence:f.evidence.filter(e=>e.candidateId==='a'),withheld:w}]);
+  await refusal(()=>claim([{...withheld,candidateId:'foreign'}]),'RANKING_EVIDENCE_SCOPE');
+  await refusal(()=>claim([{...withheld,candidateId:'a'}]),'RANKING_DUPLICATE_IDENTITY');
+  await refusal(()=>claim([{...withheld,bytes:65536}]),'RANKING_INVALID_WITHHOLDING');
+  await db.query("DELETE FROM candidate_privacy_projection WHERE candidate_id='z'");
+  await refusal(()=>claim([withheld]),'candidate_privacy_unavailable');
+ });
+ it('resumes the same withheld set after replacement and preserves its input hash',async()=>{
+  const f=await fixture(),repo=new RankingRepository(async(sql,args)=>(await db.query(sql,args)).rows);
+  const withheld=[{candidateId:'z',reason:'evidence_too_large',evidenceHash:hash,bytes:65537,limit:65536}];
+  const claimed=await one('SELECT signal_ranking_claim($1,$2,$3) result',[tenant,f.flow,{...f.command,
+   evidence:f.evidence.filter(e=>e.candidateId==='a').map(e=>({...e,presentationSource:'pool'})),withheld}]);
+  expect(claimed.inputHash).toBe(rankingHash({contractHash:f.ranking.contractHash,asOf:claimed.asOf,evidence:claimed.evidence,withheld}));
+  const replacement=randomUUID();await db.query('UPDATE job_sourcing_requests SET processing_lease_id=$2 WHERE id=$1',[f.bound.requestId,replacement]);
+  const result=await repo.resume({tenantId:tenant,flowRunId:f.flow,contract:f.ranking,executionAttemptId:f.bound.executionAttemptId,processingLeaseId:replacement});
+  expect(result?.items.map(i=>i.candidateId)).toEqual(['a']);
+  expect(await one('SELECT input_sha256 result FROM governed_ranking_runs')).toBe(claimed.inputHash);
+  expect(await one('SELECT withheld_profiles result FROM governed_ranking_runs')).toEqual(withheld);
  });
  it('binds protocol2 exactly and refuses new protocol1 or changed contracts',async()=>{
   const f=await fixture();expect(await one('SELECT signal_sourcing_bind($1,$2,$3) result',[tenant,f.flow,f.body])).toMatchObject({idempotent:true});

@@ -5,7 +5,7 @@ import {createHash} from 'node:crypto';
 export const RANKING_TABLES=['governed_ranking_runs','governed_ranking_items'];
 export const RANKING_FUNCTIONS=['signal_ranking_claim(text,uuid,jsonb)','signal_ranking_finish(text,uuid,uuid,jsonb)','signal_ranking_read(text,uuid,uuid)'];
 export const RANKING_PRIVATE_FUNCTIONS=['signal_ranking_immutable()'];
-export const RANKING_CATALOG_SHA256='8e8a60440c4ab2c8ec4937e28f39ff4dc6ec15da3951a37c36eb033389b51b87';
+export const RANKING_CATALOG_SHA256='559fe596daf0e6b1acf9335768069842de870ca0de02c5d6a036262c6f326106';
 export const RANKING_CATALOG_SQL=`WITH relations AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname='public' AND c.relname LIKE 'governed_ranking_%' AND c.relkind IN ('r','p')
@@ -42,6 +42,10 @@ export async function assertRankingCatalog(tx,{role,allowOwner=false}={}) {
   if(rights?.ok!==true)throw Error('Ranking runtime privileges mismatch');
 }
 export const rankingSourceTokens={
+ 'prisma/migrations/20261008000000_rubric_evidence_isolation/migration.sql':[
+  'withheld_profiles','RANKING_INVALID_WITHHOLDING','RANKING_DUPLICATE_IDENTITY','RANKING_EVIDENCE_SCOPE',
+  'g.withheld_profiles','evidence_too_large','<=65536','>134217728','COLLATE "C"','candidate_privacy_unavailable',
+ ],
  'prisma/migrations/20261006000000_rubric_ranking/migration.sql':[
   'RANKING_INPUT_CONFLICT','RANKING_ORDER_CONFLICT','RANKING_LEASE_STALE','RANKING_IMMUTABLE','RANKING_CONTRACT_CONFLICT',
   'FORCE ROW LEVEL SECURITY','COLLATE "C"','g.attempt_count>=3',"callback_status='pending'",'presentationSource',
@@ -60,6 +64,8 @@ export function checkRankingSource(root=resolve(dirname(fileURLToPath(import.met
     if(!sql.includes('REVOKE ALL ON FUNCTION public.'+signature+' FROM PUBLIC;'))throw Error('Ranking PUBLIC revocation missing');
   if(RANKING_CATALOG_SHA256==='UNSEALED_AUTHORING')throw Error('Ranking catalog not sealed');
   const lock=JSON.parse(read('prisma/migrations.lock.json'));
+  const isolation='20261008000000_rubric_evidence_isolation';
+  if(lock.migrations.find(m=>m.name===isolation)?.sha256!==createHash('sha256').update(read('prisma/migrations/'+isolation+'/migration.sql')).digest('hex'))throw Error('Ranking isolation fingerprint mismatch');
   if(lock.migrations.find(m=>m.name==='20261006000000_rubric_ranking')?.sha256!==createHash('sha256').update(sql).digest('hex'))throw Error('Ranking migration fingerprint mismatch');
   const score=read('src/lib/sourcing/rubric/score.ts');
   if(/semanticSimilarity|fitScore|profileCompleteness|activityFreshness/.test(score))throw Error('Unapproved ranking signal');

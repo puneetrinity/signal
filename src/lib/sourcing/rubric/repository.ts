@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { byteCompare, canonical, rankingContractSchema, rankingHash, type RankingContract } from './contracts';
-import { evidenceSchema, type CanonicalEvidence } from './evidence';
+import { evidenceSchema, evidenceBytes, EVIDENCE_POOL_MAX_BYTES, withheldProfileSchema, type WithheldProfile, type CanonicalEvidence } from './evidence';
 import { rankEvidence } from './score';
 
 const hash=z.string().regex(/^[a-f0-9]{64}$/);
@@ -39,7 +39,7 @@ const statements={claim:'SELECT public.signal_ranking_claim($1,$2::uuid,$3::json
 const claimSchema=z.discriminatedUnion('state',[
   z.object({state:z.literal('ready'),revisionId:uuid,outputHash:hash}).strict(),
   z.object({state:z.literal('reserved'),revisionId:uuid,lease:uuid,inputHash:hash,asOf:z.string().datetime(),
-    contract:rankingContractSchema,evidence:z.array(evidenceSchema).max(2000)}).strict(),
+    contract:rankingContractSchema,evidence:z.array(evidenceSchema).max(2000),withheld:z.array(withheldProfileSchema).max(2000).default([])}).strict(),
 ]);
 export type RankingSourceType='pool'|'pool_enriched'|'discovered';
 
@@ -75,7 +75,8 @@ export class RankingRepository {
   }
   private async completeClaim(tenantId:string,flowRunId:string,contract:RankingContract,claim:z.infer<typeof claimSchema>):Promise<RankingRead> {
     if(claim.state==='reserved') {
-      if(claim.contract.contractHash!==contract.contractHash||claim.inputHash!==rankingHash({contractHash:contract.contractHash,asOf:claim.asOf,evidence:claim.evidence}))throw Error('RANKING_INPUT_CONFLICT');
+      if(claim.contract.contractHash!==contract.contractHash||claim.inputHash!==rankingHash({contractHash:contract.contractHash,asOf:claim.asOf,evidence:claim.evidence,
+        ...(claim.withheld.length?{withheld:claim.withheld}:{})}))throw Error('RANKING_INPUT_CONFLICT');
       const ranked=rankEvidence(contract,claim.evidence,claim.asOf);
       const selected=new Map(ranked.selected.map(i=>[i.candidateId,i.selectedOrdinal]));
       const sourceTypes=new Map(claim.evidence.map(e=>[e.candidateId,e.presentationSource]));
@@ -94,18 +95,20 @@ export class RankingRepository {
     return read;
   }
   async publish(input:{tenantId:string;flowRunId:string;contract:RankingContract;executionAttemptId:string;processingLeaseId:string;
-    evidence:readonly CanonicalEvidence[];sourceTypes:ReadonlyMap<string,RankingSourceType>}):Promise<RankingRead> {
+    evidence:readonly CanonicalEvidence[];withheld?:readonly WithheldProfile[];sourceTypes:ReadonlyMap<string,RankingSourceType>}):Promise<RankingRead> {
     const contract=rankingContractSchema.parse(input.contract);
     const evidence=input.evidence.map(e=>{
       const presentationSource=input.sourceTypes.get(e.candidateId);
       if(!presentationSource)throw Error('RANKING_SOURCE_METADATA_MISSING');
       return evidenceSchema.parse({...e,presentationSource});
     }).sort((a,b)=>byteCompare(a.candidateId,b.candidateId));
-    if(evidence.length>2000||new Set(evidence.map(e=>e.candidateId)).size!==evidence.length)throw Error('RANKING_INPUT_CONFLICT');
-    const command={contractHash:contract.contractHash,executionAttemptId:input.executionAttemptId,processingLeaseId:input.processingLeaseId,evidence};
-    if(Buffer.byteLength(canonical(command),'utf8')>67_108_864)throw Error('RANKING_POOL_TOO_LARGE');
+    const withheld=(input.withheld??[]).map(e=>withheldProfileSchema.parse(e)).sort((a,b)=>byteCompare(a.candidateId,b.candidateId));
+    const ids=[...evidence,...withheld].map(e=>e.candidateId);
+    if(ids.length>2000||new Set(ids).size!==ids.length)throw Error('RANKING_INPUT_CONFLICT');
+    const command={contractHash:contract.contractHash,executionAttemptId:input.executionAttemptId,processingLeaseId:input.processingLeaseId,evidence,withheld};
+    if(evidenceBytes(command)>EVIDENCE_POOL_MAX_BYTES)throw Error('RANKING_POOL_TOO_LARGE');
     const claim=claimSchema.parse(await this.call('claim',[input.tenantId,input.flowRunId,command]));
-    if(claim.state==='reserved'&&rankingHash(claim.evidence)!==rankingHash(evidence))throw Error('RANKING_INPUT_CONFLICT');
+    if(claim.state==='reserved'&&(rankingHash(claim.evidence)!==rankingHash(evidence)||rankingHash(claim.withheld)!==rankingHash(withheld)))throw Error('RANKING_INPUT_CONFLICT');
     return this.completeClaim(input.tenantId,input.flowRunId,contract,claim);
   }
 }
