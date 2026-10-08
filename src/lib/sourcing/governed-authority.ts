@@ -25,7 +25,8 @@ type Query=(sql:string,args:unknown[])=>Promise<Array<Record<string,unknown>>>;
  * never return the wrapper (which can contain SQL or connection details). */
 export function governedAdmissionRefusal(error:unknown):{error:string;status:number}|null {
   const codes:Record<string,number>={GOVERNED_REQUEST_CONFLICT:409,GOVERNED_TARGET_MISMATCH:409,
-    GOVERNED_TENANT_REQUIRED:409,GOVERNED_DISABLED:409,GOVERNED_INVALID_COMMAND:400};
+    GOVERNED_TENANT_REQUIRED:409,GOVERNED_DISABLED:409,GOVERNED_INVALID_COMMAND:400,
+    GOVERNED_PROTOCOL_CONFLICT:409,RANKING_CONTRACT_CONFLICT:409,RANKING_OUTPUT_CONFLICT:409};
   if(!(error instanceof Error))return null;
   let code=error.message;
   const wrapped=error as Error & {code?:string;meta?:{code?:string;message?:string}};

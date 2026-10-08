@@ -5,6 +5,9 @@ import { redis } from '@/lib/redis/client';
 import { toJsonValue } from '@/lib/prisma/json';
 import {GovernedRepository} from './governed-authority';
 import {governedEnabled,type GovernedSource} from './governed-contracts';
+import {RankingRepository,type RankingRead,type RankingSourceType} from './rubric/repository';
+import {adaptProfile,OversizedEvidenceError,type WithheldProfile,type CanonicalEvidence,type EvidenceFact} from './rubric/evidence';
+import {rankingHash} from './rubric/contracts';
 import { createLogger } from '@/lib/logger';
 import { buildJobRequirements, type SourcingJobContextInput } from './jd-digest';
 import { rankCandidates } from './ranking-new';
@@ -113,6 +116,7 @@ class PublicMemoryOutboxError extends Error {
 }
 
 export interface OrchestratorResult {
+  ranking?: RankingRead;
   candidateCount: number;
   poolCount: number;
   discoveredCount: number;
@@ -901,6 +905,7 @@ export async function runSourcingOrchestrator(
     }
   >();
   const tenantPrivateGlobalIdByRankingId = new Map<string, string>();
+  const privateRankingEvidenceBySlug = new Map<string,TenantPrivateSearchResult>();
   const publicGlobalIdByIdentity = new Map<string, string>();
   const conflictedPublicIdentityKeys = new Set<string>();
 
@@ -1298,6 +1303,7 @@ export async function runSourcingOrchestrator(
 
         for (const candidate of prepared) {
           const slugKey = candidate.anchor.linkedinId.toLowerCase();
+          privateRankingEvidenceBySlug.set(slugKey,candidate.result);
           const localRow = privateRowBySlug.get(slugKey);
           const rankingId =
             localRow?.id ??
@@ -1959,6 +1965,7 @@ export async function runSourcingOrchestrator(
     : config.maxSerpQueries;
   let dynamicQueryBudgetUsed = false;
 
+  if(governedCommand?.protocolVersion===2 && desiredDiscoveryTarget<=0)throw Error('GOVERNED_DISCOVERY_REQUIRED');
   if (desiredDiscoveryTarget > 0) {
     discoveryTarget = desiredDiscoveryTarget;
     dynamicQueryBudgetUsed =
@@ -1971,6 +1978,9 @@ export async function runSourcingOrchestrator(
     );
 
     if (!budget.allowed || budget.maxQueries <= 0) {
+      // No paid transport has started: the worker must cancel/refund through
+      // the governed path, never complete this run with the legacy ranker.
+      if(governedCommand?.protocolVersion===2)throw Error('GOVERNED_DISCOVERY_BUDGET_REFUSED');
       discoverySkippedReason = budget.skippedReason;
       log.warn(
         {
@@ -2010,6 +2020,7 @@ export async function runSourcingOrchestrator(
         let crustDataSucceeded = false;
         // Enrichment candidates: primary top 100 + ordered reserve list
         let crustdataPrimaryList: any[] = [];
+        let publishedRanking:RankingRead|undefined;
         let crustdataReserveList: any[] = [];
         let eligibleSourceEntries: Array<{ sourceType: CandidateSourceType; fitScore: number | null }> = [];
         let relaxationLadder: OrchestratorResult['relaxationLadder'] = null;
@@ -2344,8 +2355,10 @@ export async function runSourcingOrchestrator(
             publicMemory.exactExclusion = exactReceiptExclusion;
           }
           const exactSearch = exactAcquisition.result;
+          const rawCapacity=governedCommand?.protocolVersion===2?exactAcquisition.rawAccounting:undefined;
+          if(governedCommand?.protocolVersion===2&&!rawCapacity)throw new CrustdataAcquisitionSafetyError('receipt_invalid','Raw purchase accounting unavailable');
           const exactShortfall = isProviderShortfall(
-            exactSearch.providerTotal,
+            rawCapacity?(rawCapacity.relation==='eq'?rawCapacity.providerTotal:null):exactSearch.providerTotal,
             CRUSTDATA_REQUEST_LIMIT,
           );
           const acquisitionRungByProfile = new Map<object, string>();
@@ -2358,7 +2371,7 @@ export async function runSourcingOrchestrator(
           let spillRungId: string | null = null;
           let spillRungDescription: string | null = null;
           let spillNextActiveRung: string | null = null;
-          const remainingCapacity = Math.max(0, CRUSTDATA_REQUEST_LIMIT - exactSearch.rawReturnedCount);
+          const remainingCapacity = Math.max(0, CRUSTDATA_REQUEST_LIMIT - (rawCapacity?.rawReturnedCount??exactSearch.rawReturnedCount));
           const existingSpillReceipt = await findCrustdataAcquisitionReceipt(
             tenantId,
             requestId,
@@ -2556,7 +2569,7 @@ export async function runSourcingOrchestrator(
           await assertCurrentExecution();
           crustDataSucceeded = true;
 
-          if (crustProfiles.length > 0) {
+          if (crustProfiles.length > 0 || governedCommand?.protocolVersion===2) {
             logSourcingRaw(requestId, crustProfiles);
             await sendProgressCallback('ranking_started');
             console.log(`✨ [ORCHESTRATOR] CRUSTDATA FOUND ${crustProfiles.length} CANDIDATES! RANKING LOCALLY...`);
@@ -2862,6 +2875,7 @@ export async function runSourcingOrchestrator(
               return true;
             });
             const duplicatesRemoved = combinedRaw.length - combinedForRanking.length;
+            if(governedCommand?.protocolVersion===2&&combinedForRanking.length>2000)throw Error('RANKING_POOL_TOO_LARGE');
 
             // Stage-3: a stale-known pool member can cycle back via Crustdata
             // (Stage-2 deliberately lets them) while their pool row sits
@@ -2955,7 +2969,9 @@ export async function runSourcingOrchestrator(
 
             // Local ranking against full JD
             const locationBoostWeight = getLocationBoostWeight(config, trackDecision?.track);
-            const scored = rankCandidates(combinedForRanking, requirements, {
+            // Governed candidates are materialized as a complete union, not the
+            // legacy top100. These null placeholders never become fit scores.
+            const scored = governedCommand?.protocolVersion===2?combinedForRanking.map(c=>({candidateId:c.id,fitScore:null,fitBreakdown:null,matchTier:null,locationMatchType:null})):rankCandidates(combinedForRanking, requirements, {
               fitScoreEpsilon: config.fitScoreEpsilon,
               track: trackDecision?.track,
               semanticSimilarityWeight: config.semanticSimilarityWeight,
@@ -2966,13 +2982,13 @@ export async function runSourcingOrchestrator(
             console.log(`📉 [ORCHESTRATOR] #100 fit score: ${scored[99]?.fitScore?.toFixed(3) ?? 'N/A'}`);
 
             const rankedCandidateById = new Map(combinedForRanking.map((candidate) => [candidate.id, candidate]));
-            const sourceTypeForScored = (sc: ScoredCandidate): CandidateSourceType => {
+            const sourceTypeForScored = (sc: typeof scored[number]): CandidateSourceType => {
               const candidate = rankedCandidateById.get(sc.candidateId);
               const isPoolMember = candidate
                 ? poolForRankingById.has(sc.candidateId) || slimMatchByCandidate.has(candidate)
                 : false;
               if (!isPoolMember) return 'discovered';
-              return sc.fitBreakdown.skillScoreMethod === 'snapshot' ? 'pool_enriched' : 'pool';
+              return sc.fitBreakdown?.skillScoreMethod === 'snapshot' ? 'pool_enriched' : 'pool';
             };
             eligibleSourceEntries = scored.map((sc) => ({
               sourceType: sourceTypeForScored(sc),
@@ -2984,6 +3000,10 @@ export async function runSourcingOrchestrator(
             // batches × ~2s Railway RTT = ~40s wasted. Now we rank in-memory
             // first and only write the 100 we actually serve (7 batches ≈ 14s).
             const profileByUrl = new Map(mappedForRanking.map((p) => [p.id, p]));
+            const materializationLimit=governedCommand?.protocolVersion===2?2000:100;
+            const governedEvidenceById=new Map<string,CanonicalEvidence>();
+            const governedWithheldById=new Map<string,WithheldProfile>();
+            const governedSourceById=new Map<string,RankingSourceType>();
 
             // ── Durably ingest all paid profiles into Memory ───────────────
             // A callback may release the large provider receipt only after
@@ -3104,11 +3124,11 @@ export async function runSourcingOrchestrator(
 
             const materializedPublicByTemporaryId =
               await materializeServedPublicCandidates(
-                scored.slice(0, 100).map((candidate) => candidate.candidateId),
+                scored.slice(0, materializationLimit).map((candidate) => candidate.candidateId),
               );
             const materializedPrivateByCandidateId =
               await materializeServedTenantPrivateCandidates(
-                scored.slice(0, 100).map((candidate) => candidate.candidateId),
+                scored.slice(0, materializationLimit).map((candidate) => candidate.candidateId),
               );
             const materializedByTemporaryId = new Map([
               ...materializedPublicByTemporaryId,
@@ -3116,7 +3136,7 @@ export async function runSourcingOrchestrator(
             ]);
 
             // Build top-100 profiles for DB write (ranked order already in `scored`)
-            const top100Profiles = scored.slice(0, 100).map((sc) => {
+            const top100Profiles = scored.slice(0, materializationLimit).map((sc) => {
               const p = profileByUrl.get(sc.candidateId);
               if (!p) return null; // Was from pool/ActiveGraph, already in DB
               return {
@@ -3147,7 +3167,7 @@ export async function runSourcingOrchestrator(
             // set whose fresh copy did NOT crack the served top-100 would
             // otherwise never re-upsert — their stored blob stays stale.
             if (config.twoLayerPoolEnabled && slimMatchByCandidate.size > 0) {
-              const top100Ids = new Set(scored.slice(0, 100).map((sc) => sc.candidateId));
+              const top100Ids = new Set(scored.slice(0, materializationLimit).map((sc) => sc.candidateId));
               for (const [c, slim] of slimMatchByCandidate) {
                 if (!(c as any).crustdata) continue;
                 if (top100Ids.has(c.id)) {
@@ -3245,7 +3265,13 @@ export async function runSourcingOrchestrator(
 
             console.log(`💾 [ORCHESTRATOR] UPSERTED ${candidateMap.size} CANDIDATES TO DB (${poolRefreshProfiles.length} pool-blob refreshes)`);
 
-            const rankedWithCandidateIds = scored.slice(0, 100).map((sc) => {
+            // Observation is this local evidence read, not the acquisition date
+            // of an unrelated fresh profile. The source hash binds the payload;
+            // the first ranking claim freezes this time for all later retries.
+            const governedObservedAt=governedCommand?.protocolVersion===2
+              ? (await prisma.$queryRaw<Array<{observedAt:Date}>>`SELECT clock_timestamp() AS "observedAt"`)[0].observedAt.toISOString()
+              : new Date().toISOString();
+            const rankedWithCandidateIds = scored.slice(0, materializationLimit).map((sc) => {
               const profile = profileByUrl.get(sc.candidateId);
               const poolCandidate = poolForRankingById.get(sc.candidateId);
               const publicResult =
@@ -3276,6 +3302,28 @@ export async function runSourcingOrchestrator(
                   ? undefined
                   : poolCandidate?.id);
 
+              if(governedCommand?.protocolVersion===2) {
+                if(!dbId)throw Error('RANKING_IDENTITY_UNRESOLVED');
+                const evidenceProfile=profile?.crustdata??poolCandidate?.crustdata??publicResult?.crustdata_profile??null;
+                const observedAt=governedObservedAt;
+                const privateEvidence=linkedinId?privateRankingEvidenceBySlug.get(linkedinId.toLowerCase()):undefined;
+                const permittedFacts:EvidenceFact[]=(privateEvidence?.skills??[]).map(value=>({field:'skill',value,
+                  ref:'tenant_private_v1.skills',kind:'candidate_provided',sourceVersion:rankingHash(privateEvidence?.skills),
+                  observedAt,scope:'organization',organizationRef:governedCommand.organizationRef}));
+                try {
+                const normalized=adaptProfile({candidateId:dbId,organizationRef:governedCommand.organizationRef,
+                  profile:evidenceProfile,sourceVersion:rankingHash(evidenceProfile),observedAt,permittedFacts});
+                if(governedWithheldById.has(dbId))throw Error('RANKING_IDENTITY_CONFLICT');
+                if(governedEvidenceById.has(dbId)&&rankingHash(governedEvidenceById.get(dbId))!==rankingHash(normalized))throw Error('RANKING_IDENTITY_CONFLICT');
+                governedEvidenceById.set(dbId,normalized);
+                governedSourceById.set(dbId,sourceTypeForScored(sc));
+                } catch(error) {
+                  if(!(error instanceof OversizedEvidenceError))throw error;
+                  if(governedEvidenceById.has(dbId)||(governedWithheldById.has(dbId)&&rankingHash(governedWithheldById.get(dbId))!==rankingHash(error.record)))throw Error('RANKING_IDENTITY_CONFLICT');
+                  governedWithheldById.set(dbId,error.record);
+                }
+              }
+
               return {
                 candidateId:
                   dbId ??
@@ -3304,6 +3352,18 @@ export async function runSourcingOrchestrator(
               }).candidates;
 
             crustdataPrimaryList = allRankedWithIds;
+            if(governedCommand?.protocolVersion===2) {
+              if(!executionAttemptId||!processingLeaseId)throw Error('GOVERNED_EXECUTION_STALE');
+              await assertCurrentExecution();
+              publishedRanking=await new RankingRepository().publish({tenantId,flowRunId:governedCommand.flowRunId,
+                contract:governedCommand.rankingContract,executionAttemptId,processingLeaseId,
+                evidence:[...governedEvidenceById.values()],withheld:[...governedWithheldById.values()],sourceTypes:governedSourceById});
+              const cards=new Map(allRankedWithIds.map(c=>[c.candidateId,c]));
+              crustdataPrimaryList=publishedRanking.items.map(item=>{
+                const card=cards.get(item.candidateId);if(!card)throw Error('RANKING_OUTPUT_CONFLICT');
+                return {...card,fitScore:null,fitBreakdown:null,ranking:item,sourceType:governedSourceById.get(item.candidateId)};
+              });
+            }
             crustdataReserveList = []; // reserve never served — skip DB write
 
             logRankingResult(requestId, crustdataPrimaryList, crustdataReserveList);
@@ -3415,7 +3475,7 @@ export async function runSourcingOrchestrator(
               name: sc.name || '',
               headlineHint: sc.headlineHint || '',
               locationHint: sc.locationHint || '',
-              sourceType,
+              sourceType:publishedRanking?sc.sourceType:sourceType,
               matchTier: sc.matchTier,
               locationMatchType: sc.locationMatchType,
               fitScore: sc.fitScore,
@@ -3426,7 +3486,7 @@ export async function runSourcingOrchestrator(
             };
           });
 
-          await sendProgressCallback('pipeline_complete');
+          if(!publishedRanking)await sendProgressCallback('pipeline_complete');
 
           // A candidate can surface from more than one lane (tenant pool +
           // Crustdata) and upsert to the same local id; dedupe by candidateId
@@ -3448,7 +3508,7 @@ export async function runSourcingOrchestrator(
           );
           // Replace the request result under the processor lease so a late
           // stalled delivery cannot overwrite the current candidate set.
-          await persistSourcingCandidates(
+          if(!publishedRanking)await persistSourcingCandidates(
             dedupedFinalAssembled.map((a) => ({
               tenantId,
               sourcingRequestId: requestId,
@@ -3478,6 +3538,7 @@ export async function runSourcingOrchestrator(
           };
 
           const result: OrchestratorResult = {
+            ...(publishedRanking?{ranking:publishedRanking}:{}),
             discoveredCount: sourceMetrics.served.discovered.count,
             discoveryShortfallRate: 0,
             candidateCount: dedupedFinalAssembled.length,
@@ -4364,6 +4425,7 @@ export async function runSourcingOrchestrator(
     dedupedAssembled.map((candidate) => candidate.candidateId),
   );
   // 5. Persist under the processor lease for retry/stall idempotency.
+  if(governedCommand?.protocolVersion===2)throw Error('RANKING_PUBLICATION_REQUIRED');
   await persistSourcingCandidates(
     dedupedAssembled.map((a) => ({
       tenantId,
