@@ -11,7 +11,7 @@ export const GOVERNED_FUNCTIONS=[
   'signal_sourcing_preview_admit(text,text,jsonb)','signal_sourcing_preview_claim(text,uuid,uuid)',
   'signal_sourcing_preview_finish(text,uuid,uuid,jsonb)',
 ];
-export const GOVERNED_CATALOG_SHA256='3c4e189c56009a9180fc7f85afa7ecfc7ae68bb39dcfdf4564b62a9a0cc93c2f';
+export const GOVERNED_CATALOG_SHA256='e00523fc8905bbe7e5945beb0ed64050ac45c046ac6a3282b9acf0db4997a3f8';
 export const GOVERNED_CATALOG_SQL=`WITH relations AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname='public' AND c.relname LIKE 'governed_sourcing_%' AND c.relkind IN ('r','p')

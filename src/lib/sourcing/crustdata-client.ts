@@ -123,6 +123,8 @@ export interface CrustdataProfileResponse {
 }
 
 export interface CrustdataSearchResult {
+  /** Protocol2 private accounting only; omitted on the unchanged legacy path. */
+  providerTotalRelation?: 'eq' | 'gte' | 'approximate' | null;
   profiles: CrustdataProfileResponse[];
   providerTotal: number | null;
   rawReturnedCount: number;
@@ -364,7 +366,7 @@ export function buildCrustdataPreviewRequest(requirements: JobRequirements) {
 export async function searchPeople(
   requirements: JobRequirements,
   limit: number = 300,
-  options?: {excludePersonIds?: number[];beforeDispatch?:()=>Promise<void>;capacityAcquired?:boolean;governed?:boolean},
+  options?: {excludePersonIds?: number[];beforeDispatch?:()=>Promise<void>;capacityAcquired?:boolean;governed?:boolean;rankingProtocol?:2},
 ): Promise<CrustdataSearchResult> {
   if (!CRUSTDATA_API_KEY) throw new CrustdataNoDispatchError();
   let built:ReturnType<typeof buildCrustdataRequest>;
@@ -431,13 +433,22 @@ export async function searchPeople(
   console.log(`🔄 [CRUSTDATA] NEXT STEP: local re-ranking against full JD...`);
   console.log('*'.repeat(60) + '\n');
 
-  const providerTotal = Number.isFinite(Number(data.total_count)) ? Number(data.total_count) : null;
+  const rawTotal=data.total_count;
+  const strictTotal=typeof rawTotal==='number'?rawTotal:typeof rawTotal==='string'&&/^\d+$/.test(rawTotal)?Number(rawTotal):NaN;
+  const providerTotal = options?.rankingProtocol===2
+    ? Number.isSafeInteger(strictTotal)&&strictTotal>=0?strictTotal:null
+    : Number.isFinite(Number(data.total_count)) ? Number(data.total_count) : null;
+  // The standard total_count is exact; an explicit lower-bound/approximate or
+  // malformed relation must never authorize a capacity-filling purchase.
+  const providerTotalRelation=providerTotal===null?null:data.total_count_relation===undefined?'eq':
+    ['eq','gte','approximate'].includes(data.total_count_relation)?data.total_count_relation:null;
   log.info({ count: deduped.length, total: providerTotal, requested: limit }, 'Crustdata results');
   return {
     profiles: deduped,
     providerTotal,
     rawReturnedCount: allProfiles.length,
     requestedLimit: limit,
+    ...(options?.rankingProtocol===2?{providerTotalRelation}:{}),
   };
 }
 

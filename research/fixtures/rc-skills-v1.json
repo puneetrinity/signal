@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "observation": {
+    "version": 1,
+    "outcome": "success",
+    "identityHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "skills": [
+      "AWS",
+      "Café"
+    ],
+    "upstreamAt": "2026-01-01T00:00:00.123456Z",
+    "observedAt": "2026-10-08T00:00:00.000000Z",
+    "validUntil": "2028-12-31T00:00:00.123456Z",
+    "timestampSource": "check_last_update",
+    "contentHash": "3d141131b41fcd6d5aed366e47d733225e37e8cdd8576ab6c823a5eb0d6d88fd"
+  }
+}

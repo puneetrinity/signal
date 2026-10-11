@@ -18,6 +18,8 @@ import {resolveTrack} from '../track-resolver';
 import {canResumeGovernedPurchase} from '../request-retry';
 import { requireHealthyCandidatePrivacyContext } from '@/lib/candidate-privacy/repository';
 import {GovernedRepository,runGovernedPreview,flushGovernedEvidence} from '../governed-authority';
+import { RankingRepository } from '../rubric/repository';
+import type {GovernedSource} from '../governed-contracts';
 import {z} from 'zod';
 
 const log = createLogger('SourcingQueue');
@@ -64,10 +66,24 @@ export async function processSourcingJob(
   const executionFence = { ...routeFence, processingLeaseId };
   let governed=false;
   let ownsLease=false;
+  let rcClaimInFlight=false;
+  let rcClaimInput:{tenantId:string;requestId:string;generation:number;executionAttemptId:string;processingLeaseId:string;resumeToken:string|null}|null=null;
+  let rcIdentity:{tenantId:string;flowRunId:string;executionAttemptId:string;processingLeaseId:string}|null=null;
+  let rcHeartbeat:ReturnType<typeof setInterval>|undefined;
   try {
     // Claim only the execution attempt that the source route enqueued. A stale
     // worker from an older refresh/retry must not mutate the current request.
-    const claimed = await prisma.jobSourcingRequest.updateMany({
+    let rcClaim:'unmanaged'|'claimed'|'rejected'='unmanaged';
+    if(process.env.RC_SKILLS_ENABLED==='true' && job.data.kind==='source'){
+      const {RcRepository}=await import('../rc-skills/repository');
+      const resumeToken=job.name?.startsWith('rc-resume-')?job.name.slice('rc-resume-'.length):null;
+      rcClaimInput={tenantId,requestId,generation:routeFence.acquisitionGeneration!,
+        executionAttemptId:routeFence.executionAttemptId!,processingLeaseId,resumeToken};
+      rcClaimInFlight=true;
+      rcClaim=(await new RcRepository().claimExecution(rcClaimInput)).state;
+      rcClaimInFlight=false;
+    }
+    const claimed = rcClaim!=='unmanaged'?{count:rcClaim==='claimed'?1:0}:await prisma.jobSourcingRequest.updateMany({
       where: {
         id: requestId,
         tenantId,
@@ -95,12 +111,48 @@ export async function processSourcingJob(
       where: { id: requestId },
     });
     const jobContext = jobRequest.jobContext as unknown as SourcingJobContextInput;
-    governed=Boolean(await new GovernedRepository().call('execution',[tenantId,requestId,jobContext,executionFence]));
+    const governedCommand=await new GovernedRepository().call<GovernedSource>('execution',[tenantId,requestId,jobContext,executionFence]);
+    governed=Boolean(governedCommand);
     // Acquire only execution metadata before this gate. No candidate reads,
     // provider calls or orchestration may run without healthy privacy state.
     // A failed gate must use the same bounded retry/terminal callback path as
     // any other failure, including after an already-paid acquisition.
     if(!legacyPrivacyChecked)await requireHealthyCandidatePrivacyContext();
+    if(governedCommand?.protocolVersion===2) {
+      const resumed=await new RankingRepository().resume({tenantId,flowRunId:governedCommand.flowRunId,
+        contract:governedCommand.rankingContract,executionAttemptId:job.data.executionAttemptId!,processingLeaseId});
+      if(resumed) {
+        // Recovery starts from the sealed input, before pool retrieval, model
+        // resolution or any acquisition code can run again.
+        await deliverCallback(requestId,tenantId,callbackUrl,{version:1,requestId,externalJobId,
+          acquisitionGeneration:executionFence.acquisitionGeneration,executionAttemptId:executionFence.executionAttemptId,
+          status:'complete',candidateCount:resumed.items.length},true,executionFence);
+        return {requestId,status:'complete',candidateCount:resumed.items.length,durationMs:Date.now()-startTime};
+      }
+      if(process.env.RC_SKILLS_ENABLED==='true' && governedCommand.rankingContract.payload.schemaVersion===3){
+        const {RcRepository}=await import('../rc-skills/repository');
+        const rc=new RcRepository(),identity={tenantId,flowRunId:governedCommand.flowRunId,
+          executionAttemptId:job.data.executionAttemptId!,processingLeaseId};
+        const admission=await rc.admit(identity,requestId,executionFence.acquisitionGeneration!,governedCommand.rankingContract.contractHash);
+        if(admission.enabled){
+          rcIdentity=identity;
+          let beating=false;
+          rcHeartbeat=setInterval(()=>{
+            if(beating)return;beating=true;
+            void rc.heartbeat(identity).catch(()=>log.warn({requestId},'RC heartbeat requires recovery')).finally(()=>{beating=false;});
+          },15000);rcHeartbeat.unref();
+          const snapshot=await rc.read(tenantId,governedCommand.flowRunId);
+          if(snapshot?.baseline){
+            const {completeRcRanking}=await import('../rc-skills/worker');
+            const ranked=await completeRcRanking(identity,governedCommand.rankingContract);
+            await deliverCallback(requestId,tenantId,callbackUrl,{version:1,requestId,externalJobId,
+              acquisitionGeneration:executionFence.acquisitionGeneration,executionAttemptId:executionFence.executionAttemptId,
+              status:'complete',candidateCount:ranked.items.length},true,executionFence);
+            return {requestId,status:'complete',candidateCount:ranked.items.length,durationMs:Date.now()-startTime};
+          }
+        }
+      }
+    }
     const resolvedTrack=job.data.resolvedTrack??(governed?await resolveTrack(jobContext,buildJobRequirements(jobContext)):undefined);
     if(governed && resolvedTrack) {
       const observed=jobRequest.diagnostics && typeof jobRequest.diagnostics==='object' && !Array.isArray(jobRequest.diagnostics)?jobRequest.diagnostics:{};
@@ -119,6 +171,23 @@ export async function processSourcingJob(
     );
     const candidateCount = orchestratorResult.candidateCount;
 
+    if (orchestratorResult.ranking) {
+      // The ranking routine publishes items, completes the request and queues
+      // its callback in ONE transaction. Never run the legacy completion writer
+      // over that sealed publication, even when this worker is retried.
+      const ranking = orchestratorResult.ranking;
+      const sealed = await new RankingRepository().read(tenantId, ranking.flowRunId, ranking.revisionId);
+      const complete = await prisma.jobSourcingRequest.count({where:{id:requestId,tenantId,
+        ...executionFence,status:'complete',resultCount:sealed.items.length}});
+      if (!governed || complete !== 1 || sealed.outputHash !== ranking.outputHash || candidateCount !== sealed.items.length)
+        throw Error('RANKING_OUTPUT_CONFLICT');
+      await deliverCallback(requestId,tenantId,callbackUrl,{version:1,requestId,externalJobId,
+        acquisitionGeneration:executionFence.acquisitionGeneration,executionAttemptId:executionFence.executionAttemptId,
+        status:'complete',candidateCount},true,executionFence);
+      return {requestId,status:'complete',candidateCount,durationMs:Date.now()-startTime};
+    }
+
+    if(governedCommand?.protocolVersion===2)throw Error('RANKING_PUBLICATION_REQUIRED');
     // Transition processing → complete
     const durationMs = Date.now() - startTime;
     const completed = await prisma.jobSourcingRequest.updateMany({
@@ -262,6 +331,18 @@ export async function processSourcingJob(
     log.info({ jobId: job.id, requestId, durationMs }, 'Sourcing job completed');
     return result;
   } catch (err) {
+    if(!ownsLease && rcClaimInFlight){
+      if(job.attemptsMade+1<Math.min(job.opts.attempts??1,3)||!rcClaimInput)throw err;
+      // Last attempt reconciles a lost response through the SAME token fence.
+      // Never fall back to a raw request claim unless RC proves it unmanaged.
+      const {RcRepository}=await import('../rc-skills/repository');
+      const recovered=await new RcRepository().claimExecution(rcClaimInput);
+      if(recovered.state==='rejected')throw err;
+      if(recovered.state==='claimed'){
+        ownsLease=true;
+        governed=Boolean(await new GovernedRepository().call('boundCommand',[tenantId,requestId]));
+      }
+    }
     if(!ownsLease) {
       if(job.attemptsMade+1<(job.opts.attempts??1))throw err;
       // Last retry: reconcile a failed claim only if the row is still queued
@@ -278,6 +359,37 @@ export async function processSourcingJob(
     const durationMs = Date.now() - startTime;
 
     if(governed){
+      // A publication can commit before a later read/callback fails. Never
+      // turn that durable success into cancellation or a swallowed supersession.
+      const published=await prisma.jobSourcingRequest.findFirst({where:{id:requestId,tenantId,
+        ...executionFence,status:'complete'},select:{resultCount:true}});
+      if(published) {
+        log.warn({requestId,error:errorMsg},'Recovering callback after committed sourcing publication');
+        await deliverCallback(requestId,tenantId,callbackUrl,{version:1,requestId,externalJobId,
+          acquisitionGeneration:executionFence.acquisitionGeneration,executionAttemptId:executionFence.executionAttemptId,
+          status:'complete',candidateCount:published.resultCount??0},true,executionFence);
+        return {requestId,status:'complete',candidateCount:published.resultCount??0,durationMs};
+      }
+      if(process.env.RC_SKILLS_ENABLED==='true'){
+        const {RcRepository}=await import('../rc-skills/repository');
+        const rc=new RcRepository();
+        // A retry may fail its privacy gate before RC admission. Find its
+        // existing durable run without reading candidate evidence on this path.
+        if(!rcIdentity){
+          const bound=await new GovernedRepository().call<GovernedSource>('boundCommand',[tenantId,requestId]);
+          if(bound?.protocolVersion===2 && bound.rankingContract.payload.schemaVersion===3 && await rc.progress(tenantId,bound.flowRunId))
+            rcIdentity={tenantId,flowRunId:bound.flowRunId,executionAttemptId:job.data.executionAttemptId!,processingLeaseId};
+        }
+        if(rcIdentity){
+          const recovery=await rc.failure(rcIdentity,job.attemptsMade,job.opts.attempts??1);
+          if(recovery.state==='cancelled'){
+            await flushGovernedEvidence(new GovernedRepository(),tenantId,requestId).catch(()=>undefined);
+            return {requestId,status:'failed',candidateCount:0,durationMs,error:'GOVERNED_CANCELLED_NO_DISPATCH'};
+          }
+          if(recovery.state==='retry')throw err;
+          throw Error('RC_RECOVERY_PENDING');
+        }
+      }
       // Retry only recovery of an already completed purchase, never a new
       // generation or an ambiguous provider dispatch. The acquisition layer
       // reuses its durable exact receipt; three attempts bound this recovery.
@@ -380,6 +492,8 @@ export async function processSourcingJob(
       durationMs,
       error: errorMsg,
     };
+  } finally {
+    if(rcHeartbeat)clearInterval(rcHeartbeat);
   }
 }
 

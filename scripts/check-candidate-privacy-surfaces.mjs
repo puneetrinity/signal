@@ -19,6 +19,15 @@ const ACTIVE_BOUNDARY =
   /\b(prisma\.(?:candidate|jobSourcingCandidate|candidateGlobalLink|contactEnrichmentOperation|publicMemoryIngestOutbox|crustdataAcquisitionReceipt)|searchPeople\s*\(|searchLinkedinProfiles\s*\(|deliverCallback\s*\(|enqueueGraphSync\s*\()/;
 
 const REQUIRED_PATTERNS = new Map([
+  ['src/lib/sourcing/rc-skills/repository.ts', [
+    /CANDIDATE_PRIVACY_ADMISSION_LOCK/, /requireHealthyCandidatePrivacyContext\(tx\)/,
+    /signal_rc_dispatch/, /signal_rc_finish/, /signal_rc_outbox/,
+  ]],
+  ['src/lib/sourcing/rc-skills/worker.ts', [
+    /requireHealthyCandidatePrivacyContext/, /filterCandidateIdsBeforeLimit/,
+    /repository\.dispatch\(/, /repository\.finish\(/,
+  ]],
+  ['src/lib/sourcing/rc-skills/memory.ts', [/rc-skills:read/, /rc-skills:write/, /redirect:'error'/]],
   ['src/app/api/v3/jobs/[id]/source/route.ts', [
     /requireHealthyCandidatePrivacyContext\(\)/,
     /candidate_privacy_unavailable/,
@@ -207,9 +216,10 @@ export async function evaluateCandidatePrivacySurfaces(root) {
     if (!source.includes(row.symbol)) {
       offenders.push(`candidate privacy surface symbol is missing: ${identity}`);
     }
+    const registeredTests=surfaceContractTests;
     if (
-      !surfaceContractTests.includes(`'${row.testId}'`) &&
-      !surfaceContractTests.includes(`"${row.testId}"`)
+      !registeredTests.includes(`'${row.testId}'`) &&
+      !registeredTests.includes(`"${row.testId}"`)
     ) {
       offenders.push(`candidate privacy surface test id is unregistered: ${row.testId}`);
     }

@@ -14,11 +14,25 @@ describe.skipIf(!enabled)('governed Discover SQL components, real PostgreSQL',()
   const admit=(id:string,body=command(id),who=tenant)=>one('SELECT signal_sourcing_preview_admit($1,$2,$3) result',[who,'vanta:jobs:95101',body]);
   const claim=(id:string,who=tenant)=>one('SELECT signal_sourcing_preview_claim($1,$2,$3) result',[who,id,randomUUID()]);
   const finish=(id:string,lease:string,result:unknown)=>one('SELECT signal_sourcing_preview_finish($1,$2,$3,$4) result',[tenant,id,lease,result]);
+  async function bindHistorical(flow:string,body:unknown){
+    // Issue the historical receipt with the shipped routine inside this isolated
+    // transaction, then restore 5C before exercising replay/control behavior.
+    const definition=(migration:string)=>{
+      const source=readFileSync(resolve('prisma/migrations',migration,'migration.sql'),'utf8');
+      const sql=source.match(/CREATE(?: OR REPLACE)? FUNCTION public\.signal_sourcing_bind\([\s\S]*?REVOKE ALL ON FUNCTION public\.signal_sourcing_bind\(text,uuid,jsonb\) FROM PUBLIC;/)?.[0];
+      if(!sql)throw Error('Missing historical bind fixture');
+      return sql.replace('CREATE FUNCTION','CREATE OR REPLACE FUNCTION');
+    };
+    await db.query(definition('20261004000000_governed_sourcing'));
+    const result=await one('SELECT signal_sourcing_bind($1,$2,$3) result',[tenant,flow,body]);
+    await db.query(definition('20261006000000_rubric_ranking'));
+    return result;
+  }
   async function grantFixture(){
     const flow=randomUUID(),body={protocolVersion:1,flowRunId:flow,organizationRef:'28',externalJobId:'vanta:jobs:95101',
       briefVersionId:randomUUID(),materialHash:hash,artifactHash:hash,compilerVersion:'1',queryArtifact:{jobContext:{}},
       callbackUrl:'https://flow.example/api/webhooks/signal/callback'};
-    const bound=await one('SELECT signal_sourcing_bind($1,$2,$3) result',[tenant,flow,body]);
+    const bound=await bindHistorical(flow,body);
     const fence={acquisitionGeneration:1,executionAttemptId:bound.executionAttemptId,processingLeaseId:randomUUID()};
     await db.query("UPDATE job_sourcing_requests SET status='processing',processing_lease_id=$2 WHERE id=$1",[bound.requestId,fence.processingLeaseId]);
     const grant={grantId:randomUUID(),providerInputHash:hash,expiresAt:new Date(Date.now()+50000).toISOString(),state:'issued',
@@ -79,7 +93,7 @@ describe.skipIf(!enabled)('governed Discover SQL components, real PostgreSQL',()
       await expect(one('SELECT signal_sourcing_bind($1,$2,$3) result',[tenant,flow,{...body,...patch}])).rejects.toThrow('GOVERNED_TARGET_MISMATCH');
       await db.query('ROLLBACK TO SAVEPOINT wrong_binding');
     }
-    const first=await one('SELECT signal_sourcing_bind($1,$2,$3) result',[tenant,flow,body]);
+    const first=await bindHistorical(flow,body);
     expect(first).toMatchObject({flowRunId:flow,acquisitionGeneration:1,idempotent:false});
     expect(await one('SELECT signal_sourcing_bind($1,$2,$3) result',[tenant,flow,body])).toMatchObject({requestId:first.requestId,idempotent:true});
   });

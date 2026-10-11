@@ -189,7 +189,7 @@ export async function deliverCallback(
   const privacySafePayload: SourcingCallbackPayload = {
     ...payload,
     candidateCount: allowedCandidateCount,
-    ...(binding?{governed:{protocolVersion:1,flowRunId:binding.flowRunId,artifactHash:binding.artifactHash}}:{}),
+    ...(binding?{governed:{protocolVersion:binding.protocolVersion,flowRunId:binding.flowRunId,artifactHash:binding.artifactHash}}:{}),
   };
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     // Wait before retry (skip on first attempt)

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { rankingContractSchema } from './rubric/contracts';
 
 const hash = z.string().regex(/^[0-9a-f]{64}$/);
 const uuid = z.string().uuid();
@@ -15,15 +16,23 @@ export const governedArtifactSchema = z.object({
   criterionMap: z.array(z.object({ criterionId: uuid, use: z.enum(['retrieval','assessment']), field: z.string().max(160).nullable() }).strict()).min(1).max(12),
   briefVersionId: uuid, materialHash: hash, sourceHash: hash, digestBasisHash: hash, queryHash: hash, previewQueryHash: hash,
 }).strict();
-export const governedSourceSchema = z.object({
+const legacySourceSchema = z.object({
   protocolVersion: z.literal(1), flowRunId: uuid, organizationRef: z.string().regex(/^[1-9][0-9]*$/),
   externalJobId: z.string().regex(/^vanta:jobs:[1-9][0-9]*$/),
   briefVersionId: uuid, materialHash: hash, artifactHash: hash, compilerVersion: z.literal('1'),
   queryArtifact: governedArtifactSchema, callbackUrl: z.string().url().max(2048),
-}).strict().superRefine((value, ctx) => {
+}).strict();
+export const governedSourceSchema = z.discriminatedUnion('protocolVersion', [
+  legacySourceSchema,
+  legacySourceSchema.extend({ protocolVersion: z.literal(2), rankingContract: rankingContractSchema }).strict(),
+]).superRefine((value, ctx) => {
   if (value.queryArtifact.briefVersionId !== value.briefVersionId || value.queryArtifact.materialHash !== value.materialHash ||
       value.queryArtifact.queryHash !== value.artifactHash || artifactHash(value.queryArtifact) !== value.artifactHash) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Artifact binding mismatch' });
+  }
+  if (value.protocolVersion === 2 && (value.rankingContract.briefVersionId !== value.briefVersionId ||
+      value.rankingContract.materialHash !== value.materialHash)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Ranking binding mismatch' });
   }
 });
 export type GovernedSource = z.infer<typeof governedSourceSchema>;
