@@ -635,6 +635,7 @@ model SourcingCoverageState {
 }
 
 model JobSourcingRequest {
+  rc_sourcing_runs      rc_sourcing_runs[]
   id                    String    @id @default(cuid())
   tenantId              String
   externalJobId         String
@@ -672,6 +673,7 @@ model JobSourcingRequest {
 }
 
 model CrustdataAcquisitionReceipt {
+  rc_purchase_members   rc_purchase_members[]
   id                    String    @id @default(cuid())
   tenantId              String
   sourcingRequestId     String
@@ -719,6 +721,7 @@ model JobSourcingCandidate {
 }
 
 model GovernedSourcingTenant {
+  rc_org_policies rc_org_policies?
   tenantId String @id(map: "gov_tenant_pk") @map("tenant_id")
   enabledAt DateTime @map("enabled_at") @db.Timestamptz(6)
   policyHash String @map("policy_hash")
@@ -730,6 +733,7 @@ model GovernedSourcingTenant {
 }
 
 model GovernedSourcingBinding {
+  rc_sourcing_runs rc_sourcing_runs[]
   tenantId String @map("tenant_id")
   flowRunId String @map("flow_run_id") @db.Uuid
   requestId String @unique(map: "gov_binding_request_uq") @map("request_id")
@@ -834,4 +838,137 @@ model GovernedSourcingPreview {
   updatedAt DateTime @default(dbgenerated("clock_timestamp()")) @map("updated_at") @db.Timestamptz(6)
   @@id([tenantId,previewId],map:"gov_preview_pk")
   @@map("governed_sourcing_previews")
+}
+
+// RC tables are represented for migration drift checks only. Runtime access
+// remains routine-only; SQL owns checks, RLS and partial indexes.
+model rc_account_windows {
+  account_hash      String
+  window_start      DateTime  @db.Timestamptz(6)
+  reserved_requests Int
+  current_limit     Int
+  blocked_until     DateTime? @db.Timestamptz(6)
+
+  @@id([account_hash, window_start])
+}
+
+model rc_lookup_attempts {
+  id                  String              @id @db.Uuid
+  run_id              String              @db.Uuid
+  identity_hash       String
+  operation           String
+  ordinal             Int
+  state               String
+  possible_credits    Int
+  privacy_generation  BigInt
+  dispatch_at         DateTime?           @db.Timestamptz(6)
+  outcome_hash        String?
+  outcome             Json?
+  rc_purchase_members rc_purchase_members @relation(fields: [run_id, identity_hash], references: [run_id, identity_hash], onUpdate: NoAction, map: "rc_attempt_member_fk")
+  rc_skill_outbox     rc_skill_outbox?
+
+  @@unique([run_id, identity_hash, operation, ordinal])
+}
+
+model rc_operations_events {
+  id                String           @id @db.Uuid
+  run_id            String           @db.Uuid
+  kind              String
+  episode           Int
+  created_at        DateTime         @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  delivered_at      DateTime?        @db.Timestamptz(6)
+  acknowledged_at   DateTime?        @db.Timestamptz(6)
+  ack_actor         String?
+  next_delivery_at  DateTime         @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  delivery_attempts Int              @default(0)
+  safe_code         String
+  rc_sourcing_runs  rc_sourcing_runs @relation(fields: [run_id], references: [id], onUpdate: NoAction)
+
+  @@unique([run_id, kind, episode], map: "rc_event_episode_uq")
+}
+
+model rc_org_policies {
+  tenant_id                 String                 @id
+  policy_id                 String                 @db.Uuid
+  enabled                   Boolean                @default(false)
+  updated_at                DateTime               @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  rc_rate_policies          rc_rate_policies       @relation(fields: [policy_id], references: [id], onUpdate: NoAction)
+  governed_sourcing_tenants GovernedSourcingTenant @relation(fields: [tenant_id], references: [tenantId], onUpdate: NoAction)
+}
+
+model rc_purchase_members {
+  run_id                         String                      @db.Uuid
+  candidate_id                   String
+  identity_hash                  String
+  receipt_id                     String
+  state                          String
+  rc_lookup_attempts             rc_lookup_attempts[]
+  crustdata_acquisition_receipts CrustdataAcquisitionReceipt @relation(fields: [receipt_id], references: [id], onUpdate: NoAction)
+  rc_sourcing_runs               rc_sourcing_runs            @relation(fields: [run_id], references: [id], onUpdate: NoAction)
+
+  @@id([run_id, identity_hash])
+  @@unique([run_id, candidate_id])
+}
+
+model rc_rate_policies {
+  id                     String             @id @db.Uuid
+  policy_hash            String             @unique
+  rc_account_hash        String?
+  rc_fetch_credits_max   Int?
+  rpm                    Int?
+  enabled                Boolean            @default(false)
+  rc_org_policies        rc_org_policies[]
+  rc_sourcing_runs       rc_sourcing_runs[]
+}
+
+model rc_skill_outbox {
+  id                 String             @id @db.Uuid
+  attempt_id         String             @unique @db.Uuid
+  minimal_payload    Json?
+  payload_hash       String
+  state              String
+  next_attempt_at    DateTime           @db.Timestamptz(6)
+  delivery_receipt   String?
+  rc_lookup_attempts rc_lookup_attempts @relation(fields: [attempt_id], references: [id], onUpdate: NoAction)
+}
+
+model rc_sourcing_runs {
+  id                         String                  @id @db.Uuid
+  tenant_id                  String
+  flow_run_id                String                  @db.Uuid
+  request_id                 String
+  generation                 Int
+  policy_id                  String                  @db.Uuid
+  brief_hash                 String
+  baseline_hash              String?
+  baseline                   Json?
+  state                      String
+  execution_attempt_id       String
+  processing_lease_id        String
+  created_at                 DateTime                @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  rc_started_at              DateTime?               @db.Timestamptz(6)
+  deadline_at                DateTime?               @db.Timestamptz(6)
+  sealed_at                  DateTime?               @db.Timestamptz(6)
+  heartbeat_at               DateTime                @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  last_progress_at           DateTime                @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(6)
+  next_work_at               DateTime?               @db.Timestamptz(6)
+  stalled_at                 DateTime?               @db.Timestamptz(6)
+  closed_at                  DateTime?               @db.Timestamptz(6)
+  safe_to_clean_at           DateTime?               @db.Timestamptz(6)
+  cleaned_at                 DateTime?               @db.Timestamptz(6)
+  closure_hash               String?
+  revision                   BigInt                  @default(0)
+  retention_hold             Boolean                 @default(false)
+  recovery_receipts          Json                    @default("[]")
+  rc_available              Boolean
+  paid_lookups              Int                     @default(0)
+  resume_token              String?                 @db.Uuid
+  resume_enqueued_at        DateTime?               @db.Timestamptz(6)
+  rc_operations_events       rc_operations_events[]
+  rc_purchase_members        rc_purchase_members[]
+  governed_sourcing_bindings GovernedSourcingBinding @relation(fields: [tenant_id, flow_run_id], references: [tenantId, flowRunId], onUpdate: NoAction, map: "rc_run_binding_fk")
+  job_sourcing_requests      JobSourcingRequest      @relation(fields: [request_id, tenant_id], references: [id, tenantId], onUpdate: NoAction, map: "rc_run_request_fk")
+  rc_rate_policies           rc_rate_policies        @relation(fields: [policy_id], references: [id], onUpdate: NoAction)
+
+  @@unique([tenant_id, flow_run_id, generation], map: "rc_run_one_uq")
 }

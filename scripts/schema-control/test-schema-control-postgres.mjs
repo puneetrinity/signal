@@ -8,6 +8,7 @@ import { CONTROL_SCHEMA, RUNTIME_ROLE } from './constants.mjs';
 import { beginBoundedTransaction, createPrisma } from './database.mjs';
 import { GOVERNED_FUNCTIONS, GOVERNED_TABLES } from '../check-governed-sourcing.mjs';
 import { RANKING_FUNCTIONS, RANKING_PRIVATE_FUNCTIONS, RANKING_TABLES } from '../check-rubric-ranking.mjs';
+import { RC_FUNCTIONS, RC_OWNER_FUNCTIONS, RC_TABLES } from '../check-rc-skills.mjs';
 
 if (process.env.RUN_SIGNAL_SCHEMA_CONTROL_POSTGRES !== '1') {
   throw new Error('RUN_SIGNAL_SCHEMA_CONTROL_POSTGRES=1 is required');
@@ -207,7 +208,7 @@ try {
   `);
   assert(afterAdoption[0].count === 0, 'Adoption changed a product row');
 
-  // Preserve 22 -> 23, 23 -> 24 and 24 -> 25 separately, then prove 25 -> 26.
+  // Preserve every historical transition separately, then prove 26 -> 27 -> 28.
   // This is an empty, locally attested test database, never a rollback tool.
   historicalRoot = await mkdtemp(join(tmpdir(), 'signal-schema-history-'));
   await mkdir(resolve(historicalRoot, 'prisma/migrations'), { recursive: true });
@@ -216,6 +217,14 @@ try {
   const governedMigration = '20261004000000_governed_sourcing';
   const rankingMigration = '20261006000000_rubric_ranking';
   const isolationMigration = '20261008000000_rubric_evidence_isolation';
+  const rcMigration = '20261009000000_rc_skills';
+  const skillsMigration = '20261009010000_approved_skill_alternatives';
+  assert(historicalLock.migrations.at(-1).name === skillsMigration, 'Unexpected approved-skills tail');
+  historicalLock.migrations.pop();
+  const rcLock = structuredClone(historicalLock);
+  assert(historicalLock.migrations.at(-1).name === rcMigration, 'Unexpected RC tail');
+  historicalLock.migrations.pop();
+  const isolationLock = structuredClone(historicalLock);
   assert(historicalLock.migrations.at(-1).name === isolationMigration, 'Unexpected isolation tail');
   historicalLock.migrations.pop();
   const rankingLock = structuredClone(historicalLock);
@@ -228,6 +237,13 @@ try {
     await cp(resolve(ROOT_DIR, 'prisma/migrations', migration.name), resolve(historicalRoot, 'prisma/migrations', migration.name), { recursive: true });
   }
   await writeFile(resolve(historicalRoot, 'prisma/migrations.lock.json'), `${JSON.stringify(historicalLock, null, 2)}\n`);
+  for (const table of RC_TABLES) {
+    const [row] = await admin.$queryRawUnsafe(`SELECT count(*)::integer count FROM public.${table}`);
+    assert(row.count === 0, 'Historical rehearsal requires empty RC tables');
+  }
+  for (const signature of [...RC_FUNCTIONS,...RC_OWNER_FUNCTIONS]) await admin.$executeRawUnsafe(`DROP FUNCTION public.${signature}`);
+  for (const table of [...RC_TABLES].reverse()) await admin.$executeRawUnsafe(`DROP TABLE public.${table}`);
+  for (const name of [skillsMigration,rcMigration]) await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1',name);
   for (const table of RANKING_TABLES) {
     const [row] = await admin.$queryRawUnsafe(`SELECT count(*)::integer count FROM public.${table}`);
     assert(row.count === 0, 'Historical rehearsal requires empty ranking tables');
@@ -307,10 +323,17 @@ try {
       SIGNAL_SCHEMA_CONTROL_TEST_ROOT:historicalRoot,SIGNAL_SCHEMA_DISPOSABLE_SINGLE_CREDENTIAL:'1'}),
     '24-to-25 rubric ranking release',
   );
-  await requireSuccess(
-    await runNode('scripts/schema-control/migrate-release.mjs', releaseEnvironment),
-    '25-to-26 evidence isolation release',
-  );
+  for (const [name,lock,label] of [
+    [isolationMigration,isolationLock,'25-to-26 evidence isolation release'],
+    [rcMigration,rcLock,'26-to-27 RC skills release'],
+  ]) {
+    await cp(resolve(ROOT_DIR,'prisma/migrations',name),resolve(historicalRoot,'prisma/migrations',name),{recursive:true});
+    await writeFile(resolve(historicalRoot,'prisma/migrations.lock.json'),`${JSON.stringify(lock,null,2)}\n`);
+    await requireSuccess(await runNode('scripts/schema-control/migrate-release.mjs',{...releaseEnvironment,
+      SIGNAL_SCHEMA_CONTROL_TEST_ROOT:historicalRoot,SIGNAL_SCHEMA_DISPOSABLE_SINGLE_CREDENTIAL:'1'}),label);
+  }
+  await requireSuccess(await runNode('scripts/schema-control/migrate-release.mjs', releaseEnvironment),
+    '27-to-28 approved skill alternatives release');
   await requireSuccess(
     await runNode('scripts/schema-control/provision-runtime-role.mjs', {
       ...commonIdentity, DIRECT_URL: adminUrl,

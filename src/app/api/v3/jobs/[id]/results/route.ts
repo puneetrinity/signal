@@ -83,6 +83,18 @@ export async function GET(
     ? { id: requestId, tenantId, externalJobId }
     : { tenantId, externalJobId };
 
+  if(request.nextUrl.searchParams.get('progressOnly')==='1'){
+    if(process.env.RC_SKILLS_ENABLED!=='true')return NextResponse.json({success:false,error:'progress_unavailable'},{status:404});
+    const scoped=await prisma.jobSourcingRequest.findFirst({where,orderBy:{requestedAt:'desc'},select:{flowRunId:true,protocolVersion:true}});
+    if(!scoped?.flowRunId||scoped.protocolVersion!==2)return NextResponse.json({success:false,error:'progress_unavailable'},{status:404});
+    try{
+      const {RcRepository}=await import('@/lib/sourcing/rc-skills/repository');
+      const rcProgress=await new RcRepository().progress(tenantId,scoped.flowRunId);
+      if(!rcProgress)return NextResponse.json({success:false,error:'progress_unavailable'},{status:404});
+      return NextResponse.json({success:true,rcProgress},{headers:{'Cache-Control':'no-store'}});
+    }catch{return NextResponse.json({success:false,error:'progress_temporarily_unavailable'},{status:503});}
+  }
+
   const sourcingRequest = (await prisma.jobSourcingRequest.findFirst({
     where,
     orderBy: { requestedAt: 'desc' },

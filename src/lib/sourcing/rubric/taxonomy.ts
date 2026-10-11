@@ -1,4 +1,5 @@
 import type { Criterion } from './contracts';
+import { approvedSkillNames } from './skill-alternatives';
 export const normalize = (value:string):string => value.normalize('NFKC').trim().toLowerCase().replace(/\s+/g,' ');
 const skills:Readonly<Record<string,string>>={"nodejs":"node.js","reactjs":"react","react.js":"react","vuejs":"vue","vue.js":"vue","angularjs":"angular","angular.js":"angular","golang":"go","nextjs":"next.js","next js":"next.js","nuxtjs":"nuxt","nuxt.js":"nuxt","expressjs":"express","express.js":"express","fastapi":"fastapi","fast api":"fastapi","postgres":"postgresql","postgressql":"postgresql","mongo":"mongodb","k8s":"kubernetes","ts":"typescript","js":"javascript","cpp":"c++","dotnet":".net","dot net":".net","csharp":"c#","c sharp":"c#","sfdc":"salesforce","salesforce crm":"salesforce","salesforce.com":"salesforce"};
 const levels={"ic":["intern","junior","mid","senior","staff","principal"],"management":["manager","director","vp","cxo"],"aliases":{"sr":"senior","sr.":"senior","svp":"vp","evp":"vp","ceo":"cxo","cto":"cxo","cfo":"cxo","coo":"cxo"},"ambiguous":["lead","head","associate"],"rule":"Comparable minimum within the same explicitly established track only; cross-track, multiple levels or ambiguous label -> unknown. Higher same-track level earns no extra points. Never place manager above principal. Exclude senior living/care/citizen/home phrases."} as const;
@@ -160,6 +161,7 @@ export function functionFamily(raw:string):string|null {
 export function predicateKey(c:Criterion):string {
   const r=c.requirement;
   let value:unknown=r;
+  if(r.kind==='accepted_skills') value=approvedSkillNames(r).sort((a,b)=>Buffer.compare(Buffer.from(a),Buffer.from(b)));
   if(r.kind==='text') value=c.subject==='skill'?atomicSkill(r.value)??normalize(r.value):normalize(r.value);
   if(r.kind==='accepted_titles') value=[...new Set(r.values.map(normalizedTitle))].sort();
   return JSON.stringify([c.subject,value]);
@@ -167,6 +169,7 @@ export function predicateKey(c:Criterion):string {
 export function automaticallyMapped(c:Criterion):boolean {
   if(c.evidenceKinds.every(k=>k==='recruiter_judgement') || ['responsibility','leadership','availability'].includes(c.subject)) return false;
   const r=c.requirement;
+  if(c.subject==='skill' && r.kind==='accepted_skills') return true;
   if(c.subject==='experience_years') return r.kind==='minimum_years'||r.kind==='experience_range';
   if(c.subject==='title') return r.kind==='accepted_titles' && r.values.some(v=>normalizedTitle(v)!==null);
   if(c.subject==='work_eligibility') return r.kind==='boolean';

@@ -12,8 +12,10 @@ function assert(condition, message) {
 }
 
 const migrations = await loadMigrationLock();
-assert(migrations.length === 26, `Expected 26 locked migrations, found ${migrations.length}`);
-assert(migrations.at(-1).name === '20261008000000_rubric_evidence_isolation', 'Expected evidence isolation at the locked tail');
+assert(migrations.length === 28, `Expected 28 locked migrations, found ${migrations.length}`);
+assert(migrations.at(-3).name === '20261008000000_rubric_evidence_isolation', 'Expected preserved evidence isolation migration');
+assert(migrations.at(-2).name === '20261009000000_rc_skills', 'Expected RC skills before the locked tail');
+assert(migrations.at(-1).name === '20261009010000_approved_skill_alternatives', 'Expected approved skill alternatives at the locked tail');
 const validRows = migrations.map((entry, index) => ({
   migration_name: entry.name,
   checksum: entry.sha256,

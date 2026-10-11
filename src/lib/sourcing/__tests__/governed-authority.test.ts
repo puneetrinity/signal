@@ -15,6 +15,7 @@ vi.mock('@/lib/sourcing/queue/producer',()=>({getSourcingQueue:()=>({add:routeMo
 import { artifactHash, governedEnabled, governedSourceSchema, parseGovernedSource, previewObservation } from '../governed-contracts';
 import {GovernedRepository,runGovernedPreview} from '../governed-authority';
 import {RankingRepository} from '../rubric/repository';
+import {RcRepository} from '../rc-skills/repository';
 const id='10000000-0000-4000-8000-000000000001', hash='a'.repeat(64);
 const artifact={compilerVersion:'1' as const,digestVersion:3 as const,jobContext:{title:'Backend Engineer',location:'Bengaluru',jdDigest:'{}',skills:['Python'],goodToHaveSkills:[]},
   criterionMap:[{criterionId:id,use:'assessment' as const,field:null}],briefVersionId:id,materialHash:hash,sourceHash:hash,digestBasisHash:hash,previewQueryHash:hash,queryHash:hash};
@@ -140,6 +141,7 @@ describe('actual governed results route',()=>{
 describe('actual sourcing worker failure handling',()=>{
   beforeEach(()=>{
     routeMocks.privacy.mockReset().mockResolvedValue({});
+    vi.spyOn(RcRepository.prototype,'claimExecution').mockResolvedValue({version:1,state:'unmanaged'});
     workerMocks.update.mockReset().mockResolvedValue({count:1});
     workerMocks.find.mockReset().mockResolvedValue({jobContext:artifact.jobContext});
     workerMocks.published.mockReset().mockResolvedValue(null);
@@ -155,6 +157,49 @@ describe('actual sourcing worker failure handling',()=>{
       callbackUrl:command.callbackUrl,acquisitionGeneration:1,executionAttemptId:id,resolvedTrack:{track:'tech'}}} as unknown as Parameters<typeof processSourcingJob>[0]);
   }
   const operations=()=>workerMocks.update.mock.calls.map(([arg])=>arg);
+  it.each(['cancelled','retry','stalled'] as const)('RC failure uses database %s decision instead of unconditional stall',async state=>{
+    vi.stubEnv('RC_SKILLS_ENABLED','true');
+    const bound={protocolVersion:2,flowRunId:id,rankingContract:{payload:{schemaVersion:3},contractHash:hash}};
+    vi.spyOn(GovernedRepository.prototype,'call').mockImplementation(async op=>op==='execution'||op==='boundCommand'?bound:null);
+    vi.spyOn(RankingRepository.prototype,'resume').mockResolvedValue(null);
+    vi.spyOn(RcRepository.prototype,'admit').mockResolvedValue({version:1,enabled:true,runId:id,rcAvailable:true});
+    vi.spyOn(RcRepository.prototype,'read').mockResolvedValue(null);
+    const failure=vi.spyOn(RcRepository.prototype,'failure').mockResolvedValue({version:1,state});
+    const stall=vi.spyOn(RcRepository.prototype,'stall');
+    if(state==='cancelled')expect(await run(0)).toMatchObject({error:'GOVERNED_CANCELLED_NO_DISPATCH'});
+    else await expect(run(0)).rejects.toThrow(state==='retry'?'local orchestration failed':'RC_RECOVERY_PENDING');
+    expect(failure).toHaveBeenCalledWith(expect.objectContaining({flowRunId:id}),0,3);
+    expect(stall).not.toHaveBeenCalled();
+    expect(operations().some(op=>op.data.status==='failed')).toBe(false);
+  });
+  it('RC retry privacy failure before admission still uses the existing durable recovery state',async()=>{
+    vi.stubEnv('RC_SKILLS_ENABLED','true');
+    const bound={protocolVersion:2,flowRunId:id,rankingContract:{payload:{schemaVersion:3}}};
+    vi.spyOn(GovernedRepository.prototype,'call').mockImplementation(async op=>op==='execution'||op==='boundCommand'?bound:null);
+    routeMocks.privacy.mockRejectedValue(Error('privacy unavailable'));
+    vi.spyOn(RcRepository.prototype,'progress').mockResolvedValue({state:'enriching_skills'} as never);
+    const failure=vi.spyOn(RcRepository.prototype,'failure').mockResolvedValue({version:1,state:'retry'});
+    const read=vi.spyOn(RcRepository.prototype,'read');
+    await expect(run(1)).rejects.toThrow('privacy unavailable');
+    expect(failure).toHaveBeenCalledWith(expect.objectContaining({flowRunId:id}),1,3);
+    expect(read).not.toHaveBeenCalled();expect(workerMocks.orchestrate).not.toHaveBeenCalled();
+  });
+  it('reconciles a lost RC claim only through the token fence and never steals a rejected execution',async()=>{
+    vi.stubEnv('RC_SKILLS_ENABLED','true');
+    const bound={protocolVersion:2,flowRunId:id,rankingContract:{payload:{schemaVersion:3}}};
+    vi.spyOn(GovernedRepository.prototype,'call').mockResolvedValue(bound);
+    const claim=vi.mocked(RcRepository.prototype.claimExecution);
+    claim.mockRejectedValueOnce(Error('lost claim response')).mockResolvedValueOnce({version:1,state:'rejected'});
+    await expect(run(2)).rejects.toThrow('lost claim response');
+    expect(workerMocks.update).not.toHaveBeenCalled();expect(workerMocks.orchestrate).not.toHaveBeenCalled();
+    claim.mockRejectedValueOnce(Error('lost claim response')).mockResolvedValueOnce({version:1,state:'claimed'});
+    vi.spyOn(RcRepository.prototype,'progress').mockResolvedValue({state:'enriching_skills'} as never);
+    const failure=vi.spyOn(RcRepository.prototype,'failure').mockResolvedValue({version:1,state:'cancelled'});
+    expect(await run(2)).toMatchObject({error:'GOVERNED_CANCELLED_NO_DISPATCH'});
+    expect(failure).toHaveBeenCalledOnce();expect(workerMocks.update).not.toHaveBeenCalled();
+    expect(claim.mock.calls[0]).toEqual(claim.mock.calls[1]);
+    expect(claim.mock.calls[2]).toEqual(claim.mock.calls[3]);
+  });
   function repository(cancel:unknown=null) {
     return vi.spyOn(GovernedRepository.prototype,'call').mockImplementation(async operation=>{
       if(operation==='execution' || operation==='boundCommand')return {};

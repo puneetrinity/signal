@@ -6,6 +6,7 @@ import { assertCoreRelations, assertIdentity, assertRuntimePrivileges, beginBoun
 import { assertPrismaLedger, loadMigrationLock } from './manifest.mjs';
 import {assertGovernedSourcingCatalog} from '../check-governed-sourcing.mjs';
 import {assertRankingCatalog} from '../check-rubric-ranking.mjs';
+import {assertRcCatalog} from '../check-rc-skills.mjs';
 
 const runtime = assertRuntimeEnvironment();
 const controlRoot = resolveControlRoot(runtime, ROOT_DIR);
@@ -52,6 +53,7 @@ try {
     });
     await assertGovernedSourcingCatalog(tx,{allowOwner:isDisposableDevelopment(runtime,runtime.runtimeUrl)});
     await assertRankingCatalog(tx,{allowOwner:isDisposableDevelopment(runtime,runtime.runtimeUrl)});
+    await assertRcCatalog(tx,{allowOwner:isDisposableDevelopment(runtime,runtime.runtimeUrl)});
   }, { maxWait: 5_000, timeout: 15_000 });
   console.log(`[Schema ready] OK (target=${fingerprint}; migrations=${migrations.length})`);
 } catch (error) {

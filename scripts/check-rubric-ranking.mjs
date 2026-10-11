@@ -5,7 +5,7 @@ import {createHash} from 'node:crypto';
 export const RANKING_TABLES=['governed_ranking_runs','governed_ranking_items'];
 export const RANKING_FUNCTIONS=['signal_ranking_claim(text,uuid,jsonb)','signal_ranking_finish(text,uuid,uuid,jsonb)','signal_ranking_read(text,uuid,uuid)'];
 export const RANKING_PRIVATE_FUNCTIONS=['signal_ranking_immutable()'];
-export const RANKING_CATALOG_SHA256='559fe596daf0e6b1acf9335768069842de870ca0de02c5d6a036262c6f326106';
+export const RANKING_CATALOG_SHA256='1c7a18e3ab256338e6f769013fd43ccea223535cb339b4ade1055bce4e190933';
 export const RANKING_CATALOG_SQL=`WITH relations AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname='public' AND c.relname LIKE 'governed_ranking_%' AND c.relkind IN ('r','p')

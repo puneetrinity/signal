@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "unicode": "16.0.0",
+  "normalization": [
+    {
+      "input": " ＡＷＳ  ",
+      "expected": "aws"
+    },
+    {
+      "input": "Café",
+      "expected": "café"
+    },
+    {
+      "input": "C++",
+      "expected": "c++"
+    },
+    {
+      "input": "Node.js",
+      "expected": "node.js"
+    },
+    {
+      "input": "ΑΟΣ",
+      "expected": "αος"
+    },
+    {
+      "input": "ΑΟΣΑ",
+      "expected": "αοσα"
+    },
+    {
+      "input": "ΟΣ'",
+      "expected": "ος'"
+    },
+    {
+      "input": "İ",
+      "expected": "i̇"
+    },
+    {
+      "input": "Ᲊ",
+      "expected": "ᲊ"
+    },
+    {
+      "input": "Ɤ",
+      "expected": "ɤ"
+    },
+    {
+      "input": "𜳖",
+      "expected": "a"
+    },
+    {
+      "input": "각",
+      "expected": "각"
+    },
+    {
+      "input": "À̕",
+      "expected": "à̕"
+    },
+    {
+      "input": "Å",
+      "expected": "å"
+    },
+    {
+      "input": "x  y",
+      "expected": "x y"
+    },
+    {
+      "input": "ᾈ",
+      "expected": "ᾀ"
+    },
+    {
+      "input": "ﬃ",
+      "expected": "ffi"
+    },
+    {
+      "input": "ǅ",
+      "expected": "dž"
+    },
+    {
+      "input": "𐵐",
+      "expected": "𐵰"
+    }
+  ]
+}

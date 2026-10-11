@@ -3,6 +3,7 @@ import { evidenceFor, evidenceSchema, type CanonicalEvidence, type EvidenceFact 
 import { calculateExperience, experienceEligibility, experienceDisplay, DAYS_PER_YEAR, type ExperienceRange, type ExperienceEligibility } from './experience';
 import { atomicSkill, automaticallyMapped, canonicalDegree, canonicalLanguage, canonicalLocation, functionFamily, normalize, normalizedTitle, predicateKey, seniority, languageRequirement, educationRequirement, certificationRequirement, CEFR_LEVELS } from './taxonomy';
 import { localMatch } from './lexical';
+import { approvedSkillNames, normalizeSkillName } from './skill-alternatives';
 
 export type AssessmentState='met'|'not_met'|'unknown';
 export interface Assessment {criterionIds:string[];labels:string[];subject:Criterion['subject'];state:AssessmentState;mapped:boolean;weight:number;points:number;localPoints:number;refs:string[]}
@@ -13,6 +14,11 @@ function assess(c:Criterion,e:CanonicalEvidence,asOf:string):{state:AssessmentSt
   const allowed=c.evidenceKinds;
   const facts=evidenceFor(e,kind as EvidenceFact['field'],allowed,asOf);
   const r=c.requirement;
+  if(c.subject==='skill' && r.kind==='accepted_skills') {
+    const approved=new Set(approvedSkillNames(r));
+    const matched=facts.filter(f=>approved.has(normalizeSkillName(f.value)));
+    return result(matched.length?'met':'unknown',matched);
+  }
   if(c.subject==='title' && r.kind==='accepted_titles') {
     const approved=new Set(r.values.map(normalizedTitle).filter(Boolean));
     const matched=facts.filter(f=>{const title=normalizedTitle(f.value);return title!==null&&approved.has(title);});

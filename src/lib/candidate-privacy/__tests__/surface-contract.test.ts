@@ -5,6 +5,16 @@ import { describe, expect, it } from 'vitest';
 const root = process.cwd();
 
 const enforcementContracts = [
+  ['rc-contract-boundary','src/lib/sourcing/rc-skills/contracts.ts',['observationBodySchema=z.object','contentHash!==rankingHash(body)']],
+  ['rc-evidence-boundary','src/lib/sourcing/rc-skills/evidence.ts',['RC_EVIDENCE_IDENTITY_CONFLICT','throw new OversizedEvidenceError']],
+  ['rc-membership-boundary','src/lib/sourcing/rc-skills/membership.ts',['RC_RECEIPT_BINDING_CONFLICT','RC_PURCHASE_LIMIT']],
+  ['rc-memory-boundary','src/lib/sourcing/rc-skills/memory.ts',["scope:'rc-skills:read'|'rc-skills:write'",'parsed.data.contentHash!==body.observation.contentHash']],
+  ['rc-provider-boundary','src/lib/sourcing/rc-skills/provider.ts',['AbortSignal.timeout','rcSkillsSchema.safeParse(data.skills)']],
+  ['rc-repository-boundary','src/lib/sourcing/rc-skills/repository.ts',['pg_advisory_xact_lock','await requireHealthyCandidatePrivacyContext(tx)']],
+  ['rc-worker-boundary','src/lib/sourcing/rc-skills/worker.ts',['await repository.dispatch','await filterCandidateIdsBeforeLimit']],
+  ['rc-outbox-boundary','src/lib/sourcing/rc-skills/outbox.ts',['entry.payloadHash!==rcOutboxPayloadHash(entry.payload)','await input.memory.finish']],
+  ['rc-alert-boundary','src/lib/sourcing/rc-skills/alerts.ts',['rcAlertSchema.parse(event)',"redirect:'error'"]],
+  ['rc-maintenance-boundary','src/lib/sourcing/rc-skills/maintenance.ts',['if(!input.enabled)return summary',"await call('cleanup')"]],
   ['rubric-contract-boundary','src/lib/sourcing/rubric/contracts.ts',['rankingContractSchema','rankingHash(body)!==contractHash']],
   ['rubric-evidence-boundary','src/lib/sourcing/rubric/evidence.ts',['Foreign private evidence','evidenceShape.parse','new OversizedEvidenceError']],
   ['rubric-experience-boundary','src/lib/sourcing/rubric/experience.ts',['calculateExperience','roles.filter(role => !isInternship(role))']],

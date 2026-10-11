@@ -6,13 +6,18 @@ const queryRaw = vi.fn();
 const findMany = vi.fn();
 const updateMany = vi.fn();
 const ensureCandidateGlobalLink = vi.fn();
+const rcProgress = vi.fn();
+const receiptUpdate = vi.fn();
+vi.mock('../rc-skills/repository', () => ({
+  RcRepository: class { progress = rcProgress; },
+}));
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     $executeRaw: executeRaw,
     $queryRaw: queryRaw,
     $transaction: vi.fn(async (callback: (tx: unknown) => unknown) =>
-      callback({ $executeRaw: executeRaw }),
+      callback({ $executeRaw: executeRaw, $queryRaw: queryRaw, crustdataAcquisitionReceipt:{updateMany:receiptUpdate} }),
     ),
     publicMemoryIngestOutbox: {
       findMany,
@@ -64,6 +69,39 @@ describe("public Memory ingest outbox enqueue", () => {
     findMany.mockReset();
     updateMany.mockReset();
     ensureCandidateGlobalLink.mockReset();
+    rcProgress.mockReset();
+    receiptUpdate.mockReset();
+    receiptUpdate.mockResolvedValue({count:1});
+    vi.unstubAllEnvs();
+  });
+
+  it('refuses receipt repair when the request belongs to a different Flow run', async()=>{
+    vi.stubEnv('RC_SKILLS_ENABLED','true');
+    rcProgress.mockResolvedValue({state:'sealed'});
+    queryRaw.mockResolvedValue([]);
+    const {repairRcPurchaseIngestion}=await import('../public-memory-ingest-outbox');
+    await expect(repairRcPurchaseIngestion('org_1','request-1','11111111-1111-4111-8111-111111111111'))
+      .rejects.toThrow('RC_REPAIR_BINDING');
+    expect(queryRaw).toHaveBeenCalledTimes(1);
+    expect(String(queryRaw.mock.calls[0]?.[0])).toContain('flow_run_id=');
+    expect(executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('repairs the purchase acknowledgement using the original provider URL key without duplicating delivery',async()=>{
+    vi.stubEnv('RC_SKILLS_ENABLED','true');
+    rcProgress.mockResolvedValue({state:'sealed'});
+    const url='https://www.linkedin.com/in/Alice';
+    queryRaw.mockResolvedValueOnce([{id:'request-1'}])
+      .mockResolvedValueOnce([{id:'receipt-1',generation:1,slot:'exact',observedAt:new Date('2026-10-01T00:00:00Z'),
+        result:{profiles:[{social_handles:{professional_network_identifier:{profile_url:url}}}]}}])
+      .mockResolvedValueOnce([{signalCandidateId:url}])
+      .mockResolvedValueOnce([{signalCandidateId:url}]);
+    const {repairRcPurchaseIngestion}=await import('../public-memory-ingest-outbox');
+    expect(await repairRcPurchaseIngestion('org_1','request-1','11111111-1111-4111-8111-111111111111')).toBe(true);
+    expect(executeRaw.mock.calls.every(call=>String(call[0]).includes('pg_advisory_xact_lock'))).toBe(true);
+    expect(receiptUpdate).toHaveBeenCalledWith(expect.objectContaining({data:expect.objectContaining({
+      memoryIngestMetadata:{version:1,repair:true,profileCount:1,suppressedIdentityHashes:[],acknowledgedCount:1},
+    })}));
   });
 
   it("deduplicates one identity before the single upsert statement", async () => {
@@ -80,6 +118,24 @@ describe("public Memory ingest outbox enqueue", () => {
 
     const serializedRows = executeRaw.mock.calls[0]?.[1];
     expect(JSON.parse(serializedRows)).toHaveLength(1);
+  });
+
+  it('does not reset any existing request receipt during RC repair', async()=>{
+    const {enqueuePublicMemoryIngestOutbox}=await import('../public-memory-ingest-outbox');
+    queryRaw.mockResolvedValue([{signalCandidateId:'alice'}]);
+    expect(await enqueuePublicMemoryIngestOutbox({tenantId:'org_1',sourcingRequestId:'request-1',
+      candidates:[input('alice')],repairMissingOnly:true})).toBe(0);
+    expect(executeRaw).toHaveBeenCalledTimes(1);
+    expect(String(executeRaw.mock.calls[0]?.[0])).toContain('pg_advisory_xact_lock');
+  });
+
+  it('repairs missing members without resetting members already recorded', async()=>{
+    const {enqueuePublicMemoryIngestOutbox}=await import('../public-memory-ingest-outbox');
+    queryRaw.mockResolvedValue([{signalCandidateId:'alice'}]);
+    await enqueuePublicMemoryIngestOutbox({tenantId:'org_1',sourcingRequestId:'request-1',
+      candidates:[input('alice'),input('bob')],repairMissingOnly:true});
+    const rows=JSON.parse(executeRaw.mock.calls[1]?.[1]);
+    expect(rows).toHaveLength(1);expect(rows[0].signal_candidate_id).toBe('bob');
   });
 
   it("stores only the public Crustdata projection in the durable outbox", async () => {

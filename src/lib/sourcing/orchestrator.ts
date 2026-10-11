@@ -2810,6 +2810,7 @@ export async function runSourcingOrchestrator(
               const queued = await enqueuePublicMemoryIngestOutbox({
                 tenantId,
                 sourcingRequestId: requestId,
+                repairMissingOnly: process.env.RC_SKILLS_ENABLED==='true' && governedCommand?.protocolVersion===2,
                 candidates: mappedForRanking.map((candidate) => {
                   const acquisition =
                     candidate.acquisitionRung === 'exact' ? exactAcquisition : spillAcquisition;
@@ -3077,6 +3078,12 @@ export async function runSourcingOrchestrator(
                     `Memory did not durably confirm ${candidate.id} from the ${acquisition.metadata.rungId} receipt`,
                   );
                 }
+                if(process.env.RC_SKILLS_ENABLED==='true'&&governedCommand?.protocolVersion===2&&result.globalCandidateId){
+                  const slug=extractLinkedInIdFromUrl(candidate.linkedinUrl);
+                  if(!slug)throw Error('RC_IDENTITY_CONFLICT');
+                  addExpectedGlobalIdentityReceipt({expectedByIdentity:publicGlobalIdByIdentity,
+                    conflictedIdentityKeys:conflictedPublicIdentityKeys},`li:${slug.toLowerCase()}`,result.globalCandidateId);
+                }
               }
               await markCrustdataReceiptMemoryIngested(
                 tenantId,
@@ -3231,6 +3238,20 @@ export async function runSourcingOrchestrator(
                 candidateId,
               ]),
             );
+            // RC must not depend on the asynchronous outbox linker winning a
+            // race. These identities came from the confirmed public ingestion
+            // above (or its read-only receipt lookup on resume), not guesses.
+            if(process.env.RC_SKILLS_ENABLED==='true'&&governedCommand?.protocolVersion===2){
+              for(const candidate of mappedForRanking){
+                const globalCandidateId=expectedGlobalCandidateIdForCandidate(candidate,publicGlobalIdByIdentity);
+                const slug=extractLinkedInIdFromUrl(candidate.linkedinUrl)?.toLowerCase();
+                const candidateId=slug?candidateIdByLinkedinId.get(slug):undefined;
+                if(!candidateId||!globalCandidateId)continue;
+                const link=await ensureCandidateGlobalLink({tenantId,candidateId,globalCandidateId,
+                  matchMethod:'linkedin_id_exact',linkConfidence:1});
+                if(link.candidateId!==candidateId)throw Error('RC_IDENTITY_CONFLICT');
+              }
+            }
             const materializedIdByIdentity = new Map<string, string>();
             for (const [temporaryId, localCandidateId] of materializedByTemporaryId) {
               const candidate = poolForRankingById.get(temporaryId);
@@ -3355,7 +3376,29 @@ export async function runSourcingOrchestrator(
             if(governedCommand?.protocolVersion===2) {
               if(!executionAttemptId||!processingLeaseId)throw Error('GOVERNED_EXECUTION_STALE');
               await assertCurrentExecution();
-              publishedRanking=await new RankingRepository().publish({tenantId,flowRunId:governedCommand.flowRunId,
+              if(process.env.RC_SKILLS_ENABLED==='true'&&governedCommand.rankingContract.payload.schemaVersion===3){
+                const {RcRepository}=await import('./rc-skills/repository');
+                const repository=new RcRepository(),identity={tenantId,flowRunId:governedCommand.flowRunId,executionAttemptId,processingLeaseId};
+                const admission=await repository.admit(identity,requestId,acquisitionGeneration,governedCommand.rankingContract.contractHash);
+                if(admission.enabled){
+                  const {rcPublicIdentities}=await import('./rc-skills/membership');
+                  const {createRcMemoryClient}=await import('./rc-skills/memory');
+                  const {freezeRcBaseline,completeRcRanking}=await import('./rc-skills/worker');
+                  const candidateIds=[...governedEvidenceById.keys(),...governedWithheldById.keys()];
+                  const links=await prisma.candidateGlobalLink.findMany({where:{tenantId,candidateId:{in:candidateIds}},
+                    select:{candidateId:true,globalCandidateId:true,candidate:{select:{linkedinUrl:true}}}});
+                  const identities=rcPublicIdentities(links.flatMap(link=>link.candidate.linkedinUrl?[{
+                    candidateId:link.candidateId,globalCandidateId:link.globalCandidateId,url:link.candidate.linkedinUrl}]:[]));
+                  const receipts=await prisma.crustdataAcquisitionReceipt.findMany({where:{tenantId,sourcingRequestId:requestId,
+                    acquisitionGeneration,status:'complete'},select:{id:true}});
+                  await freezeRcBaseline({identity,repository,memory:createRcMemoryClient(),receiptIds:receipts.map(r=>r.id),baseline:{
+                    version:1,asOf:governedObservedAt,identities,cache:[],withheld:[...governedWithheldById.values()],
+                    evidence:[...governedEvidenceById.values()].map(e=>({...e,presentationSource:governedSourceById.get(e.candidateId)})),
+                  }});
+                  publishedRanking=await completeRcRanking(identity,governedCommand.rankingContract);
+                }
+              }
+              if(!publishedRanking)publishedRanking=await new RankingRepository().publish({tenantId,flowRunId:governedCommand.flowRunId,
                 contract:governedCommand.rankingContract,executionAttemptId,processingLeaseId,
                 evidence:[...governedEvidenceById.values()],withheld:[...governedWithheldById.values()],sourceTypes:governedSourceById});
               const cards=new Map(allRankedWithIds.map(c=>[c.candidateId,c]));

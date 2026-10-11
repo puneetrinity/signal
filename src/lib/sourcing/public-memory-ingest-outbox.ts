@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import type { CandidateForRanking } from "./ranking-new";
@@ -16,7 +16,9 @@ import { assertAdmissionProofCurrent } from "@/lib/candidate-privacy/repository"
 import {
   requireCandidatePrivacyAllowed,
   requireHealthyCandidatePrivacyContext,
+  CANDIDATE_PRIVACY_ADMISSION_LOCK,
 } from "@/lib/candidate-privacy/repository";
+import {normalizeSourcedCandidateLinkedInUrl} from './sourced-candidate-adapter';
 
 type SerializedCandidateIngestOptions = Omit<
   CandidateIngestOptions,
@@ -203,10 +205,12 @@ export async function enqueuePublicMemoryIngestOutbox({
   tenantId,
   sourcingRequestId,
   candidates,
+  repairMissingOnly = false,
 }: {
   tenantId: string;
   sourcingRequestId: string;
   candidates: PublicMemoryOutboxEnqueueInput[];
+  repairMissingOnly?: boolean;
 }): Promise<number> {
   const uniqueCandidates = dedupePublicMemoryOutboxInputs(candidates);
   if (uniqueCandidates.length === 0) return 0;
@@ -249,6 +253,19 @@ export async function enqueuePublicMemoryIngestOutbox({
   });
 
   return prisma.$transaction(async (tx) => {
+    if (repairMissingOnly) {
+      // Serialize repair with other repair ticks; existing receipts, including
+      // failed/suppressed ones, must not be reset by housekeeping.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`rc-receipt-repair:${tenantId}:${sourcingRequestId}`},0))`;
+      const existing = await tx.$queryRaw<Array<{signalCandidateId:string}>>`
+        SELECT "signalCandidateId" FROM "public_memory_ingest_receipts"
+        WHERE "tenantId"=${tenantId} AND "sourcingRequestId"=${sourcingRequestId}`;
+      const present = new Set(existing.map(row => row.signalCandidateId));
+      for (let index=rows.length-1;index>=0;index--) {
+        if (present.has(rows[index]!.signal_candidate_id)) rows.splice(index,1);
+      }
+      if (rows.length===0) return 0;
+    }
     for (const { candidate } of allowedCandidates) {
       const proof = admissionProofs.get(candidate.id);
       if (!proof) throw new Error("candidate_privacy_unavailable");
@@ -330,6 +347,78 @@ export async function enqueuePublicMemoryIngestOutbox({
         "updatedAt" = CURRENT_TIMESTAMP
     `;
   });
+}
+
+/** Repair the receipt -> outbox crash gap for one RC-bound request only. Never
+ * reacquires profiles, resets terminal outboxes or changes a published ranking.
+ * A later maintenance tick acknowledges a receipt only after all its profiles
+ * have a durable ingest acknowledgement or a current privacy suppression. */
+export async function repairRcPurchaseIngestion(tenantId:string,requestId:string,flowRunId:string):Promise<boolean>{
+  if(process.env.RC_SKILLS_ENABLED!=='true')return true;
+  if(!/^org_[1-9][0-9]*$/.test(tenantId)||!requestId||requestId.length>200)throw Error('RC_REPAIR_BINDING');
+  const {RcRepository}=await import('./rc-skills/repository');
+  if(!await new RcRepository().progress(tenantId,flowRunId))throw Error('RC_REPAIR_BINDING');
+  const bindings=await prisma.$queryRaw<Array<{id:string}>>`
+    SELECT id FROM "job_sourcing_requests"
+    WHERE id=${requestId} AND "tenantId"=${tenantId} AND flow_run_id=${flowRunId}::uuid`;
+  if(bindings.length!==1)throw Error('RC_REPAIR_BINDING');
+  const receipts=await prisma.$queryRaw<Array<{id:string;generation:number;slot:'exact'|'spill';result:unknown;observedAt:Date}>>`
+    SELECT c.id,c."acquisitionGeneration" AS generation,c.slot,c.result,c."startedAt" AS "observedAt"
+    FROM "crustdata_acquisition_receipts" c JOIN "job_sourcing_requests" j
+      ON j.id=c."sourcingRequestId" AND j."tenantId"=c."tenantId"
+    WHERE c."tenantId"=${tenantId} AND c."sourcingRequestId"=${requestId}
+      AND j.flow_run_id=${flowRunId}::uuid
+      AND c."acquisitionGeneration"=j.acquisition_generation AND c.status='complete' AND c.memory_ingested_at IS NULL
+    ORDER BY c.slot LIMIT 2`;
+  let allDone=true;
+  for(const receipt of receipts){
+    const result=receipt.result as {profiles?:unknown[]}|null;
+    if(!result||!Array.isArray(result.profiles)||result.profiles.length>300)throw Error('RC_REPAIR_PAYLOAD');
+    const candidates:PublicMemoryOutboxEnqueueInput[]=result.profiles.map(raw=>{
+      if(!raw||typeof raw!=='object'||Array.isArray(raw))throw Error('RC_REPAIR_PROFILE');
+      const p=raw as Record<string,any>;
+      const url=p.flagship_profile_url
+        ||p.social_handles?.professional_network_identifier?.profile_url||p.linkedin_profile_url;
+      if(typeof url!=='string')throw Error('RC_REPAIR_PROFILE');
+      normalizeSourcedCandidateLinkedInUrl(url);
+      // The original purchase mapper uses the exact provider URL as its
+      // signalCandidateId. Validate it, but do not rewrite www/case here:
+      // doing so creates a second outbox key and conflicts with Memory's
+      // already-acknowledged acquisition receipt for this same person.
+      const text=(value:unknown)=>typeof value==='string'?value:null;
+      const headline=text(p.headline??p.basic_profile?.headline);
+      const location=text(p.location)??text(p.basic_profile?.location?.raw);
+      return {candidate:{id:url,linkedinUrl:url,headlineHint:headline,locationHint:location,
+        searchTitle:headline,searchSnippet:null,enrichmentStatus:'pending',lastEnrichedAt:null,snapshot:null,
+        crustdata:raw as CandidateForRanking['crustdata']},options:{profileObservedAt:receipt.observedAt,
+          acquisitionGeneration:receipt.generation,acquisitionReceiptId:receipt.id,acquisitionSlot:receipt.slot}};
+    });
+    const unique=dedupePublicMemoryOutboxInputs(candidates);
+    await enqueuePublicMemoryIngestOutbox({tenantId,sourcingRequestId:requestId,candidates:unique,repairMissingOnly:true});
+    const context=await requireHealthyCandidatePrivacyContext();
+    const proofs=await createCandidateAdmissionProofs(unique.map(({candidate})=>({key:candidate.id,linkedinUrl:candidate.linkedinUrl})));
+    const done=await prisma.$transaction(async tx=>{
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${CANDIDATE_PRIVACY_ADMISSION_LOCK},0))`;
+      const current=await requireHealthyCandidatePrivacyContext(tx);
+      if(current.generation!==context.generation||current.cursor!==context.cursor)throw Error('RC_REPAIR_PRIVACY_CHANGED');
+      for(const proof of proofs.values())await assertAdmissionProofCurrent(tx,proof);
+      const acknowledged=await tx.$queryRaw<Array<{signalCandidateId:string}>>`
+        SELECT "signalCandidateId" FROM "public_memory_ingest_receipts"
+        WHERE "tenantId"=${tenantId} AND "sourcingRequestId"=${requestId} AND status='succeeded'`;
+      const known=new Set(acknowledged.map(row=>row.signalCandidateId));
+      if(unique.some(({candidate})=>proofs.has(candidate.id)&&!known.has(candidate.id)))return false;
+      const suppressed=unique.filter(({candidate})=>!proofs.has(candidate.id)).map(({candidate})=>
+        createHash('sha256').update(candidate.id).digest('hex')).sort();
+      // Audit suppression hashes/counts instead of falsely claiming those
+      // profiles were published. The purchased payload itself stays intact.
+      await tx.crustdataAcquisitionReceipt.updateMany({where:{id:receipt.id,tenantId,status:'complete',memoryIngestedAt:null},
+        data:{memoryIngestedAt:new Date(),memoryIngestMetadata:{version:1,repair:true,profileCount:unique.length,
+          suppressedIdentityHashes:suppressed,acknowledgedCount:unique.length-suppressed.length}}});
+      return true;
+    });
+    if(!done)allDone=false;
+  }
+  return allDone;
 }
 
 export async function attachLocalCandidatesToPublicMemoryOutbox(

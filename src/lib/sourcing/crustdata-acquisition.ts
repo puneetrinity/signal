@@ -607,6 +607,14 @@ export async function acquireCrustdataSearchForRequest(
     const store:CrustdataReceiptStore={...prismaCrustdataReceiptStore,
       async reserve(reservation){
         if(!governedEnabled())throw Error('GOVERNED_DISABLED');
+        // Dark paths do not import RC or read its configuration/database. The
+        // same admitted envelope covers exact and adjacent purchase receipts.
+        if(process.env.RC_SKILLS_ENABLED==='true' && binding.protocolVersion===2 && binding.rankingContract.payload.schemaVersion===3){
+          const {RcRepository}=await import('./rc-skills/repository');
+          await new RcRepository().admit({tenantId:input.tenantId,flowRunId:binding.flowRunId,
+            executionAttemptId:fence.executionAttemptId,processingLeaseId:fence.processingLeaseId},
+            input.sourcingRequestId,input.acquisitionGeneration,binding.rankingContract.contractHash,input.slot);
+        }
         const grantCommand={action:'grant',protocolVersion:1,flowRunId:binding.flowRunId,artifactHash:binding.artifactHash,
           discoverRequestId:input.sourcingRequestId,executionAttemptId:fence.executionAttemptId,slot:input.slot,
           rungId:input.metadata.rungId,providerInput:reservation.requestInput};
