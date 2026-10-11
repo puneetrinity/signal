@@ -158,6 +158,50 @@ describe.skipIf(!enabled)('RC database authority on a fresh disposable PostgreSQ
   expect(await one('SELECT sum(reserved_requests)::integer result FROM rc_account_windows')).toBe(1);
  });
  const noQuota={minuteLimit:null,minuteLeft:null,resetAt:null,retryAfterMs:null,dailyLeft:null};
+ const clockFix=()=>readFileSync('prisma/migrations/20261011000000_rc_clock_tolerance/migration.sql','utf8');
+ const oldRoutine=(name:string)=>{const sql=readFileSync('prisma/migrations/20261009000000_rc_skills/migration.sql','utf8');
+  const start=sql.indexOf('CREATE FUNCTION public.'+name+'('),end=sql.indexOf(';',sql.indexOf('REVOKE ALL ON FUNCTION',start))+1;
+  return sql.slice(start,end).replace('CREATE FUNCTION','CREATE OR REPLACE FUNCTION');};
+ const ahead=async(seconds:number)=>await one("SELECT to_char(clock_timestamp()+$1*interval '1 second','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') result",[seconds]);
+ it('reproduces old prepare skew refusal and accepts only bounded application/cache skew',async()=>{
+  const f=await fixture();
+  const command=async(seconds:number)=>{const at=await ahead(seconds),observation=createObservation({version:1,outcome:'success',
+   identityHash:f.claim.identityHash,skills:['AWS'],upstreamAt:'2026-01-01T00:00:00Z',observedAt:at,
+   validUntil:rcValidUntil('2026-01-01T00:00:00Z'),timestampSource:'check_last_update'});
+   const baseline={...f.prepare.baseline,asOf:at,cache:[{identityHash:f.claim.identityHash,observation}]};
+   return {...f.prepare,asOf:at,baseline,baselineHash:rankingHash(baseline)};};
+  await db.query(oldRoutine('signal_rc_prepare'));
+  const old=await command(2);
+  await refusal(()=>one('SELECT signal_rc_prepare($1,$2,$3) result',[tenant,f.flow,old]),'RC_BASELINE_INVALID');
+  await db.query(clockFix());
+  const far=await command(60);
+  await refusal(()=>one('SELECT signal_rc_prepare($1,$2,$3) result',[tenant,f.flow,far]),'RC_BASELINE_INVALID');
+  const farCache={...far,baseline:{...far.baseline,asOf:f.prepare.baseline.asOf},asOf:f.prepare.asOf};
+  farCache.baselineHash=rankingHash(farCache.baseline);
+  await refusal(()=>one('SELECT signal_rc_prepare($1,$2,$3) result',[tenant,f.flow,farCache]),'RC_CACHE_CONFLICT');
+  expect(await one('SELECT signal_rc_prepare($1,$2,$3) result',[tenant,f.flow,await command(2)])).toMatchObject({replayed:false});
+ });
+ it('reproduces paid-result rejection under injected clock skew without another FETCH',async()=>{
+  const f=await dispatched(),upstreamAt='2026-01-01T00:00:00.000000Z';
+  await one('SELECT signal_rc_finish($1,$2,$3,$4) result',[tenant,f.flow,f.claimed.attemptId,
+   createRcFinish({version:1,outcome:{kind:'eligible',upstreamAt,retryableFree:false,safeCode:'ok',quota:noQuota},observation:null,observedCredits:0})]);
+  const fetch=await one('SELECT signal_rc_claim($1,$2,$3) result',[tenant,f.flow,{...f.claim,operation:'FETCH'}]);
+  await one('SELECT signal_rc_dispatch($1,$2,$3,$4) result',[tenant,f.flow,fetch.attemptId,f.dispatch]);
+  const result=async(seconds:number)=>createRcFinish({version:1,outcome:{kind:'success',upstreamAt,retryableFree:false,safeCode:'ok',quota:noQuota},
+   observation:createObservation({version:1,outcome:'success',identityHash:f.claim.identityHash,skills:['AWS'],upstreamAt,
+    observedAt:await ahead(seconds),validUntil:rcValidUntil(upstreamAt),timestampSource:'check_last_update'}),observedCredits:1});
+  await db.query(oldRoutine('signal_rc_finish'));
+  const old=await result(2);
+  await refusal(()=>one('SELECT signal_rc_finish($1,$2,$3,$4) result',[tenant,f.flow,fetch.attemptId,old]),'RC_OBSERVATION_INVALID');
+  await db.query(clockFix());
+  const far=await result(60);
+  await refusal(()=>one('SELECT signal_rc_finish($1,$2,$3,$4) result',[tenant,f.flow,fetch.attemptId,far]),'RC_OBSERVATION_INVALID');
+  const near=await result(2);
+  expect(await one('SELECT signal_rc_finish($1,$2,$3,$4) result',[tenant,f.flow,fetch.attemptId,near])).toMatchObject({replayed:false});
+  expect(await one('SELECT signal_rc_finish($1,$2,$3,$4) result',[tenant,f.flow,fetch.attemptId,near])).toMatchObject({replayed:true});
+  expect(await one('SELECT paid_lookups result FROM rc_sourcing_runs')).toBe(1);
+  expect(await one('SELECT count(*)::int result FROM rc_skill_outbox')).toBe(1);
+ });
  it('automatically cancels proven no-dispatch failures and excludes them from watchdog recovery',async()=>{
   const f=await fixture();await db.query('DELETE FROM crustdata_acquisition_receipts');
   const repository=new RcRepository(async(sql,args)=>(await db.query(sql,args)).rows);

@@ -7,7 +7,7 @@ export const RC_FUNCTIONS=['signal_rc_admit(text,uuid,jsonb)','signal_rc_prepare
  'signal_rc_dispatch(text,uuid,uuid,jsonb)','signal_rc_finish(text,uuid,uuid,jsonb)','signal_rc_read(text,uuid)',
  'signal_rc_seal(text,uuid,jsonb)','signal_rc_outbox(text,uuid,jsonb)','signal_rc_maintain(jsonb)'];
 export const RC_OWNER_FUNCTIONS=['signal_rc_set_policy(jsonb)','signal_rc_recover(text,uuid,jsonb)'];
-export const RC_CATALOG_SHA256='05902472a8b264aa3f5b872466435f78ad11b2ce9428eb5f80065e4a9082cc89';
+export const RC_CATALOG_SHA256='5fb07bb62c2575ac2c0233861c09675df64ae03dea6c031426e271d5fbc6a08f';
 export const RC_CATALOG_SQL=`WITH relations AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname LIKE 'rc\\_%' ESCAPE '\\' AND c.relkind IN ('r','p')
 ), functions AS (
@@ -38,6 +38,13 @@ export async function assertRcCatalog(tx,{role,allowOwner=false}={}){
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 export function checkRcSkillsSource(base=root,read=path=>readFileSync(resolve(base,path),'utf8')){
  const migration='prisma/migrations/20261009000000_rc_skills/migration.sql',sql=read(migration);
+ const correction=read('prisma/migrations/20261011000000_rc_clock_tolerance/migration.sql');
+ const extract=name=>{const start=sql.indexOf('CREATE FUNCTION public.'+name+'('),end=sql.indexOf(';',sql.indexOf('REVOKE ALL ON FUNCTION',start))+1;return sql.slice(start,end);};
+ const expected=['signal_rc_prepare','signal_rc_finish'].map(name=>extract(name).replace('CREATE FUNCTION','CREATE OR REPLACE FUNCTION')
+  .replaceAll("(base->>'asOf')::timestamptz>clock_timestamp()","(base->>'asOf')::timestamptz>clock_timestamp()+interval '5 seconds'")
+  .replaceAll("(item->>'observedAt')::timestamptz>clock_timestamp()","(item->>'observedAt')::timestamptz>clock_timestamp()+interval '5 seconds'")
+  .replaceAll("(obs->>'observedAt')::timestamptz>clock_timestamp()","(obs->>'observedAt')::timestamptz>clock_timestamp()+interval '5 seconds'")).join('\n\n');
+ if(correction.slice(correction.indexOf('CREATE OR REPLACE FUNCTION')).trim()!==expected.trim())throw Error('RC clock tolerance delta mismatch');
  if(/\b\w*(?:paise|price_expir|crustdata_expires|rc_expires)\w*\b/i.test(sql))throw Error('RC monetary policy forbidden');
  for(const name of RC_TABLES)if(!sql.includes('CREATE TABLE public.'+name+' ('))throw Error('RC table missing');
  for(const signature of [...RC_FUNCTIONS,...RC_OWNER_FUNCTIONS])
@@ -48,6 +55,7 @@ export function checkRcSkillsSource(base=root,read=path=>readFileSync(resolve(ba
   if(!sql.includes(token))throw Error('RC authority missing: '+token);
  if(RC_CATALOG_SHA256==='UNSEALED_AUTHORING')throw Error('RC catalog not sealed');
  const lock=JSON.parse(read('prisma/migrations.lock.json'));
+ if(lock.migrations.find(m=>m.name==='20261011000000_rc_clock_tolerance')?.sha256!==createHash('sha256').update(correction).digest('hex'))throw Error('RC tolerance fingerprint mismatch');
  if(lock.migrations.find(m=>m.name==='20261009000000_rc_skills')?.sha256!==createHash('sha256').update(sql).digest('hex'))throw Error('RC migration fingerprint mismatch');
  const provider=read('src/lib/sourcing/rc-skills/provider.ts');
  if(!provider.includes("'/v2/fetch/persons/check'")||!provider.includes("'/v2/fetch/persons'")||!provider.includes("redirect:'error'"))throw Error('RC provider boundary missing');
