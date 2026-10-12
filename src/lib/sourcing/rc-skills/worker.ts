@@ -205,8 +205,7 @@ export async function completeRcRanking(identity:RcWorkerIdentity,contract:Ranki
  const {createRcMemoryClient}=await import('./memory');
  const {drainRcOutbox}=await import('./outbox');
  const {RankingRepository}=await import('../rubric/repository');
- const {prisma}=await import('@/lib/prisma');
- const {requireHealthyCandidatePrivacyContext,CANDIDATE_PRIVACY_ADMISSION_LOCK,filterCandidateIdsBeforeLimit}=await import('@/lib/candidate-privacy/repository');
+ const {requireHealthyCandidatePrivacyContext,filterCandidateIdsBeforeLimit}=await import('@/lib/candidate-privacy/repository');
  const repository=new RcRepository();let provider:Provider|undefined,heartbeatFailure=false,beating=false;
  await repository.heartbeat(identity);
  const timer=setInterval(()=>{
@@ -230,18 +229,16 @@ export async function completeRcRanking(identity:RcWorkerIdentity,contract:Ranki
    await new Promise(resolve=>setTimeout(resolve,Math.max(25,Math.min(1000,tick.nextWorkAt-Date.now()))));
   }
   const frozen=sealedRcEvidence(sealed);
-  const result=await prisma.$transaction(async tx=>{
-   await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',CANDIDATE_PRIVACY_ADMISSION_LOCK);
-   await requireHealthyCandidatePrivacyContext(tx);
-   const allowed=new Set(await filterCandidateIdsBeforeLimit(identity.tenantId,[...frozen.evidence,...frozen.withheld].map(e=>e.candidateId),tx));
+   // Admission here only prepares the input. Claim rechecks it atomically and
+   // requests bounded re-preparation if it changed; finish suppresses withdrawal.
+   // No outer transaction: scoring must not hold the system-wide privacy lock.
+   await requireHealthyCandidatePrivacyContext();
+   const allowed=new Set(await filterCandidateIdsBeforeLimit(identity.tenantId,[...frozen.evidence,...frozen.withheld].map(e=>e.candidateId)));
    const evidence=frozen.evidence.filter(e=>allowed.has(e.candidateId)),withheld=frozen.withheld.filter(e=>allowed.has(e.candidateId));
    const sourceTypes=new Map(evidence.map(e=>{
     if(!e.presentationSource)throw Error('RANKING_SOURCE_METADATA_MISSING');return [e.candidateId,e.presentationSource] as const;
    }));
-   const ranking=new RankingRepository(async(sql,args)=>tx.$queryRawUnsafe<Array<Record<string,unknown>>>(sql,
-    ...args.map(v=>v!==null&&typeof v==='object'?JSON.stringify(v):v)));
-   return ranking.publish({...identity,contract,evidence,withheld,sourceTypes});
-  },{maxWait:2000,timeout:35000});
+   const result=await new RankingRepository().publish({...identity,contract,evidence,withheld,sourceTypes});
   // A published ranking is never failed or reshuffled because cache delivery
   // is temporarily unavailable. The durable outbox/independent monitor owns it.
   try{await drainRcOutbox({...identity,repository,memory:createRcMemoryClient(),limit:25});}

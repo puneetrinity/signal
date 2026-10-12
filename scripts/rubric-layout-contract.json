@@ -1,0 +1,390 @@
+{
+  "version": 1,
+  "transportVersion": 1,
+  "datetimePattern": "^(([0-9][0-9][2468][048]|[0-9][0-9][13579][26]|[0-9][0-9]0[48]|[02468][048]00|[13579][26]00)-02-29|[0-9]{4}-((0[13578]|1[02])-(0[1-9]|[12][0-9]|3[01])|(0[469]|11)-(0[1-9]|[12][0-9]|30)|(02)-(0[1-9]|1[0-9]|2[0-8])))T([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9](\\.[0-9]+)?)?(Z)$",
+  "goldenCorpusSha256": "6cfb6e9d846a2e2e1058682eaa585a3f61e9f5c6bf0818cd478815dafda138fb",
+  "policyVersions": [
+    "rubric-range-v1",
+    "rubric-approved-skills-v1"
+  ],
+  "layouts": {
+    "employment": {
+      "employmentType": {
+        "type": "string",
+        "min": 0,
+        "max": 100,
+        "optional": true
+      },
+      "end": {
+        "type": "string",
+        "min": 0,
+        "max": 40,
+        "optional": true,
+        "nullable": true
+      },
+      "ongoing": {
+        "type": "boolean",
+        "optional": true
+      },
+      "start": {
+        "type": "string",
+        "min": 0,
+        "max": 40,
+        "optional": true,
+        "nullable": true
+      },
+      "title": {
+        "type": "string",
+        "min": 0,
+        "max": 500,
+        "optional": true
+      }
+    },
+    "fact": {
+      "field": {
+        "type": "string",
+        "min": 0,
+        "max": 500,
+        "enum": [
+          "title",
+          "skill",
+          "seniority",
+          "function",
+          "domain",
+          "city",
+          "country",
+          "work_arrangement",
+          "certification",
+          "language",
+          "education_requirement",
+          "work_eligibility"
+        ]
+      },
+      "kind": {
+        "type": "string",
+        "min": 0,
+        "max": 500,
+        "enum": [
+          "profile_evidence",
+          "candidate_provided",
+          "verified_document"
+        ]
+      },
+      "observedAt": {
+        "type": "string",
+        "min": 1,
+        "max": null,
+        "date": true
+      },
+      "organizationRef": {
+        "type": "string",
+        "min": 0,
+        "max": 9007199254740991,
+        "nullable": true
+      },
+      "qualifier": {
+        "type": "string",
+        "min": 0,
+        "max": 160,
+        "optional": true
+      },
+      "ref": {
+        "type": "string",
+        "min": 1,
+        "max": 160
+      },
+      "revoked": {
+        "type": "boolean",
+        "optional": true
+      },
+      "scope": {
+        "type": "string",
+        "min": 0,
+        "max": 500,
+        "enum": [
+          "public",
+          "organization"
+        ]
+      },
+      "sourceVersion": {
+        "type": "string",
+        "min": 1,
+        "max": 100
+      },
+      "validUntil": {
+        "type": "string",
+        "min": 1,
+        "max": null,
+        "optional": true,
+        "date": true
+      },
+      "value": {
+        "type": "string",
+        "min": 1,
+        "max": 500
+      }
+    },
+    "evidence": {
+      "candidateId": {
+        "type": "string",
+        "min": 1,
+        "max": 200
+      },
+      "employment": {
+        "type": "array",
+        "kind": "employment",
+        "min": 0,
+        "max": 500
+      },
+      "facts": {
+        "type": "array",
+        "kind": "fact",
+        "min": 0,
+        "max": 1000
+      },
+      "organizationRef": {
+        "type": "string",
+        "min": 1,
+        "max": 9007199254740991,
+        "pattern": "^[1-9][0-9]*$"
+      },
+      "presentationSource": {
+        "type": "string",
+        "min": 0,
+        "max": 500,
+        "enum": [
+          "pool",
+          "pool_enriched",
+          "discovered"
+        ],
+        "optional": true
+      },
+      "version": {
+        "type": "string",
+        "min": 0,
+        "max": 500,
+        "enum": [
+          "rubric-evidence-v1"
+        ]
+      }
+    },
+    "withheld": {
+      "bytes": {
+        "type": "number",
+        "min": 65537,
+        "max": 9007199254740991
+      },
+      "candidateId": {
+        "type": "string",
+        "min": 1,
+        "max": 200
+      },
+      "evidenceHash": {
+        "type": "string",
+        "min": 64,
+        "max": 64,
+        "pattern": "^[a-f0-9]{64}$"
+      },
+      "limit": {
+        "type": "number",
+        "min": 65536,
+        "max": 65536
+      },
+      "reason": {
+        "type": "string",
+        "min": 0,
+        "max": 500,
+        "enum": [
+          "evidence_too_large"
+        ]
+      }
+    },
+    "experience": {
+      "asOf": {
+        "type": "string",
+        "min": 1,
+        "max": null,
+        "date": true
+      },
+      "display": {
+        "type": "string",
+        "min": 0,
+        "max": 200
+      },
+      "lowerDays": {
+        "type": "number",
+        "min": 0,
+        "max": 9007199254740991,
+        "nullable": true
+      },
+      "reason": {
+        "type": "string",
+        "min": 0,
+        "max": 100
+      },
+      "status": {
+        "type": "string",
+        "min": 0,
+        "max": 500,
+        "enum": [
+          "measured",
+          "bounded",
+          "incomplete",
+          "unavailable",
+          "uncertain_boundary"
+        ]
+      },
+      "upperDays": {
+        "type": "number",
+        "min": 0,
+        "max": 9007199254740991,
+        "nullable": true
+      },
+      "version": {
+        "type": "string",
+        "min": 0,
+        "max": 500,
+        "enum": [
+          "recorded-experience-v1"
+        ]
+      }
+    },
+    "assessment": {
+      "criterionIds": {
+        "type": "array",
+        "kind": "uuid",
+        "min": 1,
+        "max": 12
+      },
+      "labels": {
+        "type": "array",
+        "kind": "label",
+        "min": 1,
+        "max": 12
+      },
+      "localPoints": {
+        "type": "number",
+        "min": 0,
+        "max": 3000000
+      },
+      "mapped": {
+        "type": "boolean"
+      },
+      "points": {
+        "type": "number",
+        "min": 0,
+        "max": 3
+      },
+      "refs": {
+        "type": "array",
+        "kind": "ref",
+        "min": 0,
+        "max": 1000
+      },
+      "state": {
+        "type": "string",
+        "min": 0,
+        "max": 500,
+        "enum": [
+          "met",
+          "not_met",
+          "unknown"
+        ]
+      },
+      "subject": {
+        "type": "string",
+        "min": 0,
+        "max": 40
+      },
+      "weight": {
+        "type": "number",
+        "min": 0,
+        "max": 3,
+        "enum": [
+          0,
+          1,
+          3
+        ]
+      }
+    },
+    "item": {
+      "D": {
+        "type": "number",
+        "min": 0,
+        "max": 36
+      },
+      "L": {
+        "type": "number",
+        "min": 0,
+        "max": 36000000
+      },
+      "N": {
+        "type": "number",
+        "min": 0,
+        "max": 36
+      },
+      "assessments": {
+        "type": "array",
+        "kind": "assessment",
+        "min": 0,
+        "max": 12
+      },
+      "candidateId": {
+        "type": "string",
+        "min": 1,
+        "max": 200
+      },
+      "eligibility": {
+        "type": "string",
+        "min": 0,
+        "max": 500,
+        "enum": [
+          "in_range",
+          "wider",
+          "unconstrained",
+          "outside_experience_range",
+          "experience_unavailable",
+          "uncertain_boundary",
+          "wider_skills_not_established"
+        ]
+      },
+      "experience": {
+        "type": "object",
+        "kind": "experience"
+      },
+      "ordinal": {
+        "type": "number",
+        "min": 1,
+        "max": 2000
+      },
+      "selectedOrdinal": {
+        "type": "number",
+        "min": 1,
+        "max": 100,
+        "nullable": true
+      },
+      "sourceType": {
+        "type": "string",
+        "min": 0,
+        "max": 500,
+        "enum": [
+          "pool",
+          "pool_enriched",
+          "discovered"
+        ]
+      }
+    }
+  },
+  "sourcePins": {
+    "src/lib/sourcing/rubric/evidence.ts": "ef7e3ab033d1bbc9680cc426cfacdc1de6aa9f309d5486ff2b53c0756cefe1b7",
+    "src/lib/sourcing/rubric/contracts.ts": "263b711c7749c3267cc1a35b6c0f0000925d07c376b4d797fc0ef711672c153d",
+    "src/lib/sourcing/rubric/score.ts": "49e3325413991e3f95f970108b368ab3407c5b241ecb723fcdc4ac664fa80bfd",
+    "src/lib/sourcing/rubric/experience.ts": "130c2bfc52c3bf1384b340095c1e3c25bb9f36c1f01647cd3487153e0a0abbc3",
+    "src/lib/sourcing/rubric/repository.ts": "2945942f14eb757950f10339aba9d2fc8f1acc453bcda8b590ea28d3ea2bc2e4",
+    "src/lib/sourcing/rubric/ranking-compute-worker.ts": "cdc6dda68be18bf7cc861a04013d18f6e0fa0a2bcf0e9cfe6f203163d157e79b"
+  },
+  "claimRegionSha256": "ea51db7939d6c3df879ce18ffdd0f2f803c09fa16333b26f17f08b12415640fa",
+  "finishRegionSha256": "d0cd337cd0ed9c17260e3f64961675498eef662ef616de9788c1dc2a75b40368",
+  "sqlRegionSha256": "24b79880b16be0bf8d305af5b497282e6e97ad9c58066f855082d7f032ac2af2",
+  "resultCoverage": "Source pins plus scorer-output corpus, not a mechanically derived result schema."
+}

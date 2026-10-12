@@ -1,7 +1,8 @@
 import { z } from 'zod';
-import { byteCompare, canonical, rankingContractSchema, rankingHash, type RankingContract } from './contracts';
-import { evidenceSchema, evidenceBytes, EVIDENCE_POOL_MAX_BYTES, withheldProfileSchema, type WithheldProfile, type CanonicalEvidence } from './evidence';
-import { rankEvidence } from './score';
+import { canonical, rankingContractSchema, type RankingContract } from './contracts';
+import { type WithheldProfile, type CanonicalEvidence } from './evidence';
+import { retryRankingBusy, RANKING_RETRY } from './contention';
+import {runRankingComputation} from './ranking-compute-worker';
 
 const hash=z.string().regex(/^[a-f0-9]{64}$/);
 const uuid=z.string().uuid();
@@ -36,11 +37,6 @@ type Query=(sql:string,args:unknown[])=>Promise<Array<Record<string,unknown>>>;
 const statements={claim:'SELECT public.signal_ranking_claim($1,$2::uuid,$3::jsonb) result',
   finish:'SELECT public.signal_ranking_finish($1,$2::uuid,$3::uuid,$4::jsonb) result',
   read:'SELECT public.signal_ranking_read($1,$2::uuid,$3::uuid) result'} as const;
-const claimSchema=z.discriminatedUnion('state',[
-  z.object({state:z.literal('ready'),revisionId:uuid,outputHash:hash}).strict(),
-  z.object({state:z.literal('reserved'),revisionId:uuid,lease:uuid,inputHash:hash,asOf:z.string().datetime(),
-    contract:rankingContractSchema,evidence:z.array(evidenceSchema).max(2000),withheld:z.array(withheldProfileSchema).max(2000).default([])}).strict(),
-]);
 export type RankingSourceType='pool'|'pool_enriched'|'discovered';
 
 /** Service-private. Callers must perform scoped identity and privacy admission
@@ -52,14 +48,20 @@ export class RankingRepository {
       const {prisma}=await import('@/lib/prisma');
       const args=values.map(v=>v!==null&&typeof v==='object'?JSON.stringify(v):v);
       if(operation==='read')return prisma.$queryRawUnsafe<Array<Record<string,unknown>>>(sql,...args);
-      const {CANDIDATE_PRIVACY_ADMISSION_LOCK,requireHealthyCandidatePrivacyContext}=await import('@/lib/candidate-privacy/repository');
+      const {loadCandidatePrivacyConfig}=await import('@/lib/candidate-privacy/config');
+      const staleMs=loadCandidatePrivacyConfig().staleMs;
       return prisma.$transaction(async transaction=>{
-        await transaction.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',CANDIDATE_PRIVACY_ADMISSION_LOCK);
-        await requireHealthyCandidatePrivacyContext(transaction);
+        // Set before the statement starts: routine SET statement_timeout alone
+        // cannot bound its enclosing statement. SQL acquires/checks privacy only
+        // after pure canonical preparation. Never take the lock here.
+        await transaction.$executeRawUnsafe("SET LOCAL statement_timeout='30s'");
+        await transaction.$executeRawUnsafe("SET LOCAL lock_timeout='2s'");
+        await transaction.$executeRawUnsafe("SELECT set_config('signal.ranking_privacy_max_age_ms',$1,true)",String(staleMs));
         return transaction.$queryRawUnsafe<Array<Record<string,unknown>>>(sql,...args);
       },{maxWait:2000,timeout:35000});
     });
-    const rows=await query(statements[operation],args);return rows[0]?.result??null;
+    const run=async()=>{const rows=await query(statements[operation],args);return rows[0]?.result??null;};
+    return operation==='read'?run():retryRankingBusy(operation,run);
   }
   async read(tenantId:string,flowRunId:string,revisionId:string):Promise<RankingRead> {
     const value=rankingReadSchema.parse(await this.call('read',[tenantId,flowRunId,revisionId]));
@@ -71,24 +73,16 @@ export class RankingRepository {
     const raw=await this.call('claim',[input.tenantId,input.flowRunId,{contractHash:contract.contractHash,
       executionAttemptId:input.executionAttemptId,processingLeaseId:input.processingLeaseId,evidence:null}]);
     if(raw===null)return null;
-    return this.completeClaim(input.tenantId,input.flowRunId,contract,claimSchema.parse(raw));
+    return this.completeClaim(input.tenantId,input.flowRunId,contract,raw);
   }
-  private async completeClaim(tenantId:string,flowRunId:string,contract:RankingContract,claim:z.infer<typeof claimSchema>):Promise<RankingRead> {
+  private async completeClaim(tenantId:string,flowRunId:string,contract:RankingContract,raw:unknown,
+    expected?:{evidence:readonly CanonicalEvidence[];withheld:readonly WithheldProfile[]}):Promise<RankingRead> {
+    const claim=await runRankingComputation({kind:'claim',input:{contract,claim:raw,expected}});
+    if(claim.kind!=='computed')throw Error('RANKING_COMPUTE_INVALID');
     if(claim.state==='reserved') {
-      if(claim.contract.contractHash!==contract.contractHash||claim.inputHash!==rankingHash({contractHash:contract.contractHash,asOf:claim.asOf,evidence:claim.evidence,
-        ...(claim.withheld.length?{withheld:claim.withheld}:{})}))throw Error('RANKING_INPUT_CONFLICT');
-      const ranked=rankEvidence(contract,claim.evidence,claim.asOf);
-      const selected=new Map(ranked.selected.map(i=>[i.candidateId,i.selectedOrdinal]));
-      const sourceTypes=new Map(claim.evidence.map(e=>[e.candidateId,e.presentationSource]));
-      const items=ranked.items.map((item,index)=>{
-        const sourceType=sourceTypes.get(item.candidateId);
-        if(!sourceType)throw Error('RANKING_SOURCE_METADATA_MISSING');
-        return {...item,ordinal:index+1,selectedOrdinal:selected.get(item.candidateId)??null,sourceType};
-      });
-      const result={inputHash:claim.inputHash,items},outputHash=rankingHash(result);
       const receipt=z.object({state:z.literal('ready'),revisionId:uuid,outputHash:hash,replayed:z.boolean()}).strict()
-        .parse(await this.call('finish',[tenantId,flowRunId,claim.lease,{...result,outputHash}]));
-      if(receipt.revisionId!==claim.revisionId||receipt.outputHash!==outputHash)throw Error('RANKING_OUTPUT_CONFLICT');
+        .parse(await this.call('finish',[tenantId,flowRunId,claim.lease,claim.command]));
+      if(receipt.revisionId!==claim.revisionId||receipt.outputHash!==claim.outputHash)throw Error('RANKING_OUTPUT_CONFLICT');
     }
     const read=await this.read(tenantId,flowRunId,claim.revisionId);
     if(read.contractHash!==contract.contractHash||(claim.state==='ready'&&read.outputHash!==claim.outputHash))throw Error('RANKING_OUTPUT_CONFLICT');
@@ -96,19 +90,22 @@ export class RankingRepository {
   }
   async publish(input:{tenantId:string;flowRunId:string;contract:RankingContract;executionAttemptId:string;processingLeaseId:string;
     evidence:readonly CanonicalEvidence[];withheld?:readonly WithheldProfile[];sourceTypes:ReadonlyMap<string,RankingSourceType>}):Promise<RankingRead> {
-    const contract=rankingContractSchema.parse(input.contract);
-    const evidence=input.evidence.map(e=>{
-      const presentationSource=input.sourceTypes.get(e.candidateId);
-      if(!presentationSource)throw Error('RANKING_SOURCE_METADATA_MISSING');
-      return evidenceSchema.parse({...e,presentationSource});
-    }).sort((a,b)=>byteCompare(a.candidateId,b.candidateId));
-    const withheld=(input.withheld??[]).map(e=>withheldProfileSchema.parse(e)).sort((a,b)=>byteCompare(a.candidateId,b.candidateId));
-    const ids=[...evidence,...withheld].map(e=>e.candidateId);
-    if(ids.length>2000||new Set(ids).size!==ids.length)throw Error('RANKING_INPUT_CONFLICT');
-    const command={contractHash:contract.contractHash,executionAttemptId:input.executionAttemptId,processingLeaseId:input.processingLeaseId,evidence,withheld};
-    if(evidenceBytes(command)>EVIDENCE_POOL_MAX_BYTES)throw Error('RANKING_POOL_TOO_LARGE');
-    const claim=claimSchema.parse(await this.call('claim',[input.tenantId,input.flowRunId,command]));
-    if(claim.state==='reserved'&&(rankingHash(claim.evidence)!==rankingHash(evidence)||rankingHash(claim.withheld)!==rankingHash(withheld)))throw Error('RANKING_INPUT_CONFLICT');
-    return this.completeClaim(input.tenantId,input.flowRunId,contract,claim);
+    const prepared=await runRankingComputation({kind:'prepare',input:{...input,sourceTypes:[...input.sourceTypes]}});
+    if(prepared.kind!=='prepared')throw Error('RANKING_COMPUTE_INVALID');
+    const {contract}=prepared;let {evidence,withheld,command}=prepared;
+    let raw:unknown;
+    for(let reprepare=0;;reprepare++){
+      raw=await this.call('claim',[input.tenantId,input.flowRunId,command]);
+      if(!raw||typeof raw!=='object'||(raw as {state?:unknown}).state!=='reprepare')break;
+      z.object({state:z.literal('reprepare'),phase:z.literal('claim')}).strict().parse(raw);
+      if(reprepare+1>=RANKING_RETRY.maxReprepare)throw Error('RANKING_PRIVACY_REPREPARE_EXHAUSTED');
+      const {filterCandidateIdsBeforeLimit}=await import('@/lib/candidate-privacy/repository');
+      const allowed=new Set(await filterCandidateIdsBeforeLimit(input.tenantId,[...evidence,...withheld].map(e=>e.candidateId)));
+      // Keep each validated text paired with the exact object it represents.
+      command={...command,evidenceCanonical:command.evidenceCanonical.filter((_,i)=>allowed.has(evidence[i].candidateId)),
+        withheldCanonical:command.withheldCanonical.filter((_,i)=>allowed.has(withheld[i].candidateId))};
+      evidence=evidence.filter(e=>allowed.has(e.candidateId));withheld=withheld.filter(e=>allowed.has(e.candidateId));
+    }
+    return this.completeClaim(input.tenantId,input.flowRunId,contract,raw,{evidence,withheld});
   }
 }
