@@ -4,6 +4,7 @@ import {evidenceSchema,withheldProfileSchema,evidenceBytes,EVIDENCE_POOL_MAX_BYT
 import {byteCompare,rankingHash} from '../rubric/contracts';
 import {rcHashSchema,rcTimeSchema,rcProgressSchema,rcFinishSchema,observationSchema,type RcFinish} from './contracts';
 import {rcIdentityHash} from './membership';
+import {encodeRcPreparation} from './canonical-transport';
 
 const uuid=z.string().uuid(),id=z.string().min(1).max(200),tenant=z.string().regex(/^org_[1-9][0-9]*$/);
 const identity=z.object({candidateId:id,globalCandidateId:uuid,url:z.string().regex(/^https:\/\/linkedin\.com\/in\/[a-z0-9][a-z0-9._-]{0,199}$/),identityHash:rcHashSchema})
@@ -71,6 +72,14 @@ export class RcRepository {
   if(this.suppliedQuery)return (await this.suppliedQuery(statements[operation],args))[0]?.result??null;
   const {prisma}=await import('@/lib/prisma');
   const values=args.map(v=>v!==null&&typeof v==='object'?JSON.stringify(v):v);
+  if(operation==='prepare'){
+   return prisma.$transaction(async tx=>{
+    await tx.$executeRawUnsafe("SET LOCAL statement_timeout='30s'");
+    await tx.$executeRawUnsafe("SET LOCAL lock_timeout='2s'");
+    await tx.$executeRawUnsafe("SET LOCAL idle_in_transaction_session_timeout='35s'");
+    return (await tx.$queryRawUnsafe<Array<Record<string,unknown>>>(statements.prepare,...values))[0]?.result??null;
+   },{maxWait:2000,timeout:35000});
+  }
   if(['dispatch','finish','outbox'].includes(operation)){
    const {CANDIDATE_PRIVACY_ADMISSION_LOCK,requireHealthyCandidatePrivacyContext}=await import('@/lib/candidate-privacy/repository');
    return prisma.$transaction(async tx=>{
@@ -90,9 +99,9 @@ export class RcRepository {
    executionAttemptId:identity.executionAttemptId,processingLeaseId:identity.processingLeaseId,...(purchaseSlot?{purchaseSlot}:{})}]));
  }
  async prepare(identity:RcWorkerIdentity,receiptIds:string[],raw:RcBaseline){
-  worker.parse(identity);z.array(id).max(2).parse(receiptIds);const baseline=rcBaselineSchema.parse(raw),baselineHash=rankingHash(baseline);
+  worker.parse(identity);z.array(id).max(2).parse(receiptIds);const baseline=rcBaselineSchema.parse(raw),command=encodeRcPreparation(baseline,receiptIds),baselineHash=command.baselineHash;
   const result=z.object({version:z.literal(1),runId:uuid,baselineHash:rcHashSchema,replayed:z.boolean()}).strict().parse(
-   await this.call('prepare',[identity.tenantId,identity.flowRunId,{version:1,receiptIds,baseline,baselineHash,asOf:baseline.asOf}]));
+   await this.call('prepare',[identity.tenantId,identity.flowRunId,command]));
   if(result.baselineHash!==baselineHash)throw Error('RC_BASELINE_CONFLICT');return result;
  }
  async read(tenantId:string,flowRunId:string):Promise<RcSnapshot|null>{

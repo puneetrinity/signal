@@ -6,8 +6,9 @@ export const RC_TABLES=['rc_rate_policies','rc_org_policies','rc_sourcing_runs',
 export const RC_FUNCTIONS=['signal_rc_admit(text,uuid,jsonb)','signal_rc_prepare(text,uuid,jsonb)','signal_rc_claim(text,uuid,jsonb)',
  'signal_rc_dispatch(text,uuid,uuid,jsonb)','signal_rc_finish(text,uuid,uuid,jsonb)','signal_rc_read(text,uuid)',
  'signal_rc_seal(text,uuid,jsonb)','signal_rc_outbox(text,uuid,jsonb)','signal_rc_maintain(jsonb)'];
-export const RC_OWNER_FUNCTIONS=['signal_rc_set_policy(jsonb)','signal_rc_recover(text,uuid,jsonb)'];
-export const RC_CATALOG_SHA256='5fb07bb62c2575ac2c0233861c09675df64ae03dea6c031426e271d5fbc6a08f';
+export const RC_PREPARE_PRIVATE_FUNCTIONS=['signal_rc_prepare_rebuild(text,jsonb)','signal_rc_prepare_transport(jsonb)'];
+export const RC_OWNER_FUNCTIONS=['signal_rc_set_policy(jsonb)','signal_rc_recover(text,uuid,jsonb)',...RC_PREPARE_PRIVATE_FUNCTIONS];
+export const RC_CATALOG_SHA256='511e6099cd3dfb6af580140f7ea565a0e6c649e0c7f4cb32e41063864794b95e';
 export const RC_CATALOG_SQL=`WITH relations AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname LIKE 'rc\\_%' ESCAPE '\\' AND c.relkind IN ('r','p')
 ), functions AS (
@@ -47,14 +48,24 @@ export function checkRcSkillsSource(base=root,read=path=>readFileSync(resolve(ba
  if(correction.slice(correction.indexOf('CREATE OR REPLACE FUNCTION')).trim()!==expected.trim())throw Error('RC clock tolerance delta mismatch');
  if(/\b\w*(?:paise|price_expir|crustdata_expires|rc_expires)\w*\b/i.test(sql))throw Error('RC monetary policy forbidden');
  for(const name of RC_TABLES)if(!sql.includes('CREATE TABLE public.'+name+' ('))throw Error('RC table missing');
- for(const signature of [...RC_FUNCTIONS,...RC_OWNER_FUNCTIONS])
+ for(const signature of [...RC_FUNCTIONS,...RC_OWNER_FUNCTIONS.filter(s=>!RC_PREPARE_PRIVATE_FUNCTIONS.includes(s))])
   if(!sql.includes('REVOKE ALL ON FUNCTION public.'+signature+' FROM PUBLIC;'))throw Error('RC PUBLIC revocation missing');
  for(const token of ['FORCE ROW LEVEL SECURITY','COLLATE "C"','RC_RECEIPT_BINDING_CONFLICT','RC_EXECUTION_STALE',
   'RC_LOOKUP_LIMIT','RC_OUTCOME_CONFLICT','RC_CHECK_SNAPSHOT_CONFLICT','RC_RECOVERY_STALE','retention_hold',
   'safe_to_clean_at','memory_ingested_at',"interval '24 hours'",'discover_candidate_privacy_admission_v1'])
   if(!sql.includes(token))throw Error('RC authority missing: '+token);
  if(RC_CATALOG_SHA256==='UNSEALED_AUTHORING')throw Error('RC catalog not sealed');
+ // CI/source verification only: assertRcCatalog never loads authoring files.
+ const preparePath='prisma/migrations/20261013000000_rc_prepare_transport/migration.sql',prepare=read(preparePath);
+ const layout=JSON.parse(read('scripts/rc-layout-contract.json'));
+ for(const [path,hash] of Object.entries(layout.sources))if(createHash('sha256').update(read(path)).digest('hex')!==hash)throw Error('RC layout source changed: '+path);
+ if(createHash('sha256').update(prepare).digest('hex')!==layout.sqlSha256)throw Error('RC prepare layout changed');
+ for(const signature of RC_PREPARE_PRIVATE_FUNCTIONS)if(!prepare.includes('REVOKE ALL ON FUNCTION public.'+signature+' FROM PUBLIC;'))throw Error('RC prepare helper ACL missing');
+ for(const token of ['ANY(candidate_ids)) IS NOT TRUE','pg_input_is_valid','IF NOT tagged THEN','aclexplode'])if(!prepare.includes(token))throw Error('RC prepare invariant missing');
+ const repository=read('src/lib/sourcing/rc-skills/repository.ts');
+ for(const token of ["SET LOCAL statement_timeout='30s'","SET LOCAL lock_timeout='2s'","SET LOCAL idle_in_transaction_session_timeout='35s'",'maxWait:2000,timeout:35000'])if(!repository.includes(token))throw Error('RC prepare deadline missing');
  const lock=JSON.parse(read('prisma/migrations.lock.json'));
+ if(lock.migrations.find(m=>m.name==='20261013000000_rc_prepare_transport')?.sha256!==createHash('sha256').update(prepare).digest('hex'))throw Error('RC prepare migration fingerprint mismatch');
  if(lock.migrations.find(m=>m.name==='20261011000000_rc_clock_tolerance')?.sha256!==createHash('sha256').update(correction).digest('hex'))throw Error('RC tolerance fingerprint mismatch');
  if(lock.migrations.find(m=>m.name==='20261009000000_rc_skills')?.sha256!==createHash('sha256').update(sql).digest('hex'))throw Error('RC migration fingerprint mismatch');
  const provider=read('src/lib/sourcing/rc-skills/provider.ts');

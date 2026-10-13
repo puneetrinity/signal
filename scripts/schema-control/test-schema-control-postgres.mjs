@@ -221,6 +221,10 @@ try {
   const skillsMigration = '20261009010000_approved_skill_alternatives';
   const toleranceMigration = '20261011000000_rc_clock_tolerance';
   const stage1Migration = '20261012000000_ranking_lock_work';
+  const prepareMigration = '20261013000000_rc_prepare_transport';
+  assert(historicalLock.migrations.at(-1).name === prepareMigration, 'Unexpected RC preparation tail');
+  historicalLock.migrations.pop();
+  const stage1Lock = structuredClone(historicalLock);
   assert(historicalLock.migrations.at(-1).name === stage1Migration, 'Unexpected ranking Stage1 tail');
   historicalLock.migrations.pop();
   const toleranceLock = structuredClone(historicalLock);
@@ -251,7 +255,7 @@ try {
   }
   for (const signature of [...RC_FUNCTIONS,...RC_OWNER_FUNCTIONS]) await admin.$executeRawUnsafe(`DROP FUNCTION public.${signature}`);
   for (const table of [...RC_TABLES].reverse()) await admin.$executeRawUnsafe(`DROP TABLE public.${table}`);
-  for (const name of [stage1Migration,toleranceMigration,skillsMigration,rcMigration]) await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1',name);
+  for (const name of [prepareMigration,stage1Migration,toleranceMigration,skillsMigration,rcMigration]) await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1',name);
   for (const table of RANKING_TABLES) {
     const [row] = await admin.$queryRawUnsafe(`SELECT count(*)::integer count FROM public.${table}`);
     assert(row.count === 0, 'Historical rehearsal requires empty ranking tables');
@@ -342,8 +346,22 @@ try {
     await requireSuccess(await runNode('scripts/schema-control/migrate-release.mjs',{...releaseEnvironment,
       SIGNAL_SCHEMA_CONTROL_TEST_ROOT:historicalRoot,SIGNAL_SCHEMA_DISPOSABLE_SINGLE_CREDENTIAL:'1'}),label);
   }
-  await requireSuccess(await runNode('scripts/schema-control/migrate-release.mjs', releaseEnvironment),
+  await cp(resolve(ROOT_DIR,'prisma/migrations',stage1Migration),resolve(historicalRoot,'prisma/migrations',stage1Migration),{recursive:true});
+  await writeFile(resolve(historicalRoot,'prisma/migrations.lock.json'),`${JSON.stringify(stage1Lock,null,2)}\n`);
+  await requireSuccess(await runNode('scripts/schema-control/migrate-release.mjs', {...releaseEnvironment,
+    SIGNAL_SCHEMA_CONTROL_TEST_ROOT:historicalRoot,SIGNAL_SCHEMA_DISPOSABLE_SINGLE_CREDENTIAL:'1'}),
     '29-to-30 ranking Stage1 release');
+  // Simulate the default-grant window observed at D3 release. Migration31 must
+  // close private-helper access itself, before the provisioner is run again.
+  await admin.$executeRawUnsafe(`ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO ${RUNTIME_ROLE}`);
+  try {
+    await requireSuccess(await runNode('scripts/schema-control/migrate-release.mjs', releaseEnvironment),
+      '30-to-31 RC preparation release');
+    for(const signature of ['signal_rc_prepare_rebuild(text,jsonb)','signal_rc_prepare_transport(jsonb)']){
+      const [rights]=await admin.$queryRawUnsafe('SELECT has_function_privilege($1,$2,\'EXECUTE\') allowed',RUNTIME_ROLE,signature);
+      assert(rights.allowed===false,'New RC helper leaked default EXECUTE before provisioning');
+    }
+  } finally { await admin.$executeRawUnsafe(`ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM ${RUNTIME_ROLE}`); }
   await requireSuccess(
     await runNode('scripts/schema-control/provision-runtime-role.mjs', {
       ...commonIdentity, DIRECT_URL: adminUrl,

@@ -27,6 +27,12 @@ function snapshot(base:RcBaseline|null=baseline()):RcSnapshot{
 }
 function mocks(){return {read:vi.fn(),prepare:vi.fn(),claim:vi.fn(),dispatch:vi.fn(),finish:vi.fn(),seal:vi.fn(),skipCache:vi.fn()};}
 describe('RC bounded worker recovery',()=>{
+ it('does not advance to provider work when baseline preparation times out',async()=>{
+  const repo=mocks();repo.read.mockResolvedValue(snapshot(null));repo.prepare.mockRejectedValue(Error('canceling statement due to statement timeout'));
+  const memory={read:vi.fn().mockResolvedValue([{globalCandidateId:globalId,state:'missing',observation:null}])};
+  await expect(freezeRcBaseline({identity,baseline:baseline(),receiptIds:['receipt'],repository:repo as any,memory:memory as any,now:()=>now})).rejects.toThrow('statement timeout');
+  expect(repo.claim).not.toHaveBeenCalled();expect(repo.dispatch).not.toHaveBeenCalled();expect(repo.finish).not.toHaveBeenCalled();
+ });
  it('drops a Memory-restricted person before any lookup even if local privacy is stale',async()=>{
   const b=baseline(),repo=mocks(),frozen={...b,identities:[],evidence:[]};
   repo.read.mockResolvedValueOnce(snapshot(null)).mockResolvedValueOnce({ ...snapshot(),baseline:frozen,baselineHash:rankingHash(frozen),members:[] });

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "sources": {
+    "src/lib/sourcing/rc-skills/repository.ts": "fc01a03ac99032a4b0bec72217ba46ffb8e388ed4c7572ae15f2fc74b753735b",
+    "src/lib/sourcing/rc-skills/contracts.ts": "505e1f344197db23fe68b46912d0c11b444fd172ff6c414af5e591bf44348d66",
+    "src/lib/sourcing/rc-skills/canonical-transport.ts": "37405f1a6416ba4bf9118a3b0d01493173bca1b1915a014b433156ff51835e44",
+    "src/lib/sourcing/rubric/evidence.ts": "ef7e3ab033d1bbc9680cc426cfacdc1de6aa9f309d5486ff2b53c0756cefe1b7",
+    "src/lib/sourcing/rubric/contracts.ts": "263b711c7749c3267cc1a35b6c0f0000925d07c376b4d797fc0ef711672c153d"
+  },
+  "sqlSha256": "a2a1a15c3646a5363737ba5c881a51a273bce0b05c8097f7459821b4c8422abf"
+}

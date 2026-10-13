@@ -8,12 +8,52 @@ import {adaptProfile} from '../../rubric/evidence';
 import {rcPublicIdentities} from '../membership';
 import {createObservation,createRcFinish,rcValidUntil} from '../contracts';
 import {RcRepository,type RcBaseline} from '../repository';
+import {encodeRcPreparation} from '../canonical-transport';
+import {prisma} from '@/lib/prisma';
 import {runRcTick,sealedRcEvidence} from '../worker';
 import {RcProviderError} from '../provider';
 import {drainRcOutbox} from '../outbox';
 import type {RcCacheFinish} from '../memory';
 
 const enabled=process.env.SIGNAL_RC_DISPOSABLE==='1';
+describe.skipIf(process.env.SIGNAL_RC_PREPARE_RUNTIME!=='1')('RC prepare caller deadline on isolated restricted runtime',()=>{
+ let owner:Client,definition:string;
+ beforeAll(async()=>{
+  const url=new URL(process.env.SIGNAL_RC_OWNER_URL??'');
+  if(url.hostname!=='127.0.0.1'||!url.pathname.endsWith('_test')||!url.username.endsWith('_test'))throw Error('LOCAL_TEST_REQUIRED');
+  const runtime=new URL(process.env.DATABASE_URL??'');
+  if(runtime.hostname!==url.hostname||runtime.port!==url.port||runtime.pathname!==url.pathname||runtime.username===url.username)throw Error('SEPARATE_RUNTIME_REQUIRED');
+  owner=new Client({connectionString:url.toString()});await owner.connect();
+  const rights=await prisma.$queryRawUnsafe<any[]>('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user');
+  expect(rights[0]).toEqual({rolsuper:false,rolbypassrls:false});
+  definition=(await owner.query("SELECT pg_get_functiondef('signal_rc_prepare(text,uuid,jsonb)'::regprocedure) d")).rows[0].d;
+  await owner.query('CREATE TABLE rc_prepare_deadline_probe(id integer)');
+ });
+ afterAll(async()=>{if(definition)await owner.query(definition);await owner?.query('DROP TABLE IF EXISTS rc_prepare_deadline_probe');await owner?.end();await prisma.$disconnect();});
+ it('cancels the actual statement at 30 seconds and rolls back preceding writes',async()=>{
+  const injected=definition.replace('BEGIN\n',"BEGIN\n INSERT INTO rc_prepare_deadline_probe VALUES(1); PERFORM pg_sleep(32);\n");
+  expect(injected).not.toBe(definition);await owner.query(injected);
+  const before=await prisma.$queryRawUnsafe<any[]>("SELECT current_setting('statement_timeout') s,current_setting('lock_timeout') l");
+  const start=Date.now();
+  try{
+   await expect(new RcRepository().prepare({tenantId:'org_1',flowRunId:randomUUID(),executionAttemptId:'test',processingLeaseId:'test'},[],
+    {version:1,asOf:new Date().toISOString(),evidence:[],withheld:[],identities:[],cache:[]})).rejects.toThrow(/statement timeout|57014/);
+   expect(Date.now()-start).toBeGreaterThan(29000);expect(Date.now()-start).toBeLessThan(35000);
+   expect((await owner.query('SELECT count(*)::integer n FROM rc_prepare_deadline_probe')).rows[0].n).toBe(0);
+   expect(await prisma.$queryRawUnsafe<any[]>("SELECT current_setting('statement_timeout') s,current_setting('lock_timeout') l")).toEqual(before);
+  }finally{await owner.query(definition);}
+ },45000);
+ it('sets the two-second lock timeout before the function starts',async()=>{
+  const injected=definition.replace('BEGIN\n',"BEGIN\n INSERT INTO rc_prepare_deadline_probe VALUES(2);\n");
+  await owner.query(injected);await owner.query('BEGIN');await owner.query('LOCK TABLE rc_prepare_deadline_probe IN ACCESS EXCLUSIVE MODE');
+  const start=Date.now();
+  try{
+   await expect(new RcRepository().prepare({tenantId:'org_1',flowRunId:randomUUID(),executionAttemptId:'test',processingLeaseId:'test'},[],
+    {version:1,asOf:new Date().toISOString(),evidence:[],withheld:[],identities:[],cache:[]})).rejects.toThrow(/lock timeout|55P03/);
+   expect(Date.now()-start).toBeGreaterThan(1900);expect(Date.now()-start).toBeLessThan(5000);
+  }finally{await owner.query('ROLLBACK');await owner.query(definition);}
+ },10000);
+});
 describe.skipIf(!enabled)('RC database authority on a fresh disposable PostgreSQL',()=>{
  let db:Client;
  const tenant='org_28',hash='a'.repeat(64);
@@ -72,6 +112,59 @@ describe.skipIf(!enabled)('RC database authority on a fresh disposable PostgreSQ
   const claim={version:1,operation:'CHECK',identityHash:identities[0].identityHash,executionAttemptId:command.executionAttemptId,processingLeaseId:lease};
   return {flow,command,admitted,prepare,claim,ranking};
  }
+ it('tagged preparation preserves the historical hash, baseline and replay',async()=>{
+  const f=await fixture(),tagged=encodeRcPreparation(f.prepare.baseline,f.prepare.receiptIds);
+  expect(await one('SELECT signal_rc_prepare_transport($1) result',[tagged])).toEqual(f.prepare);
+  expect(await one('SELECT signal_rc_prepare($1,$2,$3) result',[tenant,f.flow,tagged])).toMatchObject({baselineHash:f.prepare.baselineHash,replayed:false});
+  expect(await one('SELECT baseline result FROM rc_sourcing_runs')).toEqual(f.prepare.baseline);
+  expect(await one('SELECT signal_rc_prepare($1,$2,$3) result',[tenant,f.flow,f.prepare])).toMatchObject({replayed:true});
+  expect(await one('SELECT signal_rc_prepare($1,$2,$3) result',[tenant,f.flow,tagged])).toMatchObject({replayed:true});
+ });
+ it('rejects canonical spelling attacks and malformed text without leaking text',async()=>{
+  const f=await fixture(),tagged=encodeRcPreparation(f.prepare.baseline,f.prepare.receiptIds);
+  const original=tagged.baselineTransport.evidenceCanonical[0];
+  for(const changed of [' '+original,original+' ',original.replace('{','{"candidateId":"other",'),'{SECRET_INVALID_PROFILE']){
+   const cmd=structuredClone(tagged);cmd.baselineTransport.evidenceCanonical=[changed];
+   await db.query('SAVEPOINT bad_text');let error='';try{await one('SELECT signal_rc_prepare($1,$2,$3) result',[tenant,f.flow,cmd]);}catch(e){error=String(e);}
+   expect(error).toMatch(/CANONICAL/);expect(error).not.toContain('SECRET_INVALID_PROFILE');await db.query('ROLLBACK TO SAVEPOINT bad_text');
+  }
+  expect(await one('SELECT count(*)::integer result FROM rc_lookup_attempts')).toBe(0);
+  expect(await one('SELECT baseline IS NULL result FROM rc_sourcing_runs')).toBe(true);
+ });
+ it('checks identity membership without losing withheld identities or accepting missing IDs',async()=>{
+  const f=await fixture();
+  for(const candidateId of ['unknown',null]){
+   const base=structuredClone(f.prepare.baseline);(base.identities[0] as any).candidateId=candidateId;
+   await refusal(()=>one('SELECT signal_rc_prepare($1,$2,$3) result',[tenant,f.flow,{...f.prepare,baseline:base,baselineHash:rankingHash(base)}]),'RC_IDENTITY_CONFLICT');
+  }
+  const base={...f.prepare.baseline,evidence:[],withheld:[{candidateId:'candidate-a',reason:'evidence_too_large' as const,evidenceHash:hash,bytes:65537,limit:65536 as const}]};
+  expect(await one('SELECT signal_rc_prepare($1,$2,$3) result',[tenant,f.flow,encodeRcPreparation(base,f.prepare.receiptIds)])).toMatchObject({replayed:false});
+ });
+ it('reports tagged commitment rejection before stale authority and never dispatches',async()=>{
+  const f=await fixture(),cmd=encodeRcPreparation(f.prepare.baseline,f.prepare.receiptIds);cmd.baselineHash=hash;
+  await db.query("UPDATE job_sourcing_requests SET processing_lease_id='different'");
+  await refusal(()=>one('SELECT signal_rc_prepare($1,$2,$3) result',[tenant,f.flow,cmd]),'RC_BASELINE_CONFLICT');
+  expect(await one('SELECT count(*)::integer result FROM rc_lookup_attempts')).toBe(0);
+ });
+ it('rejects invalid records at every position and cache version spelling variants',async()=>{
+  const f=await fixture(),base=f.prepare.baseline;
+  for(const index of [0,1,2]){
+   const cmd=encodeRcPreparation({...base,evidence:[...base.evidence,...base.evidence,...base.evidence]},f.prepare.receiptIds);
+   cmd.baselineTransport.evidenceCanonical[index]='null';
+   await refusal(()=>one('SELECT signal_rc_prepare_transport($1) result',[cmd]),'CANONICAL');
+  }
+  const all=encodeRcPreparation(base,f.prepare.receiptIds);all.baselineTransport.evidenceCanonical=['null','null'];
+  await refusal(()=>one('SELECT signal_rc_prepare_transport($1) result',[all]),'CANONICAL');
+  const upstreamAt='2026-01-01T00:00:00Z';
+  const observation=createObservation({version:1,outcome:'success',identityHash:base.identities[0].identityHash,skills:['AWS','é😀'],upstreamAt,observedAt:new Date().toISOString(),validUntil:rcValidUntil(upstreamAt),timestampSource:'check_last_update'});
+  const full={...base,cache:[{identityHash:observation.identityHash,observation}]};
+  const good=encodeRcPreparation(full,f.prepare.receiptIds);
+  expect((await one('SELECT signal_rc_prepare_transport($1) result',[good])).baseline).toEqual(full);
+  for(const number of ['1.0','1e0']){
+   const changed=structuredClone(good);changed.baselineTransport.cacheCanonical[0]=changed.baselineTransport.cacheCanonical[0].replace('"version":1','"version":'+number);
+   await refusal(()=>one('SELECT signal_rc_prepare_transport($1) result',[changed]),'CANONICAL');
+  }
+ });
  it('does not block Crustdata admission when RC account policy is disabled',async()=>{
   const f=await fixture(true);expect(f.admitted).toMatchObject({enabled:true,rcAvailable:false});
   expect(await one('SELECT rc_available result FROM rc_sourcing_runs')).toBe(false);

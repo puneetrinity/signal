@@ -20,8 +20,9 @@ export function addRcSkills(rawEvidence:CanonicalEvidence, rawObservation:SkillO
     scope:'public',organizationRef:null,sourceVersion:observation.contentHash,
     observedAt:observation.observedAt,validUntil:observation.validUntil,
   }));
-  const facts=[...new Map([...evidence.facts,...additions].map(fact=>[rankingHash(fact),fact])).values()]
-    .sort((a,b)=>byteCompare(rankingHash(a),rankingHash(b)));
+  // Preserve last-value deduplication, and reuse each fingerprint for sorting.
+  const keyed=new Map([...evidence.facts,...additions].map(fact=>[rankingHash(fact),fact] as const));
+  const facts=[...keyed.entries()].sort((a,b)=>byteCompare(a[0],b[0])).map(entry=>entry[1]);
   const result={...evidence,facts};
   const bytes=evidenceBytes({...result,presentationSource:'pool_enriched'});
   if(bytes>EVIDENCE_MAX_BYTES)throw new OversizedEvidenceError({

@@ -31,6 +31,7 @@
     {"name":"20261009000000_rc_skills","sha256":"53e4916834bb94a98c2cd871c8cc101f8a3496b9b8cec3798a6f22fa83913554"},
     {"name":"20261009010000_approved_skill_alternatives","sha256":"9f4c257430ed381f6e3a2ca218df2c20ab1a27a2183cd08da0c5ef0aa6c4739e"},
     {"name":"20261011000000_rc_clock_tolerance","sha256":"515db128eb0c64d061465734d158b1b79baacbc86226fb4b3533fb6a0b41244f"},
-    {"name":"20261012000000_ranking_lock_work","sha256":"ec5786c30c34e912e98f07eb5372a088f505eba9034beab9c9c3017ae97d09ab"}
+    {"name":"20261012000000_ranking_lock_work","sha256":"ec5786c30c34e912e98f07eb5372a088f505eba9034beab9c9c3017ae97d09ab"},
+    {"name":"20261013000000_rc_prepare_transport","sha256":"a2a1a15c3646a5363737ba5c881a51a273bce0b05c8097f7459821b4c8422abf"}
   ]
 }
