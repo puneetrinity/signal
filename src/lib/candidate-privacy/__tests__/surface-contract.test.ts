@@ -19,7 +19,7 @@ const enforcementContracts = [
   ['rubric-evidence-boundary','src/lib/sourcing/rubric/evidence.ts',['Foreign private evidence','evidenceShape.parse','new OversizedEvidenceError']],
   ['rubric-experience-boundary','src/lib/sourcing/rubric/experience.ts',['calculateExperience','roles.filter(role => !isInternship(role))']],
   ['rubric-score-boundary','src/lib/sourcing/rubric/score.ts',['evidenceSchema.parse','experienceEligibility']],
-  ['rubric-repository-boundary','src/lib/sourcing/rubric/repository.ts',['pg_advisory_xact_lock','requireHealthyCandidatePrivacyContext(transaction)']],
+  ['rubric-repository-boundary','src/lib/sourcing/rubric/repository.ts',["SET LOCAL lock_timeout='2s'","set_config('signal.ranking_privacy_max_age_ms'","transaction.$queryRawUnsafe"]],
   [
     'route-source-restrictive',
     'src/app/api/v3/jobs/[id]/source/route.ts',
@@ -160,6 +160,20 @@ async function routeFiles(directory: string): Promise<string[]> {
 }
 
 describe('candidate privacy surface contracts', () => {
+  it('rubric-repository-boundary: claim and finish retain lock-before-privacy checks in SQL', async () => {
+    const sql = await readFile(resolve(root, 'prisma/migrations/20261012000000_ranking_lock_work/migration.sql'), 'utf8');
+    for (const name of ['signal_ranking_claim', 'signal_ranking_finish']) {
+      // Extract directly by the next declaration; a missing declaration fails closed.
+      const start = sql.indexOf(`CREATE OR REPLACE FUNCTION public.${name}`);
+      expect(start).toBeGreaterThanOrEqual(0);
+      const next = sql.indexOf('CREATE OR REPLACE FUNCTION', start + 1);
+      const body = sql.slice(start, next < 0 ? undefined : next);
+      expect(body).toContain("pg_advisory_xact_lock(hashtextextended('discover_candidate_privacy_admission_v1',0))");
+      expect(body).toContain('candidate_privacy_unavailable');
+      expect(body.indexOf('pg_advisory_xact_lock')).toBeLessThan(body.indexOf('candidate_privacy_unavailable'));
+      expect(body).toContain('max_age_ms');
+    }
+  });
   it('surface-census: every manifest row maps to a real symbol', async () => {
     const manifest = JSON.parse(await readFile(
       resolve(root, 'src/lib/candidate-privacy/surfaces.json'),

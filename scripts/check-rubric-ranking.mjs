@@ -1,11 +1,12 @@
-import {readFileSync} from 'node:fs';
+import {readFileSync,readdirSync} from 'node:fs';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {resolve,dirname} from 'node:path';
 import {createHash} from 'node:crypto';
 export const RANKING_TABLES=['governed_ranking_runs','governed_ranking_items'];
 export const RANKING_FUNCTIONS=['signal_ranking_claim(text,uuid,jsonb)','signal_ranking_finish(text,uuid,uuid,jsonb)','signal_ranking_read(text,uuid,uuid)'];
-export const RANKING_PRIVATE_FUNCTIONS=['signal_ranking_immutable()'];
-export const RANKING_CATALOG_SHA256='1c7a18e3ab256338e6f769013fd43ccea223535cb339b4ade1055bce4e190933';
+export const RANKING_PRIVATE_FUNCTIONS=['signal_ranking_immutable()','signal_ranking_canonical(jsonb)',
+ 'signal_ranking_transport_parse(text)','signal_ranking_rebuild(text,jsonb)','signal_ranking_transport_record(text,text)'];
+export const RANKING_CATALOG_SHA256='ae0d6c4261b501fbf3228108e20f8a873a8c0fc2516b1767a7bfadc1897ac108';
 export const RANKING_CATALOG_SQL=`WITH relations AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname='public' AND c.relname LIKE 'governed_ranking_%' AND c.relkind IN ('r','p')
@@ -53,17 +54,61 @@ export const rankingSourceTokens={
   "p.decision='allow'",'p.evaluated_cursor=s.cursor',
  ],
  'src/lib/sourcing/rubric/score.ts':['evidenceSchema.parse','experienceEligibility','automaticallyMapped','compareRanking','slice(0,100)','RUBRIC_DUPLICATE_IDENTITY'],
- 'src/lib/sourcing/rubric/repository.ts':['claimSchema.parse','rankingReadSchema.parse','RANKING_INPUT_CONFLICT','RANKING_OUTPUT_CONFLICT','async resume'],
+ 'src/lib/sourcing/rubric/repository.ts':['runRankingComputation','rankingReadSchema.parse','RANKING_OUTPUT_CONFLICT','async resume'],
+ 'src/lib/sourcing/rubric/ranking-compute-worker.ts':['claimSchema.parse','RANKING_INPUT_CONFLICT','rankEvidence(contract,claim.evidence,claim.asOf)','maxOldGenerationSizeMb:512',"require('tsx/cjs')",'active<2',"responseMode:'compact'",'receipt.contractHash!==contract.contractHash','claim.inputHash!==rankingHash'],
  'src/lib/sourcing/queue/index.ts':['new RankingRepository().resume','new RankingRepository().read'],
  'src/lib/sourcing/orchestrator.ts':['GOVERNED_DISCOVERY_REQUIRED','GOVERNED_DISCOVERY_BUDGET_REFUSED','RANKING_PUBLICATION_REQUIRED'],
 };
 export function checkRankingSource(root=resolve(dirname(fileURLToPath(import.meta.url)),'..'),read=path=>readFileSync(resolve(root,path),'utf8')) {
+  // Build/CI only. This module is also imported by production readiness and
+  // provisioning: neither import nor assertRankingCatalog may read this file.
+  const layout=JSON.parse(read('scripts/rubric-layout-contract.json'));
+  for(const [path,digest] of Object.entries(layout.sourcePins))
+    if(createHash('sha256').update(read(path)).digest('hex')!==digest)throw Error('Ranking layout source changed: '+path);
   const sql=read('prisma/migrations/20261006000000_rubric_ranking/migration.sql');
+  const stage1=read('prisma/migrations/20261012000000_ranking_lock_work/migration.sql');
+  const region=stage1.slice(stage1.indexOf('-- BEGIN LAYOUT TRANSPORT'),stage1.indexOf('-- END LAYOUT TRANSPORT')+'-- END LAYOUT TRANSPORT'.length);
+  if(!region.startsWith('-- BEGIN LAYOUT TRANSPORT')||createHash('sha256').update(region).digest('hex')!==layout.sqlRegionSha256)throw Error('Ranking layout SQL changed');
+  for(const token of ['pg_input_is_valid','RANKING_INVALID_CANONICAL_TEXT','RANKING_INVALID_CANONICAL_SHAPE','RANKING_NONCANONICAL_TEXT',
+    '(convert_to(rebuilt,\'UTF8\')=convert_to(p_text,\'UTF8\')) IS NOT TRUE',"IF NOT tagged AND jsonb_typeof(p_command->'evidence')='array'",'IF NOT tagged THEN v_text:=public.signal_ranking_canonical'])
+    if(!stage1.includes(token))throw Error('Ranking canonical safeguard missing: '+token);
+  const compute=read('src/lib/sourcing/rubric/ranking-compute-worker.ts');
+  const claim=stage1.slice(stage1.indexOf('CREATE OR REPLACE FUNCTION public.signal_ranking_claim'),stage1.indexOf('CREATE OR REPLACE FUNCTION public.signal_ranking_finish'));
+  if(createHash('sha256').update(claim).digest('hex')!==layout.claimRegionSha256)throw Error('Ranking claim layout changed');
+  if(createHash('sha256').update(stage1.slice(stage1.indexOf('CREATE OR REPLACE FUNCTION public.signal_ranking_finish'))).digest('hex')!==layout.finishRegionSha256)throw Error('Ranking finish changed');
+  for(const token of ['RANKING_INPUT_ORDER','last_id COLLATE "C">=record_id COLLATE "C"','unnest(all_ids)',
+    'unnest(withheld_ids)','prepared_items[e.o]','logical_bytes>134217728',"array_to_string(prepared_texts,',')"])
+    if(!claim.includes(token))throw Error('Ranking D3 safeguard missing: '+token);
+  if(/prepared_pool_text\s*:=\s*prepared_pool_text|evidenceCanonical'\s*->>/.test(claim))throw Error('Ranking D3 quadratic traversal');
+  for(const token of ['transportVersion:1','evidenceCanonical:evidence.map(canonical)','withheldCanonical:withheld.map(canonical)','itemsCanonical:items.map(canonical)'])
+    if(!compute.includes(token))throw Error('Ranking production transport missing: '+token);
   for(const name of RANKING_TABLES)if(!sql.includes('CREATE TABLE public.'+name+' ('))throw Error('Ranking table missing');
   for(const signature of [...RANKING_FUNCTIONS,...RANKING_PRIVATE_FUNCTIONS])
-    if(!sql.includes('REVOKE ALL ON FUNCTION public.'+signature+' FROM PUBLIC;'))throw Error('Ranking PUBLIC revocation missing');
+    if(!(sql+'\n'+stage1).includes('REVOKE ALL ON FUNCTION public.'+signature+' FROM PUBLIC;'))throw Error('Ranking PUBLIC revocation missing');
   if(RANKING_CATALOG_SHA256==='UNSEALED_AUTHORING')throw Error('Ranking catalog not sealed');
   const lock=JSON.parse(read('prisma/migrations.lock.json'));
+  if(lock.migrations.find(m=>m.name==='20261012000000_ranking_lock_work')?.sha256!==createHash('sha256').update(stage1).digest('hex'))throw Error('Ranking Stage1 fingerprint mismatch');
+  for(const token of ["jsonb_typeof(p_command->'contractHash') IS DISTINCT FROM 'string'",'WITH ORDINALITY','prepared_hashes[item_ordinal]',
+   'EXCEPTION WHEN lock_not_available','signal.ranking_privacy_max_age_ms','candidate_privacy_configuration_invalid',"p_command->>'responseMode'='compact'","'reserved_compact'"])
+    if(!stage1.includes(token))throw Error('Ranking Stage1 authority missing: '+token);
+  if(/array_position|governed_ranking_waits|waitToken/.test(stage1))throw Error('Unapproved Stage2 machinery');
+  const repository=read('src/lib/sourcing/rubric/repository.ts');
+  for(const token of ["SET LOCAL statement_timeout='30s'","SET LOCAL lock_timeout='2s'",'signal.ranking_privacy_max_age_ms',
+   'loadCandidatePrivacyConfig().staleMs','retryRankingBusy(operation,run)','RANKING_PRIVACY_REPREPARE_EXHAUSTED'])
+    if(!repository.includes(token))throw Error('Ranking wrapper missing: '+token);
+  if(repository.includes('pg_advisory_xact_lock'))throw Error('Ranking wrapper holds privacy lock during preparation');
+  function inspect(directory){
+    for(const entry of readdirSync(resolve(root,directory),{withFileTypes:true})){
+      if(entry.isDirectory()){if(entry.name!=='__tests__')inspect(directory+'/'+entry.name);continue;}
+      const path=directory+'/'+entry.name;
+      if(!/\.[cm]?[jt]sx?$/.test(path)||/\.(test|spec)\./.test(path)||path==='src/lib/sourcing/rubric/repository.ts')continue;
+      const source=read(path);
+      if(/signal_ranking_(claim|finish)\s*\(/.test(source)||/new RankingRepository\(\s*[^)\s]/.test(source))
+        throw Error('Ranking write bypasses bounded wrapper: '+path);
+    }
+  }
+  inspect('src');
+  if(read('src/lib/sourcing/rc-skills/worker.ts').includes('$transaction'))throw Error('RC holds outer ranking transaction');
   const isolation='20261008000000_rubric_evidence_isolation';
   if(lock.migrations.find(m=>m.name===isolation)?.sha256!==createHash('sha256').update(read('prisma/migrations/'+isolation+'/migration.sql')).digest('hex'))throw Error('Ranking isolation fingerprint mismatch');
   if(lock.migrations.find(m=>m.name==='20261006000000_rubric_ranking')?.sha256!==createHash('sha256').update(sql).digest('hex'))throw Error('Ranking migration fingerprint mismatch');

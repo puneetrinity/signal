@@ -31,6 +31,9 @@ describe.skipIf(!enabled)('RC database authority on a fresh disposable PostgreSQ
   if(await one("SELECT to_regclass('public.job_sourcing_requests') result"))throw Error('FRESH_DISPOSABLE_REQUIRED');
   const manifest=JSON.parse(readFileSync('prisma/baseline/manifest.json','utf8'));
   await db.query('BEGIN');
+  await db.query("SET LOCAL statement_timeout='30s'");
+  await db.query("SET LOCAL lock_timeout='2s'");
+  await db.query("SET LOCAL signal.ranking_privacy_max_age_ms='120000'");
   await db.query(readFileSync(manifest.baselinePath,'utf8').replace(/^BEGIN;$/m,'').replace(/^COMMIT;$/m,''));
   for(const name of readdirSync('prisma/migrations').filter(n=>n>manifest.baselineMigrationThrough).sort()){
    const sql=readFileSync(`prisma/migrations/${name}/migration.sql`,'utf8');

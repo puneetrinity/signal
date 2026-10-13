@@ -208,7 +208,7 @@ try {
   `);
   assert(afterAdoption[0].count === 0, 'Adoption changed a product row');
 
-  // Preserve every historical transition separately, then prove 26 -> 27 -> 28 -> 29.
+  // Preserve every historical transition separately, including 29 -> 30.
   // This is an empty, locally attested test database, never a rollback tool.
   historicalRoot = await mkdtemp(join(tmpdir(), 'signal-schema-history-'));
   await mkdir(resolve(historicalRoot, 'prisma/migrations'), { recursive: true });
@@ -220,6 +220,10 @@ try {
   const rcMigration = '20261009000000_rc_skills';
   const skillsMigration = '20261009010000_approved_skill_alternatives';
   const toleranceMigration = '20261011000000_rc_clock_tolerance';
+  const stage1Migration = '20261012000000_ranking_lock_work';
+  assert(historicalLock.migrations.at(-1).name === stage1Migration, 'Unexpected ranking Stage1 tail');
+  historicalLock.migrations.pop();
+  const toleranceLock = structuredClone(historicalLock);
   assert(historicalLock.migrations.at(-1).name === toleranceMigration, 'Unexpected clock-tolerance tail');
   historicalLock.migrations.pop();
   const skillsLock = structuredClone(historicalLock);
@@ -247,7 +251,7 @@ try {
   }
   for (const signature of [...RC_FUNCTIONS,...RC_OWNER_FUNCTIONS]) await admin.$executeRawUnsafe(`DROP FUNCTION public.${signature}`);
   for (const table of [...RC_TABLES].reverse()) await admin.$executeRawUnsafe(`DROP TABLE public.${table}`);
-  for (const name of [toleranceMigration,skillsMigration,rcMigration]) await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1',name);
+  for (const name of [stage1Migration,toleranceMigration,skillsMigration,rcMigration]) await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1',name);
   for (const table of RANKING_TABLES) {
     const [row] = await admin.$queryRawUnsafe(`SELECT count(*)::integer count FROM public.${table}`);
     assert(row.count === 0, 'Historical rehearsal requires empty ranking tables');
@@ -331,6 +335,7 @@ try {
     [isolationMigration,isolationLock,'25-to-26 evidence isolation release'],
     [rcMigration,rcLock,'26-to-27 RC skills release'],
     [skillsMigration,skillsLock,'27-to-28 approved skill alternatives release'],
+    [toleranceMigration,toleranceLock,'28-to-29 RC clock tolerance release'],
   ]) {
     await cp(resolve(ROOT_DIR,'prisma/migrations',name),resolve(historicalRoot,'prisma/migrations',name),{recursive:true});
     await writeFile(resolve(historicalRoot,'prisma/migrations.lock.json'),`${JSON.stringify(lock,null,2)}\n`);
@@ -338,7 +343,7 @@ try {
       SIGNAL_SCHEMA_CONTROL_TEST_ROOT:historicalRoot,SIGNAL_SCHEMA_DISPOSABLE_SINGLE_CREDENTIAL:'1'}),label);
   }
   await requireSuccess(await runNode('scripts/schema-control/migrate-release.mjs', releaseEnvironment),
-    '28-to-29 RC clock tolerance release');
+    '29-to-30 ranking Stage1 release');
   await requireSuccess(
     await runNode('scripts/schema-control/provision-runtime-role.mjs', {
       ...commonIdentity, DIRECT_URL: adminUrl,
