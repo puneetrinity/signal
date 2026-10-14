@@ -65,6 +65,32 @@ async function requireSuccess(result, label) {
   }
 }
 
+// Feed COPY through the client: hosted PostgreSQL runs as a different OS user
+// and cannot read the runner's private temporary directories. Keep COPY (rather
+// than substituting INSERT) so the trigger and statement-atomicity proof remain.
+function copyBaselineFixture(rows) {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn('psql', ['-X', '--no-password', '--set=ON_ERROR_STOP=1'], {
+      env: { ...process.env, PGHOST: parsed.hostname, PGPORT: parsed.port || '5432',
+        PGUSER: decodeURIComponent(parsed.username), PGPASSWORD: decodeURIComponent(parsed.password),
+        PGDATABASE: databaseName, PGCONNECT_TIMEOUT: '5',
+        PGOPTIONS: '-c statement_timeout=10000 -c lock_timeout=2000' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    const timer = setTimeout(() => child.kill('SIGKILL'), 15_000);
+    child.stdout.resume();
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.stdin.on('error', () => {}); // Early psql refusal is checked by exit status.
+    child.on('error', () => { clearTimeout(timer); reject(new Error('COPY fixture client could not start')); });
+    child.on('close', code => {
+      clearTimeout(timer);
+      resolvePromise({ code, baselineRefused: stderr.includes('RC_BASELINE_INVALID') });
+    });
+    child.stdin.end(`COPY public.baseline_validation_probe(id,baseline) FROM STDIN;\n${rows}\\.\n`);
+  });
+}
+
 async function safetyProof() {
   await admin.$transaction(async (tx) => {
     await beginBoundedTransaction(tx, { readOnly: true });
@@ -187,21 +213,17 @@ try {
   `);
   assert(beforeAdoption[0].count === 0, 'Disposable product table was not empty before adoption');
 
-  // The existing local PG16/superuser safety proof permits COPY fixture files
+  // The existing local PG16/superuser safety proof permits COPY fixtures
   // and replica-role checks here; the product runtime receives no new grant.
-  const baselineFiles=await mkdtemp(join(tmpdir(),'signal-baseline-copy-'));
   const baselineConcurrent=createPrisma(adminUrl);
   try {
     await admin.$executeRawUnsafe('CREATE TABLE public.baseline_validation_probe(id integer PRIMARY KEY,baseline jsonb,metadata integer DEFAULT 0)');
     await admin.$executeRawUnsafe('CREATE TRIGGER baseline_validation_probe_guard AFTER INSERT OR UPDATE OF baseline ON public.baseline_validation_probe FOR EACH ROW EXECUTE FUNCTION public.signal_rc_validate_baseline_write()');
     await admin.$executeRawUnsafe('ALTER TABLE public.baseline_validation_probe ENABLE ALWAYS TRIGGER baseline_validation_probe_guard');
-    const valid=join(baselineFiles,'valid.txt'),invalid=join(baselineFiles,'invalid.txt');
-    await writeFile(valid,'1\t{}\n');await writeFile(invalid,'2\t{}\n3\t[]\n');
-    await admin.$executeRawUnsafe(`COPY public.baseline_validation_probe(id,baseline) FROM '${valid}'`);
-    let copyRefused=false;
-    try {await admin.$executeRawUnsafe(`COPY public.baseline_validation_probe(id,baseline) FROM '${invalid}'`);}
-    catch(error){copyRefused=String(error).includes('RC_BASELINE_INVALID');}
-    assert(copyRefused,'Invalid COPY baseline accepted');
+    const validCopy=await copyBaselineFixture('1\t{}\n');
+    assert(validCopy.code===0,'Valid COPY fixture failed');
+    const invalidCopy=await copyBaselineFixture('2\t{}\n3\t[]\n');
+    assert(invalidCopy.code!==0&&invalidCopy.baselineRefused,'Invalid COPY did not fail with RC_BASELINE_INVALID');
     const [copyCount]=await admin.$queryRawUnsafe('SELECT count(*)::integer n FROM public.baseline_validation_probe');
     assert(copyCount.n===1,'Failed COPY left a partial preceding row');
     let replicaRefused=false;
@@ -225,7 +247,6 @@ try {
   } finally {
     await baselineConcurrent.$disconnect();
     await admin.$executeRawUnsafe('DROP TABLE IF EXISTS public.baseline_validation_probe');
-    await rm(baselineFiles,{recursive:true,force:true});
   }
 
   await requireSuccess(
