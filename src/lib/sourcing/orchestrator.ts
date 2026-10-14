@@ -653,6 +653,44 @@ export async function runSourcingOrchestrator(
     HOME_POOL_ENABLED,
   } = await import('./activegraph-client');
   const publicHydrationEnabled = config.publicMemoryHydrationEnabled;
+  const requiredMemory = governedCommand?.protocolVersion === 2 && process.env.RC_SKILLS_ENABLED === 'true';
+  let requiredPoolMaximum = 2000;
+  let requiredLanes: {
+    publicLane: NonNullable<Awaited<ReturnType<typeof searchPublicGlobalPool>>>;
+    privateLane: NonNullable<Awaited<ReturnType<typeof searchTenantPrivateCandidates>>>;
+  } | undefined;
+  if (requiredMemory) {
+    const { retrievalConfiguration, retrieveMemoryLanes, SearchRetrievalError } = await import('./search-retrieval');
+    if (!config.twoLayerPoolEnabled || !publicHydrationEnabled) throw new SearchRetrievalError('configuration');
+    if(!executionAttemptId||!processingLeaseId)throw Error('GOVERNED_EXECUTION_STALE');
+    const {RcRepository}=await import('./rc-skills/repository');
+    const retrievalRepository=new RcRepository();
+    const requestedLimit=Number(process.env.SOURCE_HOME_POOL_LIMIT??'500');
+    const saved=await retrievalRepository.retrievalConfiguration(
+      {tenantId,flowRunId:governedCommand.flowRunId,executionAttemptId,processingLeaseId},
+      retrievalConfiguration(requestedLimit,requestedLimit,config.poolRecentK));
+    config.poolRecentK=saved.recentLimit;
+    requiredPoolMaximum=saved.publicLimit+saved.privateLimit+saved.recentLimit+saved.newLimit;
+    requiredLanes = await retrieveMemoryLanes(
+      async timeoutMs => {
+        const result = await searchPublicGlobalPool(requirements, tenantId, saved.publicLimit, requestId, { timeoutMs });
+        if (!result) throw new SearchRetrievalError('invalid_contract');
+        return result;
+      },
+      async timeoutMs => {
+        const result = await searchTenantPrivateCandidates(requirements, tenantId, saved.privateLimit, requestId, { timeoutMs });
+        if (!result) throw new SearchRetrievalError('invalid_contract');
+        return result;
+      },
+    );
+    // Both lanes succeeded under their own complete privacy proof. Refresh the
+    // local projection context before selecting local rows; never substitute a
+    // newest-candidates pool when either required lane was unavailable.
+    const refreshedPrivacy = await requireHealthyCandidatePrivacyContext();
+    if (refreshedPrivacy.cursor !== privacyContext.cursor || refreshedPrivacy.generation !== privacyContext.generation) {
+      throw new SearchRetrievalError('privacy_unavailable');
+    }
+  }
   const homePoolReadEnabled = publicHydrationEnabled || HOME_POOL_ENABLED;
   if (!publicHydrationEnabled && HOME_POOL_ENABLED) {
     publicMemory.searchSurface = 'legacy_v0';
@@ -746,7 +784,7 @@ export async function runSourcingOrchestrator(
     if (homePoolReadEnabled) {
       try {
         if (publicHydrationEnabled) {
-          const response = await searchPublicGlobalPool(
+          const response = requiredLanes?.publicLane ?? await searchPublicGlobalPool(
             requirements,
             tenantId,
             HOME_POOL_LIMIT,
@@ -1230,7 +1268,7 @@ export async function runSourcingOrchestrator(
         ReturnType<typeof searchTenantPrivateCandidates>
       > = null;
       try {
-        privateResponse = await searchTenantPrivateCandidates(
+        privateResponse = requiredLanes?.privateLane ?? await searchTenantPrivateCandidates(
           requirements,
           tenantId,
           HOME_POOL_LIMIT,
@@ -2876,7 +2914,7 @@ export async function runSourcingOrchestrator(
               return true;
             });
             const duplicatesRemoved = combinedRaw.length - combinedForRanking.length;
-            if(governedCommand?.protocolVersion===2&&combinedForRanking.length>2000)throw Error('RANKING_POOL_TOO_LARGE');
+            if(governedCommand?.protocolVersion===2&&combinedForRanking.length>requiredPoolMaximum)throw Error('RANKING_POOL_TOO_LARGE');
 
             // Stage-3: a stale-known pool member can cycle back via Crustdata
             // (Stage-2 deliberately lets them) while their pool row sits
@@ -3381,6 +3419,7 @@ export async function runSourcingOrchestrator(
                 const repository=new RcRepository(),identity={tenantId,flowRunId:governedCommand.flowRunId,executionAttemptId,processingLeaseId};
                 const admission=await repository.admit(identity,requestId,acquisitionGeneration,governedCommand.rankingContract.contractHash);
                 if(admission.enabled){
+                  try {
                   const {rcPublicIdentities}=await import('./rc-skills/membership');
                   const {createRcMemoryClient}=await import('./rc-skills/memory');
                   const {freezeRcBaseline,completeRcRanking}=await import('./rc-skills/worker');
@@ -3395,7 +3434,8 @@ export async function runSourcingOrchestrator(
                     version:1,asOf:governedObservedAt,identities,cache:[],withheld:[...governedWithheldById.values()],
                     evidence:[...governedEvidenceById.values()].map(e=>({...e,presentationSource:governedSourceById.get(e.candidateId)})),
                   }});
-                  publishedRanking=await completeRcRanking(identity,governedCommand.rankingContract);
+                  publishedRanking=await completeRcRanking(identity,governedCommand.rankingContract,repository);
+                  } finally { await repository.dispose(); }
                 }
               }
               if(!publishedRanking)publishedRanking=await new RankingRepository().publish({tenantId,flowRunId:governedCommand.flowRunId,

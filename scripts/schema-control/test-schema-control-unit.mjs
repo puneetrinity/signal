@@ -13,13 +13,14 @@ function assert(condition, message) {
 }
 
 const migrations = await loadMigrationLock();
-assert(migrations.length === 31, `Expected 31 locked migrations, found ${migrations.length}`);
-assert(migrations.at(-6).name === '20261008000000_rubric_evidence_isolation', 'Expected preserved evidence isolation migration');
-assert(migrations.at(-5).name === '20261009000000_rc_skills', 'Expected preserved RC skills migration');
-assert(migrations.at(-4).name === '20261009010000_approved_skill_alternatives', 'Expected preserved approved skill alternatives migration');
-assert(migrations.at(-3).name === '20261011000000_rc_clock_tolerance', 'Expected preserved RC clock tolerance migration');
-assert(migrations.at(-2).name === '20261012000000_ranking_lock_work', 'Expected preserved ranking lock work');
-assert(migrations.at(-1).name === '20261013000000_rc_prepare_transport', 'Expected RC prepare transport at the locked tail');
+assert(migrations.length === 32, `Expected 32 locked migrations, found ${migrations.length}`);
+assert(migrations.at(-7).name === '20261008000000_rubric_evidence_isolation', 'Expected preserved evidence isolation migration');
+assert(migrations.at(-6).name === '20261009000000_rc_skills', 'Expected preserved RC skills migration');
+assert(migrations.at(-5).name === '20261009010000_approved_skill_alternatives', 'Expected preserved approved skill alternatives migration');
+assert(migrations.at(-4).name === '20261011000000_rc_clock_tolerance', 'Expected preserved RC clock tolerance migration');
+assert(migrations.at(-3).name === '20261012000000_ranking_lock_work', 'Expected preserved ranking lock work');
+assert(migrations.at(-2).name === '20261013000000_rc_prepare_transport', 'Expected preserved RC prepare transport');
+assert(migrations.at(-1).name === '20261014000000_rc_search_correction', 'Expected RC search correction at the locked tail');
 const validRows = migrations.map((entry, index) => ({
   migration_name: entry.name,
   checksum: entry.sha256,

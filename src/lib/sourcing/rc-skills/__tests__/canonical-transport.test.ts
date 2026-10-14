@@ -5,11 +5,23 @@ import {adaptProfile} from '../../rubric/evidence';
 import {rcBaselineSchema,RcRepository} from '../repository';
 import {encodeRcPreparation} from '../canonical-transport';
 import {rcPublicIdentities} from '../membership';
-import {observationBodySchema} from '../contracts';
+import {observationBodySchema,createObservation} from '../contracts';
 
 function baseline(){return rcBaselineSchema.parse({version:1,asOf:'2026-10-13T00:00:00.000Z',cache:[],withheld:[],identities:[],
  evidence:['z','a','é😀'].map(candidateId=>adaptProfile({candidateId,organizationRef:'1',profile:{skills:['C++','é😀','quote"\\\n']},sourceVersion:'test',observedAt:'2020-01-01T00:00:00.000Z'}))});}
 describe('RC preparation canonical transport',()=>{
+ it('streams exactly the old commitment with cache, withheld rows and both provenance labels',()=>{
+  for(const timestampSource of ['check_last_update','fetch_updated_at'] as const){
+   const b=baseline();b.identities=rcPublicIdentities([{candidateId:'z',globalCandidateId:randomUUID(),url:'https://linkedin.com/in/z'}]);
+   const identityHash=b.identities[0].identityHash;
+   b.cache=[{identityHash,observation:createObservation({version:1,outcome:'no_skills',identityHash,skills:[],
+    upstreamAt:null,observedAt:b.asOf,validUntil:null,timestampSource})}];
+   b.withheld=[{candidateId:'withheld-é😀',reason:'evidence_too_large',evidenceHash:'a'.repeat(64),bytes:65537,limit:65536}];
+   const valid=rcBaselineSchema.parse(b),before=JSON.stringify(valid);
+   expect(encodeRcPreparation(valid,['r']).baselineHash).toBe(rankingHash(valid));
+   expect(JSON.stringify(valid)).toBe(before);
+  }
+ });
  it('pins machine-readable baseline and observation field lists',()=>{
   expect(Object.keys(rcBaselineSchema.innerType().shape).sort()).toEqual(['asOf','cache','evidence','identities','version','withheld']);
   expect(Object.keys(observationBodySchema.shape).sort()).toEqual(['identityHash','observedAt','outcome','skills','timestampSource','upstreamAt','validUntil','version']);
@@ -28,7 +40,7 @@ describe('RC preparation canonical transport',()=>{
  });
  it('uses the tagged transport only after repository validation',async()=>{
   const b=baseline(),identity={tenantId:'org_1',flowRunId:randomUUID(),executionAttemptId:'execution',processingLeaseId:'lease'};
-  let command:any;const repo=new RcRepository(async(_sql,args)=>{command=args[2];return[{result:{version:1,runId:randomUUID(),baselineHash:command.baselineHash,replayed:false}}];});
+  let command:any;const repo=new RcRepository(async(_sql,args)=>{command=JSON.parse(args[2] as string);return[{result:{version:1,runId:randomUUID(),baselineHash:command.baselineHash,replayed:false}}];});
   await repo.prepare(identity,[],b);expect(command).toEqual(encodeRcPreparation(b,[]));
   command=null;await expect(repo.prepare(identity,[],{...b,evidence:[b.evidence[0],b.evidence[0]]})).rejects.toThrow();expect(command).toBeNull();
  });

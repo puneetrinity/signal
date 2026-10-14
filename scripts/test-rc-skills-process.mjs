@@ -34,7 +34,7 @@ async function child(){
   console.log(JSON.stringify({state:result.state}));
  }finally{await db.end();}
 }
-async function main(){
+async function main(protocolMode){
  assert.equal(process.env.SIGNAL_RC_PROCESS_DISPOSABLE,'1');
  const dsn=target(process.env.SIGNAL_RC_PROCESS_OWNER_URL);
  const db=new pg.Client({connectionString:dsn,connectionTimeoutMillis:2000});
@@ -77,13 +77,13 @@ async function main(){
   // Reuse the single reviewed synthetic SQL fixture, not a second seed model.
   // Exact source boundaries fail closed if the fixture is renamed/restructured.
   const source=await readFile(resolve(root,'src/lib/sourcing/rc-skills/__tests__/rc-postgres.integration.test.ts'),'utf8');
-  const fixture=source.match(/ async function fixture\(rcUnavailable=false\)\{[\s\S]*?\n \}\n(?= it\()/)?.[0];
+  const fixture=source.match(/ async function fixture\(rcUnavailable=false,protocolMode:1\|2=1\)\{[\s\S]*?\n \}\n(?= it\()/)?.[0];
   assert.ok(fixture,'RC_PROCESS_FIXTURE_MISSING');
   const imports=[['createRankingContract,rankingHash','rubric/contracts'],['adaptProfile','rubric/evidence'],
    ['rcPublicIdentities','rc-skills/membership']].map(([names,path])=>
    `import {${names}} from ${JSON.stringify(resolve(root,'src/lib/sourcing',path+'.ts'))};`).join('\n');
   const seed=join(dir,'seed.ts');
-  await writeFile(seed,`import {randomUUID} from 'node:crypto';\n${imports}\nexport async function seed(db){\nconst tenant='org_28',hash='a'.repeat(64);\nconst one=async(sql,args=[])=>(await db.query(sql,args)).rows[0]?.result;\n${fixture}\nreturn fixture();\n}`,{mode:0o600});
+  await writeFile(seed,`import {randomUUID} from 'node:crypto';\n${imports}\nexport async function seed(db){\nconst tenant='org_28',hash='a'.repeat(64);\nconst one=async(sql,args=[])=>(await db.query(sql,args)).rows[0]?.result;\n${fixture}\nreturn fixture(false,${protocolMode});\n}`,{mode:0o600});
   const f=await (await import(pathToFileURL(seed).href)).seed(db);
   const {rcPublicIdentities}=await load('rc-skills/membership');
   const second=rcPublicIdentities([{candidateId:'candidate-b',globalCandidateId:randomUUID(),url:'https://linkedin.com/in/person-b'}])[0];
@@ -115,13 +115,16 @@ async function main(){
     const check=req.url.endsWith('/check');calls[check?'check':'fetch']++;
     if(!check&&body.url===second.url){held=true;return;}
     const data=check?{exists:true,lastUpdate:upstream,skillCount:1}:{linkedinUrl:body.url,skills:['AWS'],email:'must-discard@fixture.invalid'};
-    res.setHeader('Content-Type','application/json');res.end(JSON.stringify({success:true,error:null,data,quotas:{creditsConsumed:check?0:1}}));
+    res.setHeader('Content-Type','application/json');res.end(JSON.stringify({success:true,error:null,data,metadata:{updatedAt:upstream},quotas:{creditsConsumed:check?0:1}}));
    }catch{res.statusCode=500;res.end();}
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   const origin=`http://127.0.0.1:${server.address().port}`;
   const input=join(dir,'input.json');await writeFile(input,JSON.stringify({dsn,identity,origin}),{mode:0o600});
-  let result=await start(input).done;assert.equal(result.code,0);assert.match(result.output,/waiting/);assert.equal(calls.check,2);
+  let result;
+  if(protocolMode===1){
+   result=await start(input).done;assert.equal(result.code,0);assert.match(result.output,/waiting/);assert.equal(calls.check,2);
+  }
   const interrupted=start(input);
   await wait(async()=>held&&await one("SELECT count(*)::int result FROM rc_lookup_attempts WHERE operation='FETCH' AND state='success'")===1);
   interrupted.processChild.kill('SIGKILL');assert.equal((await interrupted.done).signal,'SIGKILL');
@@ -140,14 +143,14 @@ async function main(){
   assert.equal(await one('SELECT paid_lookups result FROM rc_sourcing_runs'),2);
   assert.ok(sealedRcEvidence(snapshot).evidence.find(e=>e.candidateId==='candidate-a').facts.some(f=>f.value==='aws'));
   assert.ok(!JSON.stringify(snapshot).includes('must-discard'));
-  result=await start(input).done;assert.equal(result.code,0);assert.equal(calls.fetch,2);assert.equal(calls.check,2);
+  result=await start(input).done;assert.equal(result.code,0);assert.equal(calls.fetch,2);assert.equal(calls.check,protocolMode===1?2:0);
   const {createRcMemoryClient}=await load('rc-skills/memory');
   const {drainRcOutbox}=await load('rc-skills/outbox');
   const memory=createRcMemoryClient({testOrigin:origin,testSigner:async()=> 'synthetic'});
   assert.equal((await drainRcOutbox({tenantId:'org_28',flowRunId:f.flow,repository,memory})).delivered,1);
   assert.equal((await drainRcOutbox({tenantId:'org_28',flowRunId:f.flow,repository,memory})).delivered,0);
   assert.equal(calls.cache,1);
-  console.log('RC_PROCESS_PASS: killed paid fetch; partial success retained; no repeat purchase; immutable seal; minimal idempotent cache delivery');
+  console.log(`RC_PROCESS_PASS mode=${protocolMode}: killed paid fetch; partial success retained; no repeat purchase; immutable seal; minimal idempotent cache delivery`);
  }finally{
   await Promise.all([...children].map(child=>new Promise(resolve=>{
    child.once('close',resolve);child.kill('SIGKILL');
@@ -158,4 +161,4 @@ async function main(){
  }
 }
 if(process.argv[2]==='--child')child().catch(()=>{console.error('RC child proof failed');process.exitCode=1;});
-else main().catch(error=>{console.error('RC process proof failed:',error.stack);process.exitCode=1;});
+else (async()=>{for(const mode of [1,2])await main(mode);})().catch(error=>{console.error('RC process proof failed:',error.stack);process.exitCode=1;});

@@ -26,7 +26,7 @@ export const observationBodySchema=z.object({
   version:z.literal(1), outcome:z.enum(['success','no_skills','not_found','unusable_age']),
   identityHash:rcHashSchema, skills:rcSkillsSchema, upstreamAt:rcTimeSchema.nullable(),
   observedAt:rcTimeSchema, validUntil:rcTimeSchema.nullable(),
-  timestampSource:z.literal('check_last_update'),
+  timestampSource:z.enum(['check_last_update','fetch_updated_at']),
 }).strict();
 export const observationSchema=observationBodySchema.extend({contentHash:rcHashSchema}).superRefine((v,ctx)=>{
   const {contentHash,...body}=v;
@@ -60,21 +60,40 @@ export const cacheFinishSchema=z.object({
   originAttempt:z.string().uuid(),observation:observationSchema,
 }).strict().refine(v=>Buffer.byteLength(JSON.stringify(v),'utf8')<=65_536,'Request too large');
 export const rcProgressSchema=z.object({
-  version:z.literal(1),state:z.enum(['enriching_skills','partial','complete','stalled','closed_unrecoverable']),
+  version:z.literal(1),state:z.enum(['queued','enriching_skills','partial','complete','stalled','closed_unrecoverable']),
   processed:z.number().int().min(0).max(300),total:z.number().int().min(0).max(300),
   updatedAt:rcTimeSchema,notificationDelivered:z.boolean(),
-  safeReason:z.enum(['working','skills_unavailable','rate_unavailable','deadline','recovery_pending','closed']),
-}).strict().refine(v=>v.processed<=v.total,'Invalid progress');
+  safeReason:z.enum(['worker_queue','quota_window','working','skills_unavailable','rate_unavailable','deadline','recovery_pending','closed']),
+  workStarted:z.boolean().optional(),
+}).strict().refine(v=>v.processed<=v.total&&
+  (v.state==='queued'?typeof v.workStarted==='boolean'&&['worker_queue','quota_window'].includes(v.safeReason)&&
+   (v.workStarted||(v.processed===0&&v.total===0)):v.workStarted===undefined&&!['worker_queue','quota_window'].includes(v.safeReason)),'Invalid progress');
 export type RcProgress=z.infer<typeof rcProgressSchema>;
 
+export const rcFreeRejectionSchema=z.object({version:z.literal(1),kind:z.literal('rc_429_uncharged'),
+  httpStatus:z.literal(429),providerCode:z.string().min(1).max(80),creditsConsumed:z.literal(0),
+  requestIdHash:rcHashSchema,retryAfterAt:rcTimeSchema.refine(v=>v.endsWith('Z'),'UTC required'),policyVersion:z.string().min(1).max(80),
+}).strict().refine(v=>Buffer.byteLength(JSON.stringify(v))<=2048,'Rejection proof too large');
+export type RcFreeRejection=z.infer<typeof rcFreeRejectionSchema>;
+// Deliberately empty. No endpoint-specific, zero-charge rejection has been
+// verified. Enabling this requires a reviewed policy in BOTH TS and SQL, not
+// an environment toggle or an arbitrary provider assertion of zero credits.
+const reviewedFreeRejections:ReadonlyArray<Readonly<{providerCode:string;policyVersion:string}>>=Object.freeze([]);
+export function approvedRcFreeRejection(raw:unknown):RcFreeRejection|null {
+  const parsed=rcFreeRejectionSchema.safeParse(raw);
+  return parsed.success&&reviewedFreeRejections.some(p=>p.providerCode===parsed.data.providerCode&&p.policyVersion===parsed.data.policyVersion)
+    ?parsed.data:null;
+}
+
 export const rcOutcomeSchema=z.object({
-  kind:z.enum(['eligible','success','no_skills','not_found','unusable_age','cached','restricted','failed','uncertain']),
+  kind:z.enum(['eligible','success','no_skills','not_found','unusable_age','cached','restricted','failed','uncertain','rejected_free']),
   upstreamAt:rcTimeSchema.nullable(),retryableFree:z.boolean(),
   safeCode:z.enum(['ok','unauthorized','rate_limited','restricted','transport','invalid_response','identity_mismatch','credits_breach','deadline']),
   quota:z.object({minuteLimit:z.number().int().min(1).max(1_000_000).nullable(),
     minuteLeft:z.number().int().nonnegative().max(1_000_000).nullable(),
     resetAt:rcTimeSchema.nullable(),retryAfterMs:z.number().int().min(0).max(86_400_000).nullable(),
     dailyLeft:z.number().int().nonnegative().safe().nullable()}).strict(),
+  rejectionProof:rcFreeRejectionSchema.optional(),
 }).strict();
 export const rcFinishBodySchema=z.object({version:z.literal(1),outcome:rcOutcomeSchema,
   observation:observationSchema.nullable(),observedCredits:z.number().int().nonnegative().safe().nullable(),
@@ -83,7 +102,9 @@ export const rcFinishBodySchema=z.object({version:z.literal(1),outcome:rcOutcome
   if((['success','no_skills','not_found','unusable_age','cached'].includes(kind))!==(obs!==null)||
     (obs!==null&&kind!=='cached'&&kind!==obs.outcome)||
     (kind==='eligible'&&v.outcome.upstreamAt===null)||
-    (v.outcome.retryableFree&&(kind!=='failed'||v.observedCredits!==0)))
+    (v.outcome.retryableFree&&(!['failed','rejected_free'].includes(kind)||v.observedCredits!==0))||
+    ((kind==='rejected_free')!==(v.outcome.rejectionProof!==undefined))||
+    (kind==='rejected_free'&&(!v.outcome.retryableFree||v.observedCredits!==0||v.outcome.safeCode!=='rate_limited'||v.outcome.upstreamAt!==null)))
     ctx.addIssue({code:z.ZodIssueCode.custom,message:'Invalid outcome transition'});
 });
 export const rcFinishSchema=rcFinishBodySchema.innerType().extend({outcomeHash:rcHashSchema}).superRefine((v,ctx)=>{

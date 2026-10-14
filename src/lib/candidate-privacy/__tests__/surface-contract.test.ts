@@ -7,6 +7,7 @@ const root = process.cwd();
 const enforcementContracts = [
   ['rc-contract-boundary','src/lib/sourcing/rc-skills/contracts.ts',['observationBodySchema=z.object','contentHash!==rankingHash(body)']],
   ['rc-evidence-boundary','src/lib/sourcing/rc-skills/evidence.ts',['RC_EVIDENCE_IDENTITY_CONFLICT','throw new OversizedEvidenceError']],
+  ['rc-compute-boundary','src/lib/sourcing/rc-skills/rc-compute-worker.ts',['RC_COMPUTE_IDENTITY_CONFLICT','maxOldGenerationSizeMb:512','RC_COMPUTE_INVALID']],
   ['rc-membership-boundary','src/lib/sourcing/rc-skills/membership.ts',['RC_RECEIPT_BINDING_CONFLICT','RC_PURCHASE_LIMIT']],
   ['rc-memory-boundary','src/lib/sourcing/rc-skills/memory.ts',["scope:'rc-skills:read'|'rc-skills:write'",'parsed.data.contentHash!==body.observation.contentHash']],
   ['rc-provider-boundary','src/lib/sourcing/rc-skills/provider.ts',['AbortSignal.timeout','rcSkillsSchema.safeParse(data.skills)']],

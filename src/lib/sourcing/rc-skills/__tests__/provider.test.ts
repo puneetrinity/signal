@@ -14,6 +14,35 @@ function client(reply:()=>Response|Promise<Response>) {
   return {transport,provider:createRcProvider({apiKey:'fake-test-key',fetchImpl:transport as typeof fetch,now:()=>now})};
 }
 describe('RC cached V2 transport, fake HTTP only',()=>{
+  it('direct fetch reads freshness from metadata, never profile dates or local time',async()=>{
+    const old=response({linkedinUrl:url,skills:['Python'],lastUpdate:'2020-01-01T00:00:00Z'},1);
+    const raw=await old.json();raw.metadata.updatedAt='2026-01-01T00:00:00.000Z';
+    const {provider,transport}=client(()=>new Response(JSON.stringify(raw)));
+    const result=await provider.fetchSkills(url,now+300000,1,'direct');
+    expect(result).toMatchObject({skills:['Python'],outcome:'success',upstreamAt:'2026-01-01T00:00:00.000Z'});
+    expect(transport).toHaveBeenCalledOnce();
+    expect(transport.mock.calls[0][0]).toBe('https://api.reversecontact.com/v2/fetch/persons');
+    expect(JSON.stringify(result)).not.toMatch(/private@|private-provider-reference|lastUpdate/);
+  });
+  it.each([null,'bad','2027-01-01T00:00:00Z','2020-01-01T00:00:00Z'])('direct fetch refuses unusable metadata date %s',async updatedAt=>{
+    const raw=await response({linkedinUrl:url,skills:['Python']},1).json();raw.metadata.updatedAt=updatedAt;
+    const {provider}=client(()=>new Response(JSON.stringify(raw)));
+    expect(await provider.fetchSkills(url,now+300000,1,'direct')).toMatchObject({outcome:'unusable_age',skills:[]});
+  });
+  it('accepts only the structured zero-credit direct not-found response',async()=>{
+    const raw=await response({},0).json();Object.assign(raw,{success:false,error:'REQUEST_ERROR',data:null});
+    const {provider}=client(()=>new Response(JSON.stringify(raw),{status:404}));
+    expect(await provider.fetchSkills(url,now+300000,1,'direct')).toMatchObject({outcome:'not_found',skills:[],upstreamAt:null,quota:{creditsConsumed:0}});
+    for(const body of ['<html>not found</html>',JSON.stringify({...raw,error:'OTHER'}),JSON.stringify({...raw,quotas:{creditsConsumed:1}})]){
+      const invalid=client(()=>new Response(body,{status:404})).provider;
+      await expect(invalid.fetchSkills(url,now+300000,1,'direct')).rejects.toMatchObject({possiblePaid:true});
+    }
+  });
+  it('never retries a direct FETCH429 without approved charge proof',async()=>{
+    const {provider,transport}=client(()=>new Response('',{status:429,headers:{'retry-after':'2'}}));
+    await expect(provider.fetchSkills(url,now+300000,1,'direct')).rejects.toMatchObject({code:'rate_limited',possiblePaid:true});
+    expect(transport).toHaveBeenCalledOnce();
+  });
   it('projects CHECK fields and obeys the lower account/key quota without leaking IDs',async()=>{
     const {provider,transport}=client(()=>response({exists:true,lastUpdate:'2026-01-01T00:00:00.000Z',skillCount:2,private:'discard'}));
     const result=await provider.check(url,now+300000);

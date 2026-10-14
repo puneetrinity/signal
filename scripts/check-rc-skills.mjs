@@ -5,10 +5,10 @@ import {createHash} from 'node:crypto';
 export const RC_TABLES=['rc_rate_policies','rc_org_policies','rc_sourcing_runs','rc_purchase_members','rc_lookup_attempts','rc_skill_outbox','rc_account_windows','rc_operations_events'];
 export const RC_FUNCTIONS=['signal_rc_admit(text,uuid,jsonb)','signal_rc_prepare(text,uuid,jsonb)','signal_rc_claim(text,uuid,jsonb)',
  'signal_rc_dispatch(text,uuid,uuid,jsonb)','signal_rc_finish(text,uuid,uuid,jsonb)','signal_rc_read(text,uuid)',
- 'signal_rc_seal(text,uuid,jsonb)','signal_rc_outbox(text,uuid,jsonb)','signal_rc_maintain(jsonb)'];
+ 'signal_rc_seal(text,uuid,jsonb)','signal_rc_outbox(text,uuid,jsonb)','signal_rc_maintain(jsonb)','signal_rc_work(text,uuid,jsonb)'];
 export const RC_PREPARE_PRIVATE_FUNCTIONS=['signal_rc_prepare_rebuild(text,jsonb)','signal_rc_prepare_transport(jsonb)'];
-export const RC_OWNER_FUNCTIONS=['signal_rc_set_policy(jsonb)','signal_rc_recover(text,uuid,jsonb)',...RC_PREPARE_PRIVATE_FUNCTIONS];
-export const RC_CATALOG_SHA256='511e6099cd3dfb6af580140f7ea565a0e6c649e0c7f4cb32e41063864794b95e';
+export const RC_OWNER_FUNCTIONS=['signal_rc_set_policy(jsonb)','signal_rc_recover(text,uuid,jsonb)',...RC_PREPARE_PRIVATE_FUNCTIONS,'signal_rc_free_rejection_valid(jsonb)','signal_rc_validate_baseline_write()'];
+export const RC_CATALOG_SHA256='f0664e11194525d20f95c16f5e0852e6665367d88420d56268fdd65de596557d';
 export const RC_CATALOG_SQL=`WITH relations AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname LIKE 'rc\\_%' ESCAPE '\\' AND c.relkind IN ('r','p')
 ), functions AS (
@@ -21,6 +21,7 @@ export const RC_CATALOG_SQL=`WITH relations AS (
  'indexes',(SELECT jsonb_agg(jsonb_build_array(pg_get_indexdef(i.indexrelid),i.indisvalid,i.indisready) ORDER BY i.indexrelid::regclass::text COLLATE "C") FROM pg_index i WHERE i.indrelid IN(SELECT oid FROM relations)),
  'policies',(SELECT jsonb_agg(jsonb_build_array(c.relname,p.polname,p.polcmd,p.polpermissive,p.polroles=ARRAY[c.relowner],pg_get_expr(p.polqual,p.polrelid),pg_get_expr(p.polwithcheck,p.polrelid)) ORDER BY c.relname COLLATE "C",p.polname COLLATE "C") FROM pg_policy p JOIN relations c ON c.oid=p.polrelid),
  'triggers',(SELECT jsonb_agg(jsonb_build_array(t.tgname,pg_get_triggerdef(t.oid),t.tgenabled) ORDER BY t.tgrelid::regclass::text COLLATE "C",t.tgname COLLATE "C") FROM pg_trigger t WHERE NOT t.tgisinternal AND (t.tgrelid IN(SELECT oid FROM relations) OR t.tgfoid IN(SELECT oid FROM functions))),
+ 'rules',(SELECT jsonb_agg(jsonb_build_array(r.rulename,pg_get_ruledef(r.oid),r.ev_enabled) ORDER BY r.ev_class::regclass::text COLLATE "C",r.rulename COLLATE "C") FROM pg_rewrite r WHERE r.ev_class IN(SELECT oid FROM relations)),
  'functions',(SELECT jsonb_agg(jsonb_build_array(p.oid::regprocedure::text,pg_get_functiondef(p.oid),p.proowner=(SELECT relowner FROM pg_class WHERE oid='public.job_sourcing_requests'::regclass)) ORDER BY p.oid::regprocedure::text COLLATE "C") FROM functions p)
  ) value) SELECT encode(sha256(convert_to(value::text,'UTF8')),'hex') digest FROM facts`;
 export async function assertRcCatalog(tx,{role,allowOwner=false}={}){
@@ -48,7 +49,7 @@ export function checkRcSkillsSource(base=root,read=path=>readFileSync(resolve(ba
  if(correction.slice(correction.indexOf('CREATE OR REPLACE FUNCTION')).trim()!==expected.trim())throw Error('RC clock tolerance delta mismatch');
  if(/\b\w*(?:paise|price_expir|crustdata_expires|rc_expires)\w*\b/i.test(sql))throw Error('RC monetary policy forbidden');
  for(const name of RC_TABLES)if(!sql.includes('CREATE TABLE public.'+name+' ('))throw Error('RC table missing');
- for(const signature of [...RC_FUNCTIONS,...RC_OWNER_FUNCTIONS.filter(s=>!RC_PREPARE_PRIVATE_FUNCTIONS.includes(s))])
+ for(const signature of [...RC_FUNCTIONS.filter(s=>!s.startsWith('signal_rc_work(')),...RC_OWNER_FUNCTIONS.filter(s=>!RC_PREPARE_PRIVATE_FUNCTIONS.includes(s)&&!s.startsWith('signal_rc_free_rejection_valid(')&&s!=='signal_rc_validate_baseline_write()')])
   if(!sql.includes('REVOKE ALL ON FUNCTION public.'+signature+' FROM PUBLIC;'))throw Error('RC PUBLIC revocation missing');
  for(const token of ['FORCE ROW LEVEL SECURITY','COLLATE "C"','RC_RECEIPT_BINDING_CONFLICT','RC_EXECUTION_STALE',
   'RC_LOOKUP_LIMIT','RC_OUTCOME_CONFLICT','RC_CHECK_SNAPSHOT_CONFLICT','RC_RECOVERY_STALE','retention_hold',
@@ -63,8 +64,23 @@ export function checkRcSkillsSource(base=root,read=path=>readFileSync(resolve(ba
  for(const signature of RC_PREPARE_PRIVATE_FUNCTIONS)if(!prepare.includes('REVOKE ALL ON FUNCTION public.'+signature+' FROM PUBLIC;'))throw Error('RC prepare helper ACL missing');
  for(const token of ['ANY(candidate_ids)) IS NOT TRUE','pg_input_is_valid','IF NOT tagged THEN','aclexplode'])if(!prepare.includes(token))throw Error('RC prepare invariant missing');
  const repository=read('src/lib/sourcing/rc-skills/repository.ts');
- for(const token of ["SET LOCAL statement_timeout='30s'","SET LOCAL lock_timeout='2s'","SET LOCAL idle_in_transaction_session_timeout='35s'",'maxWait:2000,timeout:35000'])if(!repository.includes(token))throw Error('RC prepare deadline missing');
+ for(const token of ["SET LOCAL statement_timeout='30s'","SET LOCAL statement_timeout='5s'","SET LOCAL lock_timeout='2s'","SET LOCAL idle_in_transaction_session_timeout='35s'",'maxWait:2000,timeout:compact?7000:35000'])if(!repository.includes(token))throw Error('RC prepare deadline missing');
  const lock=JSON.parse(read('prisma/migrations.lock.json'));
+ const searchCorrection=read('prisma/migrations/20261014000000_rc_search_correction/migration.sql');
+ const searchHash=createHash('sha256').update(searchCorrection).digest('hex');
+ for(const token of ['RC_BASELINE_VALIDATION_SOURCE_REFUSED','LOCK TABLE public.rc_sourcing_runs IN ACCESS EXCLUSIVE MODE',
+  "pg_get_constraintdef(oid)='CHECK (((jsonb_typeof(baseline)", 'FROM pg_rewrite WHERE ev_class=',
+  'REVOKE ALL ON FUNCTION public.signal_rc_validate_baseline_write() FROM PUBLIC;',
+  'AFTER INSERT OR UPDATE OF baseline','ENABLE ALWAYS TRIGGER rc_baseline_write_guard',
+  "octet_length(NEW.baseline::text)<=134217728) IS FALSE","ERRCODE='23514',MESSAGE='RC_BASELINE_INVALID'"])
+  if(!searchCorrection.includes(token))throw Error('RC baseline write validation missing');
+ if(layout.searchCorrectionSqlSha256!==searchHash||lock.migrations.find(m=>m.name==='20261014000000_rc_search_correction')?.sha256!==searchHash)throw Error('RC search correction fingerprint mismatch');
+ for(const token of ['REVOKE ALL ON FUNCTION public.signal_rc_work(text,uuid,jsonb) FROM PUBLIC;',
+  'REVOKE ALL ON FUNCTION public.signal_rc_free_rejection_valid(jsonb) FROM PUBLIC;',
+  'EMPTY_REVIEWED_429_POLICY','rc_one_unexonerated_fetch','RC_RETRY_PROOF_REFUSED',
+  'protocol_mode smallint NOT NULL DEFAULT 1','RC_EXECUTION_STALE','RC_OUTCOME_CONFLICT','aclexplode',
+  'run.protocol_mode=1',"'fetch_updated_at'","'expectedRevision'","'observations'"])
+  if(!searchCorrection.includes(token))throw Error('RC search correction invariant missing');
  if(lock.migrations.find(m=>m.name==='20261013000000_rc_prepare_transport')?.sha256!==createHash('sha256').update(prepare).digest('hex'))throw Error('RC prepare migration fingerprint mismatch');
  if(lock.migrations.find(m=>m.name==='20261011000000_rc_clock_tolerance')?.sha256!==createHash('sha256').update(correction).digest('hex'))throw Error('RC tolerance fingerprint mismatch');
  if(lock.migrations.find(m=>m.name==='20261009000000_rc_skills')?.sha256!==createHash('sha256').update(sql).digest('hex'))throw Error('RC migration fingerprint mismatch');

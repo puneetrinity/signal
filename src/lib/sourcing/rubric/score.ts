@@ -7,7 +7,18 @@ import { approvedSkillNames, normalizeSkillName } from './skill-alternatives';
 
 export type AssessmentState='met'|'not_met'|'unknown';
 export interface Assessment {criterionIds:string[];labels:string[];subject:Criterion['subject'];state:AssessmentState;mapped:boolean;weight:number;points:number;localPoints:number;refs:string[]}
-function assess(c:Criterion,e:CanonicalEvidence,asOf:string):{state:AssessmentState;positive:string[];refs:string[]} {
+// Per invocation only: cache the pure string transformation, never a privacy
+// decision, fact eligibility or assessment. Bound memory even for distinct skills.
+function skillNormalizer(){
+  const names=new Map<string,string>();
+  return(value:string)=>{
+    const found=names.get(value);if(found!==undefined)return found;
+    const normalized=normalizeSkillName(value);
+    if(names.size>=4096)names.clear();
+    names.set(value,normalized);return normalized;
+  };
+}
+function assess(c:Criterion,e:CanonicalEvidence,asOf:string,normalizeSkill:(value:string)=>string):{state:AssessmentState;positive:string[];refs:string[]} {
   const result=(state:AssessmentState,facts:EvidenceFact[]=[])=>({state,positive:state==='met'?facts.map(f=>f.value):[],refs:facts.map(f=>f.ref)});
   if(!automaticallyMapped(c)) return result('unknown');
   const kind=c.subject==='location'?'city':c.subject==='relevant_work'?'function':c.subject;
@@ -16,7 +27,7 @@ function assess(c:Criterion,e:CanonicalEvidence,asOf:string):{state:AssessmentSt
   const r=c.requirement;
   if(c.subject==='skill' && r.kind==='accepted_skills') {
     const approved=new Set(approvedSkillNames(r));
-    const matched=facts.filter(f=>approved.has(normalizeSkillName(f.value)));
+    const matched=facts.filter(f=>approved.has(normalizeSkill(f.value)));
     return result(matched.length?'met':'unknown',matched);
   }
   if(c.subject==='title' && r.kind==='accepted_titles') {
@@ -82,7 +93,10 @@ function assess(c:Criterion,e:CanonicalEvidence,asOf:string):{state:AssessmentSt
 }
 
 export function scoreEvidence(rawContract:RankingContract,rawEvidence:CanonicalEvidence,asOf:string) {
-  const contract=rankingContractSchema.parse(rawContract),evidence=evidenceSchema.parse(rawEvidence);
+  return scoreWithContract(rankingContractSchema.parse(rawContract),rawEvidence,asOf,skillNormalizer());
+}
+function scoreWithContract(contract:RankingContract,rawEvidence:CanonicalEvidence,asOf:string,normalizeSkill:(value:string)=>string) {
+  const evidence=evidenceSchema.parse(rawEvidence);
   const groups=new Map<string,Criterion[]>();
   for(const c of contract.payload.criteria) {const key=predicateKey(c);groups.set(key,[...(groups.get(key)??[]),c]);}
   let range:ExperienceRange|null=null;
@@ -107,7 +121,7 @@ export function scoreEvidence(rawContract:RankingContract,rawEvidence:CanonicalE
         state=lo>=range.minimum&&hi<=(range.maximum??Infinity)?'met':hi<range.minimum||lo>(range.maximum??Infinity)?'not_met':'unknown';
         if(state==='met') positive=['recorded employment'];refs=['employment'];
       }
-    } else ({state,positive,refs}=assess(c,evidence,asOf));
+    } else ({state,positive,refs}=assess(c,evidence,asOf,normalizeSkill));
     const orderedCriteria=[...candidates].sort((a,b)=>byteCompare(a.id,b.id));
     assessments.push({criterionIds:orderedCriteria.map(x=>x.id),labels:orderedCriteria.map(x=>x.label),subject:c.subject,state,mapped,weight,
       points:state==='met'?weight:0,localPoints:state==='met'?weight*localMatch(c,positive):0,refs:[...new Set(refs)].sort()});
@@ -127,7 +141,11 @@ export function compareRanking(a:RankedEvidence,b:RankedEvidence):number {
 export function rankEvidence(contract:RankingContract,pool:readonly CanonicalEvidence[],asOf:string) {
   if(pool.length>2000) throw Error('RUBRIC_POOL_TOO_LARGE');
   if(new Set(pool.map(p=>p.candidateId)).size!==pool.length) throw Error('RUBRIC_DUPLICATE_IDENTITY');
-  const items=pool.map(e=>scoreEvidence(contract,e,asOf)).sort(compareRanking);
+  // Preserve the empty-pool behavior; nonempty pools validate the immutable
+  // contract once, while every candidate still receives full evidence validation.
+  const checked=pool.length?rankingContractSchema.parse(contract):contract;
+  const normalizeSkill=skillNormalizer();
+  const items=pool.map(e=>scoreWithContract(checked,e,asOf,normalizeSkill)).sort(compareRanking);
   const selected=items.filter(i=>eligible(i.eligibility)).slice(0,100).map((item,index)=>({...item,selectedOrdinal:index+1}));
   return {items,selected,shortfall:100-selected.length};
 }
