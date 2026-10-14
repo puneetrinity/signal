@@ -17,6 +17,38 @@ import {
   requireNewCandidateAllowed,
 } from '@/lib/candidate-privacy/decision';
 import { requireHealthyCandidatePrivacyContext } from '@/lib/candidate-privacy/repository';
+import { fetchMemorySearch, SearchRetrievalError } from './search-retrieval';
+import { createHash } from 'node:crypto';
+
+export interface StrictMemorySearchOptions { timeoutMs: number }
+
+function searchTiming(surface: 'public_v1' | 'tenant_private_v1' | 'legacy_v0', limit: number, requestId?: string) {
+  const phases = {networkMs: 0, bodyReadMs: 0, parseMs: 0, privacyMs: 0};
+  return {
+    phase(name: keyof typeof phases, ms: number) { phases[name] += ms; },
+    finish(appliedLimit: number, returnedCount: number) {
+      log.info({surface, requestedLimit: limit, appliedLimit, returnedCount,
+        requestHash: createHash('sha256').update(requestId ?? '').digest('hex'),
+        ...Object.fromEntries(Object.entries(phases).map(([key,value]) => [key, Math.round(value * 100) / 100]))},
+      'Memory retrieval phase timings');
+    },
+  };
+}
+
+/** A complete privacy response may exclude a person, not every other match.
+ * Proof creation checks one high-water context across all internal batches.
+ * Transport/missing/unknown decisions still throw and make the lane unavailable.
+ */
+async function filterMemoryCandidatesPrivacyAllowed<T>(
+  rows: T[],
+  anchor: (row: T, index: number) => Parameters<typeof createCandidateAdmissionProofs>[0][number],
+  deadlineAt?: number,
+): Promise<T[]> {
+  await requireHealthyCandidatePrivacyContext();
+  const anchors = rows.map(anchor);
+  const proofs = await createCandidateAdmissionProofs(anchors,undefined,deadlineAt);
+  return rows.filter((_, index) => proofs.has(anchors[index].key));
+}
 
 async function assertMemoryCandidatesPrivacyAllowed(
   anchors: Array<{
@@ -329,7 +361,9 @@ async function searchGlobalPoolResponseForSurface(
   limit: number,
   requestId: string | undefined,
   surface: GlobalPoolSurface,
+  strict?: StrictMemorySearchOptions,
 ): Promise<GlobalPoolSearchResponse | null> {
+  const deadlineAt=strict?Date.now()+strict.timeoutMs:undefined;
   await requireHealthyCandidatePrivacyContext();
   const queryText = buildPoolQueryText(requirements);
   if (!queryText.trim()) {
@@ -349,10 +383,11 @@ async function searchGlobalPoolResponseForSurface(
     );
   }
 
+  const timing = searchTiming(surface, limit, requestId);
   const token = await signActiveGraphJWT(tenantId, 'kg:read', requestId);
   let response: Response;
   try {
-    response = await fetchWithTimeout(`${ACTIVEGRAPH_URL}/global-candidates/search`, {
+    response = await (strict ? fetchMemorySearch : fetchWithTimeout)(`${ACTIVEGRAPH_URL}/global-candidates/search`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -368,8 +403,9 @@ async function searchGlobalPoolResponseForSurface(
         // 'bengaluru' substring and were unreachable at ANY limit.
         location_cities: cityAliases,
       }),
-    });
+    }, deadlineAt===undefined?REQUEST_TIMEOUT_MS:Math.max(1,deadlineAt-Date.now()), timing.phase);
   } catch (err) {
+    if (strict) throw err;
     log.warn({ requestId, err: String(err) }, 'Global pool vector search unreachable');
     return null;
   }
@@ -383,12 +419,14 @@ async function searchGlobalPoolResponseForSurface(
     return null;
   }
 
+  const parseStart = performance.now();
   const data = await response.json().catch(() => null) as {
     surface?: unknown;
     results?: unknown;
     count?: unknown;
     applied_limit?: unknown;
   } | null;
+  timing.phase('parseMs', performance.now() - parseStart);
   const returnedSurface =
     data?.surface ??
     // Backward compatibility while Memory rolls out the discriminator:
@@ -404,6 +442,7 @@ async function searchGlobalPoolResponseForSurface(
       { requestId, requestedSurface: surface },
       'Global pool vector search returned an invalid surface contract',
     );
+    if (strict) throw new SearchRetrievalError('invalid_contract');
     return null;
   }
   if (
@@ -414,8 +453,12 @@ async function searchGlobalPoolResponseForSurface(
       { requestId, requestedSurface: surface },
       'Public pool search returned private or malformed candidate evidence',
     );
+    if (strict) throw new SearchRetrievalError('invalid_contract');
     return null;
   }
+  if (strict && (!Number.isSafeInteger(data.applied_limit) || data.applied_limit < 1
+    || data.applied_limit > limit || data.results.length > data.applied_limit
+    || data.count !== data.results.length)) throw new SearchRetrievalError('invalid_contract');
   if (typeof data.applied_limit === 'number' && data.applied_limit < limit) {
     // No silent caps: the server clamped our request — candidates beyond
     // applied_limit never entered the vector set.
@@ -424,30 +467,37 @@ async function searchGlobalPoolResponseForSurface(
       'Global pool vector search truncated by server cap'
     );
   }
-  const results =
+  let results =
     surface === 'public_v1'
       ? (data.results as GlobalPoolSearchResult[]).map((row) => ({
           ...row,
           id: normalizeGlobalCandidateId(row.id)!,
         }))
       : (data.results as GlobalPoolSearchResult[]);
+  const privacyStart = performance.now();
   try {
-    await assertMemoryCandidatesPrivacyAllowed(
-      results.map((row, index) => ({
+    const anchor = (row: GlobalPoolSearchResult, index: number) => ({
         key: `${index}`,
         linkedinUrl: row.linkedin_url,
         signalCandidateId: row.signal_candidate_id,
         globalCandidateId: row.id,
-      })),
-    );
+    });
+    if (surface === 'public_v1') {
+      results = await filterMemoryCandidatesPrivacyAllowed(results, anchor,deadlineAt);
+    } else {
+      await assertMemoryCandidatesPrivacyAllowed(results.map(anchor));
+    }
   } catch {
     log.warn({ requestId }, 'Global pool privacy admission unavailable');
+    if (strict) throw new SearchRetrievalError('privacy_unavailable');
     return null;
-  }
+  } finally { timing.phase('privacyMs', performance.now() - privacyStart); }
+  if(strict)timing.finish(data.applied_limit, results.length);
   return {
     surface,
     results,
-    count: typeof data.count === 'number' ? data.count : data.results.length,
+    count: surface === 'public_v1' ? results.length
+      : typeof data.count === 'number' ? data.count : data.results.length,
     appliedLimit: data.applied_limit,
   };
 }
@@ -480,6 +530,7 @@ export async function searchPublicGlobalPool(
   tenantId: string,
   limit: number = HOME_POOL_LIMIT,
   requestId?: string,
+  strict?: StrictMemorySearchOptions,
 ): Promise<GlobalPoolSearchResponse | null> {
   return searchGlobalPoolResponseForSurface(
     requirements,
@@ -487,6 +538,7 @@ export async function searchPublicGlobalPool(
     limit,
     requestId,
     'public_v1',
+    strict,
   );
 }
 
@@ -495,12 +547,15 @@ export async function searchTenantPrivateCandidates(
   tenantId: string,
   limit: number = HOME_POOL_LIMIT,
   requestId?: string,
+  strict?: StrictMemorySearchOptions,
 ): Promise<TenantPrivateSearchResponse | null> {
+  const deadlineAt=strict?Date.now()+strict.timeoutMs:undefined;
+  const timing = searchTiming('tenant_private_v1', limit, requestId);
   await requireHealthyCandidatePrivacyContext();
   const token = await signActiveGraphJWT(tenantId, 'kg:read', requestId);
   let response: Response;
   try {
-    response = await fetchWithTimeout(
+    response = await (strict ? fetchMemorySearch : fetchWithTimeout)(
       `${ACTIVEGRAPH_URL}/candidates/search/private`,
       {
         method: 'POST',
@@ -514,8 +569,11 @@ export async function searchTenantPrivateCandidates(
           limit,
         }),
       },
+      deadlineAt===undefined?REQUEST_TIMEOUT_MS:Math.max(1,deadlineAt-Date.now()),
+      timing.phase,
     );
   } catch (error) {
+    if (strict) throw error;
     log.warn(
       { requestId, err: String(error) },
       'Tenant-private Memory search unreachable',
@@ -531,6 +589,7 @@ export async function searchTenantPrivateCandidates(
     return null;
   }
 
+  const parseStart = performance.now();
   const data = (await response.json().catch(() => null)) as {
     surface?: unknown;
     results?: unknown;
@@ -539,6 +598,7 @@ export async function searchTenantPrivateCandidates(
     truncated?: unknown;
     applied_limit?: unknown;
   } | null;
+  timing.phase('parseMs', performance.now() - parseStart);
   if (
     !data ||
     data.surface !== 'tenant_private_v1' ||
@@ -551,9 +611,14 @@ export async function searchTenantPrivateCandidates(
       { requestId },
       'Tenant-private Memory search returned an invalid contract',
     );
+    if (strict) throw new SearchRetrievalError('invalid_contract');
     return null;
   }
 
+  if (strict && (!Number.isSafeInteger(data.applied_limit) || data.applied_limit < 1
+    || data.applied_limit > limit || data.results.length > data.applied_limit
+    || data.total !== data.results.length || !Number.isSafeInteger(data.total_available)
+    || data.total_available < data.total)) throw new SearchRetrievalError('invalid_contract');
   const allowedKeys = new Set([
     'candidate_id',
     'global_candidate_id',
@@ -568,15 +633,19 @@ export async function searchTenantPrivateCandidates(
     'skill_overlap_count',
     'evidence_surface',
   ]);
-  const results: TenantPrivateSearchResult[] = [];
+  let results: TenantPrivateSearchResult[] = [];
   for (const raw of data.results) {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      if (strict) throw new SearchRetrievalError('invalid_contract');
+      return null;
+    }
     const row = raw as Record<string, unknown>;
     if (Object.keys(row).some((key) => !allowedKeys.has(key))) {
       log.error(
         { requestId },
         'Tenant-private Memory row contained a non-allowlisted field',
       );
+      if (strict) throw new SearchRetrievalError('invalid_contract');
       return null;
     }
     const globalCandidateId =
@@ -605,6 +674,7 @@ export async function searchTenantPrivateCandidates(
         { requestId },
         'Tenant-private Memory row was malformed',
       );
+      if (strict) throw new SearchRetrievalError('invalid_contract');
       return null;
     }
     results.push({
@@ -622,23 +692,26 @@ export async function searchTenantPrivateCandidates(
       evidenceSurface: 'tenant_private_v1',
     });
   }
+  const privacyStart = performance.now();
   try {
-    await assertMemoryCandidatesPrivacyAllowed(
-      results.map((row, index) => ({
+    results = await filterMemoryCandidatesPrivacyAllowed(
+      results, (row, index) => ({
         key: `${index}`,
         linkedinUrl: row.linkedinUrl,
         signalCandidateId: row.candidateId,
         globalCandidateId: row.globalCandidateId,
-      })),
+      }),deadlineAt,
     );
   } catch {
     log.warn({ requestId }, 'Tenant-private privacy admission unavailable');
+    if (strict) throw new SearchRetrievalError('privacy_unavailable');
     return null;
-  }
+  } finally { timing.phase('privacyMs', performance.now() - privacyStart); }
+  if(strict)timing.finish(data.applied_limit, results.length);
   return {
     surface: 'tenant_private_v1',
     results,
-    total: data.total,
+    total: results.length,
     totalAvailable: data.total_available,
     truncated: data.truncated === true,
     appliedLimit: data.applied_limit,

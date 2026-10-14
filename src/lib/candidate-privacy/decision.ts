@@ -5,6 +5,7 @@ import { isCandidatePrivacyDisposableTestAdapter } from './config';
 import {
   anchorToEligibilitySubject,
   decisionAllowsDiscoverUse,
+  privacyDecisionSchema,
   type CandidatePrivacyAnchor,
 } from './models';
 import {
@@ -24,8 +25,18 @@ export interface CandidatePrivacyAdmissionAnchor {
 export async function createCandidateAdmissionProofs(
   anchors: CandidatePrivacyAdmissionAnchor[],
   client?: CandidatePrivacyMemoryClient,
+  deadlineAt?: number,
 ): Promise<Map<string, CandidatePrivacyAdmissionProof>> {
+  const remaining=()=>{
+    const ms=deadlineAt===undefined?undefined:deadlineAt-Date.now();
+    if(ms!==undefined&&(!Number.isFinite(ms)||ms<=0))throw new CandidatePrivacyUnavailableError('candidate_privacy_unavailable');
+    return ms;
+  };
+  remaining();
   if (anchors.length === 0) return new Map();
+  if (new Set(anchors.map((anchor) => anchor.key)).size !== anchors.length) {
+    throw new CandidatePrivacyUnavailableError('candidate_privacy_conflict');
+  }
   if (isCandidatePrivacyDisposableTestAdapter()) {
     return new Map(anchors.map((anchor) => [
       anchor.key,
@@ -37,9 +48,15 @@ export async function createCandidateAdmissionProofs(
       }),
     ]));
   }
-  const resolvedClient = client ?? new HttpCandidatePrivacyMemoryClient();
+  const resolvedClient = client ?? new HttpCandidatePrivacyMemoryClient(undefined,
+    deadlineAt===undefined?fetch:async(url,init)=>{
+      const deadline=AbortSignal.timeout(Math.max(1,Math.floor(remaining()!)));
+      return fetch(url,{...init,signal:init?.signal?AbortSignal.any([init.signal,deadline]):deadline});
+    });
   const context = await requireHealthyCandidatePrivacyContext();
+  remaining();
   const highWaterBefore = await resolvedClient.readHighWater();
+  remaining();
   if (BigInt(highWaterBefore) !== context.cursor) {
     throw new CandidatePrivacyUnavailableError('candidate_privacy_conflict');
   }
@@ -63,15 +80,24 @@ export async function createCandidateAdmissionProofs(
       : never
   >();
   for (let index = 0; index < subjects.length; index += 200) {
-    const batch = await resolvedClient.eligibilityBatch(subjects.slice(index, index + 200));
+    remaining();
+    const requested = subjects.slice(index, index + 200);
+    const expected = new Set(requested.map((subject) => subject.request_ref));
+    const batch = await resolvedClient.eligibilityBatch(requested);
+    remaining();
+    if (batch.size !== expected.size) {
+      throw new CandidatePrivacyUnavailableError('candidate_privacy_conflict');
+    }
     for (const [requestRef, decision] of batch) {
-      if (decisions.has(requestRef)) {
+      if (!expected.has(requestRef) || decisions.has(requestRef)
+        || !privacyDecisionSchema.safeParse(decision).success) {
         throw new CandidatePrivacyUnavailableError('candidate_privacy_conflict');
       }
       decisions.set(requestRef, decision);
     }
   }
   const highWaterAfter = await resolvedClient.readHighWater();
+  remaining();
   if (
     highWaterAfter !== highWaterBefore ||
     BigInt(highWaterAfter) !== context.cursor

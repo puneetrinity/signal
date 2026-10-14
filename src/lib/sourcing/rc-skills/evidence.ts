@@ -3,6 +3,8 @@ import { evidenceSchema, factSchema, evidenceBytes, EVIDENCE_MAX_BYTES, Oversize
   type CanonicalEvidence } from '../rubric/evidence';
 import { normalizeSkillName } from '../rubric/skill-alternatives';
 import { observationSchema, type SkillObservation } from './contracts';
+import type {RcSnapshot} from './repository';
+import type {WithheldProfile} from '../rubric/evidence';
 
 /** The caller resolves public identity and checks privacy before this pure adapter.
  * Existing candidate-owned and provider facts are unioned, never overwritten.
@@ -20,8 +22,9 @@ export function addRcSkills(rawEvidence:CanonicalEvidence, rawObservation:SkillO
     scope:'public',organizationRef:null,sourceVersion:observation.contentHash,
     observedAt:observation.observedAt,validUntil:observation.validUntil,
   }));
-  const facts=[...new Map([...evidence.facts,...additions].map(fact=>[rankingHash(fact),fact])).values()]
-    .sort((a,b)=>byteCompare(rankingHash(a),rankingHash(b)));
+  // Preserve last-value deduplication, and reuse each fingerprint for sorting.
+  const keyed=new Map([...evidence.facts,...additions].map(fact=>[rankingHash(fact),fact] as const));
+  const facts=[...keyed.entries()].sort((a,b)=>byteCompare(a[0],b[0])).map(entry=>entry[1]);
   const result={...evidence,facts};
   const bytes=evidenceBytes({...result,presentationSource:'pool_enriched'});
   if(bytes>EVIDENCE_MAX_BYTES)throw new OversizedEvidenceError({
@@ -29,4 +32,27 @@ export function addRcSkills(rawEvidence:CanonicalEvidence, rawObservation:SkillO
     bytes,limit:EVIDENCE_MAX_BYTES,
   });
   return evidenceSchema.parse(result);
+}
+
+export function mergeSealedRcEvidence(snapshot:RcSnapshot):{evidence:CanonicalEvidence[];withheld:WithheldProfile[]}{
+ if(!snapshot.sealedAt||!snapshot.baseline)throw Error('RC_SEAL_REQUIRED');
+ const observations=new Map(snapshot.baseline.cache.map(c=>[c.identityHash,c.observation]));
+ for(const attempt of snapshot.attempts){
+  const raw=attempt.outcome?.observation;
+  if(raw&&['success','no_data','no_dispatch'].includes(attempt.state)){
+   const observation=observationSchema.parse(raw);
+   if(observation.identityHash!==attempt.identityHash)throw Error('RC_IDENTITY_CONFLICT');
+   const prior=observations.get(attempt.identityHash);
+   if(!prior||observation.outcome==='success'&&(prior.outcome!=='success'||Date.parse(observation.upstreamAt!)>Date.parse(prior.upstreamAt!)))
+    observations.set(attempt.identityHash,observation);
+  }
+ }
+ const identities=new Map(snapshot.baseline.identities.map(i=>[i.candidateId,i.identityHash]));
+ const withheld=[...snapshot.baseline.withheld],evidence:CanonicalEvidence[]=[];
+ for(const original of snapshot.baseline.evidence){
+  const identityHash=identities.get(original.candidateId),observation=identityHash?observations.get(identityHash):undefined;
+  try{evidence.push(observation&&identityHash?addRcSkills(original,observation,identityHash,snapshot.sealedAt):original);}
+  catch(error){if(!(error instanceof OversizedEvidenceError))throw error;withheld.push(error.record);}
+ }
+ return {evidence,withheld};
 }

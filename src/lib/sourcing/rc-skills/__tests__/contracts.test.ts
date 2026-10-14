@@ -1,10 +1,24 @@
 import {describe,expect,it} from 'vitest';
-import {cacheFinishSchema,cacheReadSchema,createObservation,observationSchema,rcCanonicalTime,rcTimestampMicros,rcValidUntil} from '../contracts';
+import {cacheFinishSchema,cacheReadSchema,createObservation,observationSchema,rcCanonicalTime,rcTimestampMicros,rcValidUntil,approvedRcFreeRejection,rcFreeRejectionSchema,createRcFinish} from '../contracts';
 import fixture from '../../../../../research/fixtures/rc-skills-v1.json';
 import {rankingHash} from '../../rubric/contracts';
 import {createRcMemoryClient} from '../memory';
 
 describe('Memory/Discover minimal RC wire',()=>{
+  it('has no enabled free-retry policy and refuses malformed proof envelopes',()=>{
+    const proof={version:1,kind:'rc_429_uncharged',httpStatus:429,providerCode:'synthetic-unpaid-429',creditsConsumed:0,
+      requestIdHash:'a'.repeat(64),retryAfterAt:'2026-10-13T00:00:00Z',policyVersion:'fixture-only-v1'};
+    expect(rcFreeRejectionSchema.safeParse(proof).success).toBe(true);
+    expect(approvedRcFreeRejection(proof)).toBe(null);
+    for(const delta of [{creditsConsumed:1},{httpStatus:503},{requestIdHash:'raw-request-id'},{retryAfterAt:'bad'},{secret:'forbidden'}]){
+      expect(rcFreeRejectionSchema.safeParse({...proof,...delta}).success).toBe(false);
+      expect(approvedRcFreeRejection({...proof,...delta})).toBe(null);
+    }
+    const outcome={kind:'rejected_free',upstreamAt:null,retryableFree:true,safeCode:'rate_limited',rejectionProof:proof,
+      quota:{minuteLimit:null,minuteLeft:null,resetAt:null,retryAfterMs:1000,dailyLeft:null}} as const;
+    expect(()=>createRcFinish({version:1,observation:null,observedCredits:1,outcome} as any)).toThrow();
+    expect(()=>createRcFinish({version:1,observation:null,observedCredits:0,outcome:{...outcome,kind:'uncertain'}} as any)).toThrow();
+  });
   it('matches the pinned Python hash with Unicode and microsecond timestamps',()=>{
     expect(observationSchema.parse(fixture.observation)).toEqual(fixture.observation);
     const {contentHash,...body}=fixture.observation;

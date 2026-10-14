@@ -65,6 +65,32 @@ async function requireSuccess(result, label) {
   }
 }
 
+// Feed COPY through the client: hosted PostgreSQL runs as a different OS user
+// and cannot read the runner's private temporary directories. Keep COPY (rather
+// than substituting INSERT) so the trigger and statement-atomicity proof remain.
+function copyBaselineFixture(rows) {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn('psql', ['-X', '--no-password', '--set=ON_ERROR_STOP=1'], {
+      env: { ...process.env, PGHOST: parsed.hostname, PGPORT: parsed.port || '5432',
+        PGUSER: decodeURIComponent(parsed.username), PGPASSWORD: decodeURIComponent(parsed.password),
+        PGDATABASE: databaseName, PGCONNECT_TIMEOUT: '5',
+        PGOPTIONS: '-c statement_timeout=10000 -c lock_timeout=2000' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    const timer = setTimeout(() => child.kill('SIGKILL'), 15_000);
+    child.stdout.resume();
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.stdin.on('error', () => {}); // Early psql refusal is checked by exit status.
+    child.on('error', () => { clearTimeout(timer); reject(new Error('COPY fixture client could not start')); });
+    child.on('close', code => {
+      clearTimeout(timer);
+      resolvePromise({ code, baselineRefused: stderr.includes('RC_BASELINE_INVALID') });
+    });
+    child.stdin.end(`COPY public.baseline_validation_probe(id,baseline) FROM STDIN;\n${rows}\\.\n`);
+  });
+}
+
 async function safetyProof() {
   await admin.$transaction(async (tx) => {
     await beginBoundedTransaction(tx, { readOnly: true });
@@ -187,6 +213,42 @@ try {
   `);
   assert(beforeAdoption[0].count === 0, 'Disposable product table was not empty before adoption');
 
+  // The existing local PG16/superuser safety proof permits COPY fixtures
+  // and replica-role checks here; the product runtime receives no new grant.
+  const baselineConcurrent=createPrisma(adminUrl);
+  try {
+    await admin.$executeRawUnsafe('CREATE TABLE public.baseline_validation_probe(id integer PRIMARY KEY,baseline jsonb,metadata integer DEFAULT 0)');
+    await admin.$executeRawUnsafe('CREATE TRIGGER baseline_validation_probe_guard AFTER INSERT OR UPDATE OF baseline ON public.baseline_validation_probe FOR EACH ROW EXECUTE FUNCTION public.signal_rc_validate_baseline_write()');
+    await admin.$executeRawUnsafe('ALTER TABLE public.baseline_validation_probe ENABLE ALWAYS TRIGGER baseline_validation_probe_guard');
+    const validCopy=await copyBaselineFixture('1\t{}\n');
+    assert(validCopy.code===0,'Valid COPY fixture failed');
+    const invalidCopy=await copyBaselineFixture('2\t{}\n3\t[]\n');
+    assert(invalidCopy.code!==0&&invalidCopy.baselineRefused,'Invalid COPY did not fail with RC_BASELINE_INVALID');
+    const [copyCount]=await admin.$queryRawUnsafe('SELECT count(*)::integer n FROM public.baseline_validation_probe');
+    assert(copyCount.n===1,'Failed COPY left a partial preceding row');
+    let replicaRefused=false;
+    try {await admin.$transaction(async tx=>{
+      await tx.$executeRawUnsafe("SET LOCAL session_replication_role='replica'");
+      await tx.$executeRawUnsafe("INSERT INTO public.baseline_validation_probe VALUES(4,'[]',0)");
+    });}catch(error){replicaRefused=String(error).includes('RC_BASELINE_INVALID');}
+    assert(replicaRefused,'Replica role bypassed baseline validation');
+    let unlock,locked;
+    const gate=new Promise(resolve=>{unlock=resolve;}),entered=new Promise(resolve=>{locked=resolve;});
+    const first=admin.$transaction(async tx=>{
+      await tx.$executeRawUnsafe("UPDATE public.baseline_validation_probe SET baseline='{\"changed\":true}' WHERE id=1");
+      locked();await gate;
+    });
+    await entered;let secondSettled=false;
+    const second=baselineConcurrent.$executeRawUnsafe('UPDATE public.baseline_validation_probe SET metadata=metadata+1 WHERE id=1').finally(()=>{secondSettled=true;});
+    try{await new Promise(resolve=>setTimeout(resolve,100));assert(!secondSettled,'Metadata update did not respect row lock');}
+    finally{unlock();await Promise.all([first,second]);}
+    const [preserved]=await admin.$queryRawUnsafe('SELECT baseline,metadata FROM public.baseline_validation_probe WHERE id=1');
+    assert(preserved.baseline.changed===true&&preserved.metadata===1,'Concurrent update lost data');
+  } finally {
+    await baselineConcurrent.$disconnect();
+    await admin.$executeRawUnsafe('DROP TABLE IF EXISTS public.baseline_validation_probe');
+  }
+
   await requireSuccess(
     await runNode('scripts/schema-control/provision-runtime-role.mjs', {
       ...commonIdentity,
@@ -221,6 +283,14 @@ try {
   const skillsMigration = '20261009010000_approved_skill_alternatives';
   const toleranceMigration = '20261011000000_rc_clock_tolerance';
   const stage1Migration = '20261012000000_ranking_lock_work';
+  const prepareMigration = '20261013000000_rc_prepare_transport';
+  const searchMigration = '20261014000000_rc_search_correction';
+  assert(historicalLock.migrations.at(-1).name === searchMigration, 'Unexpected RC search correction tail');
+  historicalLock.migrations.pop();
+  const prepareLock = structuredClone(historicalLock);
+  assert(historicalLock.migrations.at(-1).name === prepareMigration, 'Unexpected RC preparation tail');
+  historicalLock.migrations.pop();
+  const stage1Lock = structuredClone(historicalLock);
   assert(historicalLock.migrations.at(-1).name === stage1Migration, 'Unexpected ranking Stage1 tail');
   historicalLock.migrations.pop();
   const toleranceLock = structuredClone(historicalLock);
@@ -249,9 +319,10 @@ try {
     const [row] = await admin.$queryRawUnsafe(`SELECT count(*)::integer count FROM public.${table}`);
     assert(row.count === 0, 'Historical rehearsal requires empty RC tables');
   }
+  await admin.$executeRawUnsafe('DROP TRIGGER rc_baseline_write_guard ON public.rc_sourcing_runs');
   for (const signature of [...RC_FUNCTIONS,...RC_OWNER_FUNCTIONS]) await admin.$executeRawUnsafe(`DROP FUNCTION public.${signature}`);
   for (const table of [...RC_TABLES].reverse()) await admin.$executeRawUnsafe(`DROP TABLE public.${table}`);
-  for (const name of [stage1Migration,toleranceMigration,skillsMigration,rcMigration]) await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1',name);
+  for (const name of [searchMigration,prepareMigration,stage1Migration,toleranceMigration,skillsMigration,rcMigration]) await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1',name);
   for (const table of RANKING_TABLES) {
     const [row] = await admin.$queryRawUnsafe(`SELECT count(*)::integer count FROM public.${table}`);
     assert(row.count === 0, 'Historical rehearsal requires empty ranking tables');
@@ -267,7 +338,7 @@ try {
   }
   for (const signature of GOVERNED_FUNCTIONS) await admin.$executeRawUnsafe(`DROP FUNCTION public.${signature}`);
   for (const table of [...GOVERNED_TABLES].reverse()) await admin.$executeRawUnsafe(`DROP TABLE public.${table}`);
-  await admin.$executeRawUnsafe('ALTER TABLE public.job_sourcing_requests DROP COLUMN flow_run_id, DROP COLUMN artifact_hash, DROP COLUMN protocol_version');
+  await admin.$executeRawUnsafe('ALTER TABLE public.job_sourcing_requests DROP COLUMN flow_run_id, DROP COLUMN artifact_hash, DROP COLUMN protocol_version, DROP COLUMN rc_retrieval_config');
   await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1', governedMigration);
   await admin.$executeRawUnsafe('DROP INDEX public.candidate_privacy_rebuild_lease_idx');
   await admin.$executeRawUnsafe(`
@@ -342,8 +413,33 @@ try {
     await requireSuccess(await runNode('scripts/schema-control/migrate-release.mjs',{...releaseEnvironment,
       SIGNAL_SCHEMA_CONTROL_TEST_ROOT:historicalRoot,SIGNAL_SCHEMA_DISPOSABLE_SINGLE_CREDENTIAL:'1'}),label);
   }
-  await requireSuccess(await runNode('scripts/schema-control/migrate-release.mjs', releaseEnvironment),
+  await cp(resolve(ROOT_DIR,'prisma/migrations',stage1Migration),resolve(historicalRoot,'prisma/migrations',stage1Migration),{recursive:true});
+  await writeFile(resolve(historicalRoot,'prisma/migrations.lock.json'),`${JSON.stringify(stage1Lock,null,2)}\n`);
+  await requireSuccess(await runNode('scripts/schema-control/migrate-release.mjs', {...releaseEnvironment,
+    SIGNAL_SCHEMA_CONTROL_TEST_ROOT:historicalRoot,SIGNAL_SCHEMA_DISPOSABLE_SINGLE_CREDENTIAL:'1'}),
     '29-to-30 ranking Stage1 release');
+  // Simulate the default-grant window observed at D3 release. Migration31 must
+  // close private-helper access itself, before the provisioner is run again.
+  await admin.$executeRawUnsafe(`ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO ${RUNTIME_ROLE}`);
+  try {
+    await cp(resolve(ROOT_DIR,'prisma/migrations',prepareMigration),resolve(historicalRoot,'prisma/migrations',prepareMigration),{recursive:true});
+    await writeFile(resolve(historicalRoot,'prisma/migrations.lock.json'),`${JSON.stringify(prepareLock,null,2)}\n`);
+    await requireSuccess(await runNode('scripts/schema-control/migrate-release.mjs', {...releaseEnvironment,
+      SIGNAL_SCHEMA_CONTROL_TEST_ROOT:historicalRoot,SIGNAL_SCHEMA_DISPOSABLE_SINGLE_CREDENTIAL:'1'}),
+      '30-to-31 RC preparation release');
+    for(const signature of ['signal_rc_prepare_rebuild(text,jsonb)','signal_rc_prepare_transport(jsonb)']){
+      const [rights]=await admin.$queryRawUnsafe('SELECT has_function_privilege($1,$2,\'EXECUTE\') allowed',RUNTIME_ROLE,signature);
+      assert(rights.allowed===false,'New RC helper leaked default EXECUTE before provisioning');
+    }
+    await requireSuccess(await runNode('scripts/schema-control/migrate-release.mjs',releaseEnvironment),
+      '31-to-32 direct fetch and compact reads release');
+    const [workRights]=await admin.$queryRawUnsafe("SELECT has_function_privilege($1,'signal_rc_work(text,uuid,jsonb)','EXECUTE') allowed",RUNTIME_ROLE);
+    assert(workRights.allowed===false,'New RC wrapper leaked default EXECUTE before provisioning');
+    const [baselineRights]=await admin.$queryRawUnsafe("SELECT has_function_privilege($1,'signal_rc_validate_baseline_write()','EXECUTE') allowed",RUNTIME_ROLE);
+    assert(baselineRights.allowed===false,'Baseline trigger helper leaked default EXECUTE before provisioning');
+    const [baselineGuard]=await admin.$queryRawUnsafe("SELECT tgenabled FROM pg_trigger WHERE tgrelid='public.rc_sourcing_runs'::regclass AND tgname='rc_baseline_write_guard'");
+    assert(baselineGuard?.tgenabled==='A','Baseline trigger must enforce writes in replica mode too');
+  } finally { await admin.$executeRawUnsafe(`ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM ${RUNTIME_ROLE}`); }
   await requireSuccess(
     await runNode('scripts/schema-control/provision-runtime-role.mjs', {
       ...commonIdentity, DIRECT_URL: adminUrl,

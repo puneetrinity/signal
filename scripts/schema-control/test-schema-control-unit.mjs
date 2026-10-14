@@ -1,6 +1,7 @@
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { ROOT_DIR } from '../lib/database-bootstrap.mjs';
 import { assertRuntimeEnvironment, resolveReleaseEnvironment,
   safeOperationalMessage } from './constants.mjs';
@@ -12,12 +13,14 @@ function assert(condition, message) {
 }
 
 const migrations = await loadMigrationLock();
-assert(migrations.length === 30, `Expected 30 locked migrations, found ${migrations.length}`);
-assert(migrations.at(-5).name === '20261008000000_rubric_evidence_isolation', 'Expected preserved evidence isolation migration');
-assert(migrations.at(-4).name === '20261009000000_rc_skills', 'Expected preserved RC skills migration');
-assert(migrations.at(-3).name === '20261009010000_approved_skill_alternatives', 'Expected preserved approved skill alternatives migration');
-assert(migrations.at(-2).name === '20261011000000_rc_clock_tolerance', 'Expected preserved RC clock tolerance migration');
-assert(migrations.at(-1).name === '20261012000000_ranking_lock_work', 'Expected ranking lock work at the locked tail');
+assert(migrations.length === 32, `Expected 32 locked migrations, found ${migrations.length}`);
+assert(migrations.at(-7).name === '20261008000000_rubric_evidence_isolation', 'Expected preserved evidence isolation migration');
+assert(migrations.at(-6).name === '20261009000000_rc_skills', 'Expected preserved RC skills migration');
+assert(migrations.at(-5).name === '20261009010000_approved_skill_alternatives', 'Expected preserved approved skill alternatives migration');
+assert(migrations.at(-4).name === '20261011000000_rc_clock_tolerance', 'Expected preserved RC clock tolerance migration');
+assert(migrations.at(-3).name === '20261012000000_ranking_lock_work', 'Expected preserved ranking lock work');
+assert(migrations.at(-2).name === '20261013000000_rc_prepare_transport', 'Expected preserved RC prepare transport');
+assert(migrations.at(-1).name === '20261014000000_rc_search_correction', 'Expected RC search correction at the locked tail');
 const validRows = migrations.map((entry, index) => ({
   migration_name: entry.name,
   checksum: entry.sha256,
@@ -177,5 +180,18 @@ try {
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });
 }
+
+// Runtime import/catalog checks must work without CI source or layout manifests.
+const rcRuntimeOnly = await mkdtemp(join(tmpdir(),'signal-rc-runtime-only-'));
+try {
+ const target=join(rcRuntimeOnly,'check-rc-skills.mjs');
+ await cp(resolve(ROOT_DIR,'scripts/check-rc-skills.mjs'),target);
+ const runtime=await import(pathToFileURL(target).href);
+ let calls=0;
+ await runtime.assertRcCatalog({$queryRawUnsafe:async()=>++calls===1?[{digest:runtime.RC_CATALOG_SHA256}]:[{ok:true}]});
+ assert(calls===2,'Runtime RC catalog/ACL checks were skipped');
+ let refused=false;try{runtime.checkRcSkillsSource();}catch{refused=true;}
+ assert(refused,'CI source check unexpectedly accepted absent source files');
+} finally { await rm(rcRuntimeOnly,{recursive:true,force:true}); }
 
 console.log('[Schema control unit] Manifest, ledger, redaction, caller census and guard mutations passed');

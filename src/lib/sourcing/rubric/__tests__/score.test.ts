@@ -17,6 +17,30 @@ function evidence(candidateId:string,years=8,skills=['Java','Kafka'],title='Seni
   }});
 }
 describe('governed rubric scoring',()=>{
+  it('reuses only pure skill text, preserving per-person eligibility and input data',()=>{
+    const c=createRankingContract(id(70),'a'.repeat(64),{schemaVersion:3,compilerVersion:3,taxonomyVersion:3,criteria:[
+      criterion(71,'skill',{kind:'accepted_skills',primary:'Python',alternatives:[]}),
+      criterion(72,'skill',{kind:'accepted_skills',primary:'Rust',alternatives:[]}),
+    ]});
+    const a=evidence('memo-a',8,['Ｐｙｔｈｏｎ','Rust']);
+    const b={...evidence('memo-b',8,['Ｐｙｔｈｏｎ','Rust']),facts:a.facts.map(f=>({...f,observedAt:'2026-01-01T00:00:00.000Z'}))};
+    const pool=[a,b],snapshot=JSON.stringify(pool);
+    const together=rankEvidence(c,pool,asOf);
+    for(const item of together.items)expect(item).toEqual(scoreEvidence(c,pool.find(e=>e.candidateId===item.candidateId)!,asOf));
+    expect(together.items.find(x=>x.candidateId==='memo-a')?.N).toBe(6);
+    expect(together.items.find(x=>x.candidateId==='memo-b')?.N).toBe(0);
+    expect(JSON.stringify(pool)).toBe(snapshot);
+    expect(()=>rankEvidence(c,[a,{...b,organizationRef:'2',facts:[{...a.facts[0]!,scope:'organization',organizationRef:'1'}]}],asOf)).toThrow();
+  });
+  it('keeps identical scoring after the per-call normalization cache is filled',()=>{
+    const c=createRankingContract(id(80),'a'.repeat(64),{schemaVersion:3,compilerVersion:3,taxonomyVersion:3,criteria:[
+      criterion(81,'skill',{kind:'accepted_skills',primary:'Python',alternatives:[]}),
+    ]});
+    const pool=Array.from({length:48},(_,n)=>evidence(`bounded-${n}`,8,[...Array.from({length:100},(_,i)=>`skill-${n}-${i}`),'Ｐｙｔｈｏｎ']));
+    const ranked=rankEvidence(c,pool,asOf);
+    for(const item of ranked.items)expect(item).toEqual(scoreEvidence(c,pool.find(e=>e.candidateId===item.candidateId)!,asOf));
+    expect(ranked.items.every(i=>i.N===3)).toBe(true);
+  });
   it('unions positive skill evidence across candidate and provider sources',()=>{
     const e=evidence('a',11);
     const own={...e.facts.find(f=>f.field==='skill')!,value:'SQL',kind:'candidate_provided' as const};
