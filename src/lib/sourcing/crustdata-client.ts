@@ -442,8 +442,10 @@ async function searchPeopleMeasured(
     : Number.isFinite(Number(data.total_count)) ? Number(data.total_count) : null;
   // The standard total_count is exact; an explicit lower-bound/approximate or
   // malformed relation must never authorize a capacity-filling purchase.
-  const providerTotalRelation=providerTotal===null?null:data.total_count_relation===undefined?'eq':
-    ['eq','gte','approximate'].includes(data.total_count_relation)?data.total_count_relation:null;
+  // Crustdata sends total_count_relation:null on ordinary responses; null means "not stated", like absent.
+  const statedRelation=data.total_count_relation===null?undefined:data.total_count_relation;
+  const providerTotalRelation=providerTotal===null?null:statedRelation===undefined?'eq':
+    ['eq','gte','approximate'].includes(statedRelation)?statedRelation:null;
   log.info({ count: deduped.length, total: providerTotal, requested: limit }, 'Crustdata results');
   return {
     profiles: deduped,
