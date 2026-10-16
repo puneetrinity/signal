@@ -428,6 +428,11 @@ describe('preview evidence, not invented zero counts or costs',()=>{
     expect(previewObservation({total_count:0,profiles:[{private:'never retained'}]},'0')).toEqual({count:0,countRelation:'approximate',creditsUsed:0});
     expect(previewObservation({total_count:'1200',total_count_relation:'gte'},'0.03')).toEqual({count:1200,countRelation:'gte',creditsUsed:0.03});
   });
+  it('reads Crustdata\'s null relation as not stated (real 2026-10-16 response shape), still refusing unknown relations',()=>{
+    const real={profiles:[{crustdata_person_id:1}],next_cursor:'c',total_count:14,total_count_relation:null,remarks:null};
+    expect(previewObservation(real,'0.03')).toEqual({count:14,countRelation:'approximate',creditsUsed:0.03});
+    for(const relation of ['exact','',0,false])expect(()=>previewObservation({total_count:14,total_count_relation:relation},'0.03')).toThrow('GOVERNED_PREVIEW_INVALID');
+  });
   it.each([null,undefined,'',-1,1.5,'1.5',true,Number.MAX_SAFE_INTEGER+1])('refuses invalid total case %#',total=>{
     expect(()=>previewObservation({total_count:total},'0.03')).toThrow('EVIDENCE_UNAVAILABLE');
   });

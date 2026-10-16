@@ -81,7 +81,9 @@ export function previewObservation(body: unknown, creditsHeader: string | null) 
   const count = typeof raw === 'number' ? raw : typeof raw === 'string' && /^\d+$/.test(raw) ? Number(raw) : NaN;
   const credits = creditsHeader !== null && /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(creditsHeader) ? Number(creditsHeader) : NaN;
   if (!Number.isSafeInteger(count) || count < 0 || !Number.isFinite(credits) || credits < 0 || credits > 0.03) throw Error('GOVERNED_PREVIEW_EVIDENCE_UNAVAILABLE');
-  const relation = (body as Record<string,unknown>).total_count_relation;
+  // Crustdata sends total_count_relation:null on ordinary responses; null means "not stated", like absent.
+  const rawRelation = (body as Record<string,unknown>).total_count_relation;
+  const relation = rawRelation === null ? undefined : rawRelation;
   if (relation !== undefined && !['eq','gte','approximate'].includes(String(relation))) throw Error('GOVERNED_PREVIEW_INVALID');
   return { count, countRelation: relation === undefined ? 'approximate' : relation as 'eq'|'gte'|'approximate', creditsUsed: credits };
 }

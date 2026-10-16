@@ -72,6 +72,14 @@ describe('Crustdata person search result contract', () => {
     expect(fetchMock.mock.calls[0]?.[1]).not.toHaveProperty('redirect');
     expect(fetchMock.mock.calls[0]?.[1]).not.toHaveProperty('signal');
   });
+  it.each([[null,'eq'],[undefined,'eq'],['gte','gte'],['approximate','approximate'],['exact',null]])('governed relation %s is recorded as %s (Crustdata sends null on ordinary responses)',async(relation,expected)=>{
+    vi.stubEnv('CRUSTDATA_API_KEY','test-key');
+    vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>({profiles:[],total_count:14,...(relation===undefined?{}:{total_count_relation:relation})})}));
+    const {searchPeople}=await import('../crustdata-client');
+    const result=await searchPeople(requirements,300,{rankingProtocol:2});
+    expect(result.providerTotal).toBe(14);
+    expect(result.providerTotalRelation).toBe(expected);
+  });
   it('does not dispatch if shared capacity cannot be established',async()=>{
     vi.stubEnv('CRUSTDATA_API_KEY','test-key');capacity.mockRejectedValue(Error('CRUSTDATA_RATE_UNAVAILABLE'));
     const transport=vi.fn();vi.stubGlobal('fetch',transport);
