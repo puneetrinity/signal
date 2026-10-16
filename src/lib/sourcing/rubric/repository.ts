@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { measureSourcingStage } from '../stage-timings';
 import { canonical, rankingContractSchema, type RankingContract } from './contracts';
 import { type WithheldProfile, type CanonicalEvidence } from './evidence';
 import { retryRankingBusy, RANKING_RETRY } from './contention';
@@ -61,7 +62,7 @@ export class RankingRepository {
       },{maxWait:2000,timeout:35000});
     });
     const run=async()=>{const rows=await query(statements[operation],args);return rows[0]?.result??null;};
-    return operation==='read'?run():retryRankingBusy(operation,run);
+    return measureSourcingStage(`ranking_${operation}`,()=>operation==='read'?run():retryRankingBusy(operation,run));
   }
   async read(tenantId:string,flowRunId:string,revisionId:string):Promise<RankingRead> {
     const value=rankingReadSchema.parse(await this.call('read',[tenantId,flowRunId,revisionId]));
@@ -77,7 +78,7 @@ export class RankingRepository {
   }
   private async completeClaim(tenantId:string,flowRunId:string,contract:RankingContract,raw:unknown,
     expected?:{evidence:readonly CanonicalEvidence[];withheld:readonly WithheldProfile[]}):Promise<RankingRead> {
-    const claim=await runRankingComputation({kind:'claim',input:{contract,claim:raw,expected}});
+    const claim=await measureSourcingStage('ranking_compute',()=>runRankingComputation({kind:'claim',input:{contract,claim:raw,expected}}));
     if(claim.kind!=='computed')throw Error('RANKING_COMPUTE_INVALID');
     if(claim.state==='reserved') {
       const receipt=z.object({state:z.literal('ready'),revisionId:uuid,outputHash:hash,replayed:z.boolean()}).strict()
@@ -90,7 +91,7 @@ export class RankingRepository {
   }
   async publish(input:{tenantId:string;flowRunId:string;contract:RankingContract;executionAttemptId:string;processingLeaseId:string;
     evidence:readonly CanonicalEvidence[];withheld?:readonly WithheldProfile[];sourceTypes:ReadonlyMap<string,RankingSourceType>}):Promise<RankingRead> {
-    const prepared=await runRankingComputation({kind:'prepare',input:{...input,sourceTypes:[...input.sourceTypes]}});
+    const prepared=await measureSourcingStage('ranking_prepare',()=>runRankingComputation({kind:'prepare',input:{...input,sourceTypes:[...input.sourceTypes]}}));
     if(prepared.kind!=='prepared')throw Error('RANKING_COMPUTE_INVALID');
     const {contract}=prepared;let {evidence,withheld,command}=prepared;
     let raw:unknown;

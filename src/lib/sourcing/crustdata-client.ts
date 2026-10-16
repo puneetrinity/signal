@@ -1,4 +1,5 @@
 import { createLogger } from '@/lib/logger';
+import { timedSourcingFunction } from './stage-timings';
 import { type JobRequirements } from './jd-digest';
 import {acquireCrustdataAccountCapacity,CrustdataNoDispatchError} from './crustdata-rate-gate';
 
@@ -363,7 +364,8 @@ export function buildCrustdataPreviewRequest(requirements: JobRequirements) {
   return {...requestBody,fields:['crustdata_person_id']};
 }
 
-export async function searchPeople(
+export const searchPeople = timedSourcingFunction('crustdata_provider', searchPeopleMeasured);
+async function searchPeopleMeasured(
   requirements: JobRequirements,
   limit: number = 300,
   options?: {excludePersonIds?: number[];beforeDispatch?:()=>Promise<void>;capacityAcquired?:boolean;governed?:boolean;rankingProtocol?:2},

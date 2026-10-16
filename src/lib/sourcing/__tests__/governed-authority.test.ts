@@ -16,6 +16,7 @@ import { artifactHash, governedEnabled, governedSourceSchema, parseGovernedSourc
 import {GovernedRepository,runGovernedPreview} from '../governed-authority';
 import {RankingRepository} from '../rubric/repository';
 import {RcRepository} from '../rc-skills/repository';
+import * as timingStore from '../stage-timings-store';
 const id='10000000-0000-4000-8000-000000000001', hash='a'.repeat(64);
 const artifact={compilerVersion:'1' as const,digestVersion:3 as const,jobContext:{title:'Backend Engineer',location:'Bengaluru',jdDigest:'{}',skills:['Python'],goodToHaveSkills:[]},
   criterionMap:[{criterionId:id,use:'assessment' as const,field:null}],briefVersionId:id,materialHash:hash,sourceHash:hash,digestBasisHash:hash,previewQueryHash:hash,queryHash:hash};
@@ -157,6 +158,27 @@ describe('actual sourcing worker failure handling',()=>{
       callbackUrl:command.callbackUrl,acquisitionGeneration:1,executionAttemptId:id,resolvedTrack:{track:'tech'}}} as unknown as Parameters<typeof processSourcingJob>[0]);
   }
   const operations=()=>workerMocks.update.mock.calls.map(([arg])=>arg);
+  it.each(['saved','stale','unavailable'])('timings %s never changes published success or dispatches again',async state=>{
+    const save=vi.spyOn(timingStore,'persistSourcingTimings');
+    if(state==='unavailable')save.mockRejectedValue(Error('private database error'));
+    else save.mockResolvedValue(state==='saved');
+    const calls=repository();
+    calls.mockImplementation(async op=>op==='execution'?{protocolVersion:2,flowRunId:id,rankingContract:{fixture:true}}:null);
+    vi.spyOn(RankingRepository.prototype,'resume').mockResolvedValue({items:[]} as never);
+    expect(await run(0)).toMatchObject({status:'complete',candidateCount:0});
+    expect(workerMocks.callback).toHaveBeenCalledOnce();
+    expect(workerMocks.orchestrate).not.toHaveBeenCalled();
+    expect(save).toHaveBeenCalledWith(expect.anything(),{
+      requestId:id,tenantId:'fixture',generation:1,executionAttemptId:id,
+      processingLeaseId:operations()[0].data.processingLeaseId},
+      expect.objectContaining({version:1,scope:'latest_worker_invocation'}));
+  });
+  it('never writes timing evidence for an execution it failed to claim',async()=>{
+    const save=vi.spyOn(timingStore,'persistSourcingTimings');
+    repository();workerMocks.update.mockResolvedValueOnce({count:0});
+    expect(await run()).toMatchObject({error:'Sourcing execution was superseded'});
+    expect(save).not.toHaveBeenCalled();
+  });
   it.each(['cancelled','retry','stalled'] as const)('RC failure uses database %s decision instead of unconditional stall',async state=>{
     vi.stubEnv('RC_SKILLS_ENABLED','true');
     const bound={protocolVersion:2,flowRunId:id,rankingContract:{payload:{schemaVersion:3},contractHash:hash}};

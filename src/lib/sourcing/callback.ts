@@ -3,6 +3,7 @@
  */
 
 import { SignJWT, importPKCS8 } from 'jose';
+import { timedSourcingFunction } from './stage-timings';
 import { v4 as uuidv4 } from 'uuid';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/prisma';
@@ -153,7 +154,8 @@ async function signCallbackJWT(
     .sign(key);
 }
 
-export async function deliverCallback(
+export const deliverCallback = timedSourcingFunction('callback_delivery', deliverCallbackMeasured);
+async function deliverCallbackMeasured(
   requestId: string,
   tenantId: string,
   callbackUrl: string,

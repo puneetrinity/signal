@@ -1,4 +1,5 @@
 import { createHash } from "crypto";
+import { timedSourcingFunction } from './stage-timings';
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { toJsonValue } from "@/lib/prisma/json";
@@ -580,7 +581,8 @@ export const prismaCrustdataReceiptStore: CrustdataReceiptStore = {
   },
 };
 
-export async function acquireCrustdataSearchForRequest(
+export const acquireCrustdataSearchForRequest = timedSourcingFunction('crustdata_acquisition', acquireCrustdataSearchForRequestMeasured);
+async function acquireCrustdataSearchForRequestMeasured(
   input: AcquireCrustdataSearchInput,
 ): Promise<AcquiredCrustdataSearch> {
   const { searchPeople } = await import("./crustdata-client");
