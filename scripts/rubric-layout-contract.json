@@ -380,7 +380,7 @@
     "src/lib/sourcing/rubric/contracts.ts": "263b711c7749c3267cc1a35b6c0f0000925d07c376b4d797fc0ef711672c153d",
     "src/lib/sourcing/rubric/score.ts": "64710b0ac18bfe93397589a8e09b6062567a7994302f89d60085318dce1478e7",
     "src/lib/sourcing/rubric/experience.ts": "130c2bfc52c3bf1384b340095c1e3c25bb9f36c1f01647cd3487153e0a0abbc3",
-    "src/lib/sourcing/rubric/repository.ts": "2945942f14eb757950f10339aba9d2fc8f1acc453bcda8b590ea28d3ea2bc2e4",
+    "src/lib/sourcing/rubric/repository.ts": "89d1431dfbd0c412696e812bd92681a12b4fd3fb590621f1b4784694757e2267",
     "src/lib/sourcing/rubric/ranking-compute-worker.ts": "cdc6dda68be18bf7cc861a04013d18f6e0fa0a2bcf0e9cfe6f203163d157e79b"
   },
   "claimRegionSha256": "ea51db7939d6c3df879ce18ffdd0f2f803c09fa16333b26f17f08b12415640fa",

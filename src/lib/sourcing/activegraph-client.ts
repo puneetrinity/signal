@@ -1,4 +1,5 @@
 import { JobRequirements } from './jd-digest';
+import { timedSourcingFunction } from './stage-timings';
 import type { CandidateForRanking } from './ranking-new';
 import type { CrustdataProfileResponse } from './crustdata-client';
 import { signActiveGraphJWT, signSourcedCandidateIngestJWT } from './activegraph-auth';
@@ -525,7 +526,8 @@ export async function searchGlobalPoolResponse(
  * Explicit public-v1 vector surface. The separate method prevents a rollout
  * flag from silently changing legacy tenant-private retrieval semantics.
  */
-export async function searchPublicGlobalPool(
+export const searchPublicGlobalPool = timedSourcingFunction('memory_public', searchPublicGlobalPoolMeasured);
+async function searchPublicGlobalPoolMeasured(
   requirements: JobRequirements,
   tenantId: string,
   limit: number = HOME_POOL_LIMIT,
@@ -542,7 +544,8 @@ export async function searchPublicGlobalPool(
   );
 }
 
-export async function searchTenantPrivateCandidates(
+export const searchTenantPrivateCandidates = timedSourcingFunction('memory_private', searchTenantPrivateCandidatesMeasured);
+async function searchTenantPrivateCandidatesMeasured(
   requirements: JobRequirements,
   tenantId: string,
   limit: number = HOME_POOL_LIMIT,
@@ -738,7 +741,8 @@ export async function searchGlobalPool(
  * coarse market. A null result means Memory was unavailable; an empty ID list
  * means Memory answered and knows no eligible public identities.
  */
-export async function getPublicMarketExclusions(
+export const getPublicMarketExclusions = timedSourcingFunction('exclusions', getPublicMarketExclusionsMeasured);
+async function getPublicMarketExclusionsMeasured(
   tenantId: string,
   market: PublicMarket,
   freshDays: number,
@@ -1474,7 +1478,8 @@ export async function ingestCandidate(
   return result.success;
 }
 
-export async function ingestCandidateBatchWithResults(
+export const ingestCandidateBatchWithResults = timedSourcingFunction('memory_ingestion', ingestCandidateBatchWithResultsMeasured);
+async function ingestCandidateBatchWithResultsMeasured(
   tenantId: string,
   candidates: IngestableCandidate[],
   requestId?: string,

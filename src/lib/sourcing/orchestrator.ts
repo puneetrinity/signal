@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/prisma';
+import { timedSourcingFunction } from './stage-timings';
 import { extractLinkedInIdFromUrl } from './discovery';
 import { Prisma } from '@prisma/client';
 import { redis } from '@/lib/redis/client';
@@ -483,7 +484,8 @@ async function releaseUnusedReservedQueries(
   }
 }
 
-export async function runSourcingOrchestrator(
+export const runSourcingOrchestrator = timedSourcingFunction('orchestration', runSourcingOrchestratorMeasured);
+async function runSourcingOrchestratorMeasured(
   requestId: string,
   tenantId: string,
   jobContext: SourcingJobContextInput,

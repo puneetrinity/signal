@@ -5,6 +5,8 @@
  */
 
 import { randomUUID } from 'crypto';
+import { withSourcingTimings, currentSourcingTimings } from '../stage-timings';
+import { persistSourcingTimings } from '../stage-timings-store';
 import { Worker, Job, DelayedError } from 'bullmq';
 import { prisma } from '@/lib/prisma';
 import { createLogger } from '@/lib/logger';
@@ -32,6 +34,13 @@ import { getRedisConnection, getSourcingQueue, SOURCING_QUEUE_NAME } from './pro
 // ---------------------------------------------------------------------------
 
 export async function processSourcingJob(
+  job: Job<SourcingJobData, SourcingJobResult>,
+  token?: string,
+): Promise<SourcingJobResult> {
+  return withSourcingTimings(()=>processSourcingJobMeasured(job,token));
+}
+
+async function processSourcingJobMeasured(
   job: Job<SourcingJobData, SourcingJobResult>,
   token?: string,
 ): Promise<SourcingJobResult> {
@@ -494,6 +503,18 @@ export async function processSourcingJob(
     };
   } finally {
     if(rcHeartbeat)clearInterval(rcHeartbeat);
+    // Diagnostics only. Do not reopen a released lease, overwrite another
+    // attempt's data, retry a purchase, or turn publication into a failure.
+    const timings=currentSourcingTimings();
+    if(ownsLease && job.data.kind==='source' && timings &&
+      routeFence.acquisitionGeneration!==undefined && routeFence.executionAttemptId) {
+      try {
+        const saved=await persistSourcingTimings(prisma,{requestId,tenantId,
+          generation:routeFence.acquisitionGeneration,executionAttemptId:routeFence.executionAttemptId,
+          processingLeaseId},timings);
+        if(!saved)log.warn('SOURCING_TIMINGS_LEASE_NOT_OWNED');
+      } catch { log.warn('SOURCING_TIMINGS_NOT_SAVED'); }
+    }
   }
 }
 

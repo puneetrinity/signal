@@ -1,5 +1,6 @@
 import {createRcFinish,createObservation,observationSchema,rcValidUntil,approvedRcFreeRejection,type SkillObservation,type RcFinish} from './contracts';
 import {RC_LIMITS} from './config';
+import { timedSourcingFunction, measureSourcingStage } from '../stage-timings';
 import {RcProviderError,type createRcProvider,type CheckResult,type FetchResult} from './provider';
 import {rcBaselineSchema,type RcBaseline,type RcRepository,type RcSnapshot,type RcWorkerIdentity} from './repository';
 import type {RcWorkSnapshot} from './rc-compute-worker';
@@ -25,7 +26,8 @@ function providerQuota(result:CheckResult|FetchResult):RcFinish['outcome']['quot
 /** Read reusable observations before freezing the first RC stage snapshot. No
  * provider call occurs here. Once prepare commits, retries use only that frozen
  * cache view: late cache writes never reshuffle the published list. */
-export async function freezeRcBaseline(input:{identity:RcWorkerIdentity;baseline:RcBaseline;receiptIds:string[];
+export const freezeRcBaseline = timedSourcingFunction('rc_preparation', freezeRcBaselineMeasured);
+async function freezeRcBaselineMeasured(input:{identity:RcWorkerIdentity;baseline:RcBaseline;receiptIds:string[];
  repository:Repository;memory:RcMemoryClient;now?:()=>number}):Promise<RcWorkSnapshot> {
  const read=()=>input.repository.readWork?input.repository.readWork(input.identity):input.repository.read(input.identity.tenantId,input.identity.flowRunId);
  const resumed=await read();
@@ -77,7 +79,8 @@ export type RcTick={state:'waiting';nextWorkAt:number}|{state:'needs_attention'}
  * existing sourcing worker persists/schedules waits and renews its own lease.
  * Every dispatch is granted once by SQL; replay never invokes a paid fetch.
  */
-export async function runRcTick(input:{identity:RcWorkerIdentity;repository:Repository;
+export const runRcTick = timedSourcingFunction('rc_tick', runRcTickMeasured);
+async function runRcTickMeasured(input:{identity:RcWorkerIdentity;repository:Repository;
  provider:()=>Provider;privacyCursor:()=>Promise<number>;now?:()=>number}):Promise<RcTick> {
  const now=input.now??Date.now,{identity,repository}=input;
  const read=()=>repository.readWork?repository.readWork(identity):repository.read(identity.tenantId,identity.flowRunId);
@@ -126,7 +129,7 @@ export async function runRcTick(input:{identity:RcWorkerIdentity;repository:Repo
   let result:RcFinish;
   try{
    if(operation==='CHECK'){
-    const check=await provider.check(person.url,Date.parse(granted.deadlineAt));
+    const check=await measureSourcingStage('rc_provider_check',()=>provider.check(person.url,Date.parse(granted.deadlineAt)));
     const observation=check.outcome==='eligible'?null:createObservation({version:1,outcome:check.outcome,
      identityHash:person.identityHash,skills:[],upstreamAt:check.upstreamAt,observedAt:new Date(now()).toISOString(),
      validUntil:null,timestampSource:'check_last_update'});
@@ -134,7 +137,7 @@ export async function runRcTick(input:{identity:RcWorkerIdentity;repository:Repo
    }else{
     const checkedAt=checked?.outcome?.upstreamAt;
     if(!direct&&typeof checkedAt!=='string')throw Error('RC_CHECK_SNAPSHOT_CONFLICT');
-    const fetched=await provider.fetchSkills(person.url,Date.parse(granted.deadlineAt),granted.maximumCredits,direct?'direct':'legacy');
+    const fetched=await measureSourcingStage('rc_provider_fetch',()=>provider.fetchSkills(person.url,Date.parse(granted.deadlineAt),granted.maximumCredits,direct?'direct':'legacy'));
     if(direct&&(fetched.outcome===undefined||fetched.upstreamAt===undefined))throw Error('RC_FETCH_SNAPSHOT_CONFLICT');
     const upstreamAt=direct?fetched.upstreamAt!:checkedAt as string;
     const outcome=direct?fetched.outcome!:(fetched.skills.length?'success':'no_skills');
@@ -227,9 +230,9 @@ export async function completeRcRanking(identity:RcWorkerIdentity,contract:Ranki
    if(tick.state==='sealed'){sealed=tick.snapshot;break;}
    // Short waits keep worker cancellation/health observable; the original DB
    // deadline and account next-work marker survive a killed process.
-   await new Promise(resolve=>setTimeout(resolve,Math.max(25,Math.min(1000,tick.nextWorkAt-Date.now()))));
+   await measureSourcingStage('rc_wait',()=>new Promise(resolve=>setTimeout(resolve,Math.max(25,Math.min(1000,tick.nextWorkAt-Date.now())))));
   }
-  const frozen=await repository.mergedEvidence(sealed);
+  const frozen=await measureSourcingStage('rc_merge',()=>repository.mergedEvidence(sealed));
    // Admission here only prepares the input. Claim rechecks it atomically and
    // requests bounded re-preparation if it changed; finish suppresses withdrawal.
    // No outer transaction: scoring must not hold the system-wide privacy lock.
