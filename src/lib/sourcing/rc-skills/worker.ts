@@ -1,5 +1,6 @@
 import {createRcFinish,createObservation,observationSchema,rcValidUntil,approvedRcFreeRejection,type SkillObservation,type RcFinish} from './contracts';
 import {RC_LIMITS} from './config';
+import { createLogger } from '@/lib/logger';
 import { timedSourcingFunction, measureSourcingStage } from '../stage-timings';
 import {RcProviderError,type createRcProvider,type CheckResult,type FetchResult} from './provider';
 import {rcBaselineSchema,type RcBaseline,type RcRepository,type RcSnapshot,type RcWorkerIdentity} from './repository';
@@ -8,6 +9,7 @@ import {RcMemoryError,type RcMemoryClient} from './memory';
 export {mergeSealedRcEvidence as sealedRcEvidence} from './evidence';
 import type {RankingContract} from '../rubric/contracts';
 import type {RankingRead} from '../rubric/repository';
+const rcLog=createLogger('rc-skills-worker');
 
 type Repository=Pick<RcRepository,'read'|'claim'|'dispatch'|'finish'|'seal'|'prepare'|'skipCache'>&Partial<Pick<RcRepository,'readWork'|'beginPreparation'|'finishPreparation'>>;
 type Provider=ReturnType<typeof createRcProvider>;
@@ -150,6 +152,10 @@ async function runRcTickMeasured(input:{identity:RcWorkerIdentity;repository:Rep
    // Never put repository.finish in this try: an acknowledgement failure must
    // not replace a successful provider outcome with a conflicting second one.
    const known=error instanceof RcProviderError?error:null;
+   // Diagnostic only: fixed classes and the internal attempt id. No URL, body,
+   // header values, skills or person identifiers ever reach this line.
+   rcLog.warn({event:'rc_lookup_failed',operation,attemptId:claimed.attemptId,code:known?.code??'unexpected',
+    detail:known?.detail??(known?null:'unexpected_error'),possiblePaid:known?.possiblePaid??true},'RC lookup failed');
    const code=known?.code??'invalid_response';
    const retryFree=operation==='CHECK'&&['transport','rate_limited'].includes(code)&&!known?.possiblePaid;
    const proof=direct&&operation==='FETCH'&&code==='rate_limited'?approvedRcFreeRejection(known?.rejectionProof):null;

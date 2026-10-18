@@ -5,6 +5,31 @@ import {governedEnabled,governedPreviewSchema,parseGovernedSource,previewObserva
 import {buildJobRequirements} from './jd-digest';
 import {buildCrustdataPreviewRequest,CRUSTDATA_API_VERSION,CRUSTDATA_SEARCH_URL} from './crustdata-client';
 import {takeCrustdataPermit,type RateGateRedis} from './crustdata-rate-gate';
+import { createLogger } from '@/lib/logger';
+
+const previewLog=createLogger('governed-preview');
+/** Fixed diagnostic classes for logs only; never a body, header value, key or query. */
+export function previewFailureReason(error:unknown,stage:'command'|'request'|'body',status:number|null,credits:string|null):string {
+  const message=error instanceof Error?error.message:'';
+  const timedOut=error instanceof Error&&(error.name==='TimeoutError'||error.name==='AbortError');
+  if(stage==='command')return 'command_invalid';
+  // The same request signal also bounds the body read, so a timeout can arrive after headers.
+  if(timedOut)return 'timeout';
+  if(stage==='request')return 'network';
+  if(message==='GOVERNED_PREVIEW_HTTP')return status!==null&&status>=500?'http_5xx':status===429?'http_429':status!==null&&status>=400?'http_4xx':'http_other';
+  if(message==='GOVERNED_PREVIEW_EMPTY')return 'empty_body';
+  if(message==='GOVERNED_PREVIEW_RESPONSE_TOO_LARGE')return 'body_too_large';
+  if(error instanceof SyntaxError)return 'not_json';
+  if(message==='GOVERNED_PREVIEW_INVALID')return 'invalid_shape';
+  if(message==='GOVERNED_PREVIEW_EVIDENCE_UNAVAILABLE'){
+    if(credits===null)return 'credits_header_missing';
+    const value=Number(credits);
+    if(!Number.isFinite(value)||value<0)return 'credits_header_invalid';
+    if(value>0.03)return 'credits_over_limit';
+    return 'count_invalid';
+  }
+  return 'unexpected';
+}
 
 const statements={
   bind:'SELECT public.signal_sourcing_bind($1,$2::uuid,$3::jsonb) result',
@@ -131,18 +156,25 @@ export async function runGovernedPreview(repository:GovernedRepository,redis:Rat
   const leased=await repository.call<PreviewLease>('previewClaim',[tenantId,previewId,randomUUID()]);
   if(!leased) return {state:'not_claimed'} as const;
   let result:Record<string,unknown>;
+  let stage:'command'|'request'|'body'='command',status:number|null=null,credits:string|null=null;
   try {
     const command=governedPreviewSchema.parse(leased.command);
     if(command.previewId!==previewId || leased.previewId!==previewId) throw Error('GOVERNED_PREVIEW_BINDING');
     const payload=buildCrustdataPreviewRequest(buildJobRequirements(command.queryArtifact.jobContext));
+    stage='request';
     const response=await transport(CRUSTDATA_SEARCH_URL,{method:'POST',headers:{
       'Content-Type':'application/json','Authorization':`Bearer ${key}`,'x-api-version':CRUSTDATA_API_VERSION,
     },body:JSON.stringify(payload),signal:AbortSignal.timeout(15000),redirect:'error'});
     // Any started request without complete cost/count evidence is unknown.
     // In particular 429/5xx/timeouts never become a free automatic retry.
+    stage='body';status=response.status;credits=response.headers.get('X-Credits-Used');
     if(!response.ok) throw Error('GOVERNED_PREVIEW_HTTP');
-    result={state:'complete',...previewObservation(await boundedPreviewBody(response),response.headers.get('X-Credits-Used'))};
-  }catch{result={state:'unknown'};}
+    result={state:'complete',...previewObservation(await boundedPreviewBody(response),credits)};
+  }catch(error){
+    result={state:'unknown'};
+    previewLog.warn({event:'governed_preview_unknown',previewId,reason:previewFailureReason(error,stage,status,credits),
+      httpStatus:status},'Pool-size preview ended unknown');
+  }
   // A database error propagates. Its expired lease later becomes unknown; do
   // not mask a failed durable finish with an in-memory success response.
   await repository.call('previewFinish',[tenantId,previewId,leased.lease,result]);

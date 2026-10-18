@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+const previewLogged=vi.hoisted(()=>({warn:vi.fn()}));
+vi.mock('@/lib/logger',()=>({createLogger:()=>({warn:previewLogged.warn,info:vi.fn(),error:vi.fn(),debug:vi.fn()}),default:{}}));
 import {NextRequest,NextResponse} from 'next/server';
 const routeMocks=vi.hoisted(()=>({auth:vi.fn(),scope:vi.fn(),privacy:vi.fn(),enqueue:vi.fn()}));
 const resultMocks=vi.hoisted(()=>({candidates:vi.fn(),identities:vi.fn()}));
@@ -13,7 +15,7 @@ vi.mock('@/lib/auth/service-scopes',()=>({requireScope:routeMocks.scope}));
 vi.mock('@/lib/candidate-privacy/repository',()=>({requireHealthyCandidatePrivacyContext:routeMocks.privacy,candidatePrivacyAllowedRelationWhere:()=>({admitted:true})}));
 vi.mock('@/lib/sourcing/queue/producer',()=>({getSourcingQueue:()=>({add:routeMocks.enqueue}),getRedisConnection:()=>({}),SOURCING_QUEUE_NAME:'test'}));
 import { artifactHash, governedEnabled, governedSourceSchema, parseGovernedSource, previewObservation } from '../governed-contracts';
-import {GovernedRepository,runGovernedPreview} from '../governed-authority';
+import {GovernedRepository,runGovernedPreview,previewFailureReason} from '../governed-authority';
 import {RankingRepository} from '../rubric/repository';
 import {RcRepository} from '../rc-skills/repository';
 import {createRankingContract} from '../rubric/contracts';
@@ -410,14 +412,33 @@ describe('preview worker transport boundary',()=>{
       .toEqual({state:'waiting',retryAfterMs:1000});
     expect(transport).not.toHaveBeenCalled();expect(f.finishes).toEqual([]);
   });
-  it.each(['timeout','missing-cost','oversized','provider-429'])('records uncertainty without retry: %s',async(mode)=>{
+  it.each([['request-error','network'],['missing-cost','credits_header_missing'],['oversized','body_too_large'],['provider-429','http_429']])('records uncertainty without retry: %s',async(mode,reason)=>{
+    previewLogged.warn.mockClear();
     const f=fixture();const transport=vi.fn(async()=>{
-      if(mode==='timeout')throw Error('synthetic timeout');
+      if(mode==='request-error')throw Error('synthetic request failure');
       if(mode==='provider-429')return new Response('',{status:429});
       return new Response(mode==='oversized'?'x'.repeat(65537):JSON.stringify({total_count:1}));
     });
     expect(await runGovernedPreview(f.repository,f.redis,'tenant',id,transport as typeof fetch)).toEqual({state:'unknown'});
     expect(f.finishes).toEqual([{state:'unknown'}]);expect(transport).toHaveBeenCalledTimes(1);
+    expect(previewLogged.warn).toHaveBeenCalledTimes(1);
+    expect(previewLogged.warn.mock.calls[0][0]).toMatchObject({event:'governed_preview_unknown',previewId:id,reason});
+    expect(JSON.stringify(previewLogged.warn.mock.calls)).not.toMatch(/total_count|Bearer|x{20}/);
+  });
+  it.each(['AbortError','TimeoutError'])('a %s while reading the body after headers is logged as timeout',async name=>{
+    previewLogged.warn.mockClear();
+    const f=fixture();const transport=vi.fn(async()=>new Response(new ReadableStream({
+      pull(){const e=new Error('aborted private body');e.name=name;throw e;}}),{headers:{'X-Credits-Used':'0.01'}}));
+    expect(await runGovernedPreview(f.repository,f.redis,'tenant',id,transport as typeof fetch)).toEqual({state:'unknown'});
+    expect(f.finishes).toEqual([{state:'unknown'}]);
+    expect(previewLogged.warn.mock.calls[0][0]).toMatchObject({event:'governed_preview_unknown',reason:'timeout',httpStatus:200});
+    expect(JSON.stringify(previewLogged.warn.mock.calls)).not.toMatch(/private body/);
+  });
+  it('an unrecognised body read failure stays unexpected, not network',()=>{
+    expect(previewFailureReason(new TypeError('terminated'),'body',200,'0.01')).toBe('unexpected');
+  });
+  it.each([[null,'credits_header_missing'],['abc','credits_header_invalid'],['0.05','credits_over_limit'],['0.01','count_invalid']])('credits header %s is reported as %s',(credits,reason)=>{
+    expect(previewFailureReason(Error('GOVERNED_PREVIEW_EVIDENCE_UNAVAILABLE'),'body',200,credits)).toBe(reason);
   });
   it('never turns a failed durable finish into reported success',async()=>{
     const f=fixture();const repository=new GovernedRepository(async(sql)=>{

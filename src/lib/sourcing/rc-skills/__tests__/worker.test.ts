@@ -1,4 +1,6 @@
 import {describe,it,expect,vi} from 'vitest';
+const logged=vi.hoisted(()=>({warn:vi.fn()}));
+vi.mock('@/lib/logger',()=>({createLogger:()=>({warn:logged.warn,info:vi.fn(),error:vi.fn(),debug:vi.fn()}),default:{}}));
 import {randomUUID} from 'node:crypto';
 import {adaptProfile} from '../../rubric/evidence';
 import {rankingHash} from '../../rubric/contracts';
@@ -7,7 +9,7 @@ import {rcPublicIdentities} from '../membership';
 import {freezeRcBaseline,runRcTick,sealedRcEvidence} from '../worker';
 import {rcSnapshotSchema,RcRepository,type RcBaseline,type RcSnapshot} from '../repository';
 import {RcMemoryError} from '../memory';
-import {RcProviderError} from '../provider';
+import {RcProviderError,createRcProvider} from '../provider';
 
 const now=Date.parse('2026-10-08T00:00:00Z'),flow=randomUUID(),run=randomUUID(),globalId=randomUUID();
 const identity={tenantId:'org_1',flowRunId:flow,executionAttemptId:'execution',processingLeaseId:'lease'};
@@ -134,6 +136,29 @@ describe('RC bounded worker recovery',()=>{
   expect(client.fetchSkills).toHaveBeenCalledTimes(1);
   expect(repo.finish).toHaveBeenCalledWith(identity,attemptId,expect.objectContaining({observation:null,outcome:expect.objectContaining({kind:'uncertain',retryableFree:false})}));
   })();
+ });
+ it('logs one fixed failure class for an uncertain lookup, never the person or body',async()=>{
+  logged.warn.mockClear();
+  const repo=mocks(),s={...snapshot(),protocolMode:2 as const},attemptId=randomUUID();
+  repo.read.mockResolvedValue(s);repo.claim.mockResolvedValue({state:'reserved',attemptId,attemptState:'reserved'});
+  repo.dispatch.mockResolvedValue({state:'granted',attemptId,deadlineAt:s.deadlineAt,maximumCredits:1});
+  const client={check:vi.fn(),fetchSkills:vi.fn().mockRejectedValue(new RcProviderError('transport',true,null,null,null,'not_json'))};
+  await runRcTick({identity,repository:repo,provider:()=>client as any,privacyCursor:async()=>0,now:()=>now});
+  expect(repo.finish).toHaveBeenCalledWith(identity,attemptId,expect.objectContaining({outcome:expect.objectContaining({kind:'uncertain',safeCode:'transport'})}));
+  const lines=logged.warn.mock.calls.filter(c=>c[0]?.event==='rc_lookup_failed');
+  expect(lines).toHaveLength(1);
+  expect(lines[0][0]).toEqual({event:'rc_lookup_failed',operation:'FETCH',attemptId,code:'transport',detail:'not_json',possiblePaid:true});
+  expect(JSON.stringify(lines)).not.toMatch(/linkedin|https?:|@/i);
+ });
+ it.each([1,2] as const)('malformed provider JSON keeps the pre-diagnostic stored outcome (protocol %s)',async mode=>{
+  const repo=mocks(),s={...snapshot(),protocolMode:mode},attemptId=randomUUID();
+  repo.read.mockResolvedValue(s);repo.claim.mockResolvedValue({state:'reserved',attemptId,attemptState:'reserved'});
+  repo.dispatch.mockResolvedValue({state:'granted',attemptId,deadlineAt:s.deadlineAt,maximumCredits:1});
+  const real=createRcProvider({apiKey:'fake-test-key',fetchImpl:(async()=>new Response('not json')) as typeof fetch,now:()=>now});
+  await runRcTick({identity,repository:repo,provider:()=>real,privacyCursor:async()=>0,now:()=>now});
+  const result=repo.finish.mock.calls.at(-1)![2];
+  if(mode===1)expect(result).toMatchObject({observedCredits:0,outcome:{kind:'failed',safeCode:'transport',retryableFree:true}});
+  else expect(result).toMatchObject({observedCredits:null,outcome:{kind:'uncertain',safeCode:'transport',retryableFree:false}});
  });
  it('does not advance to provider work when baseline preparation times out',async()=>{
   const repo=mocks();repo.read.mockResolvedValue(snapshot(null));repo.prepare.mockRejectedValue(Error('canceling statement due to statement timeout'));
