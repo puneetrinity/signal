@@ -138,7 +138,7 @@ async function processSourcingJobMeasured(
           status:'complete',candidateCount:resumed.items.length},true,executionFence);
         return {requestId,status:'complete',candidateCount:resumed.items.length,durationMs:Date.now()-startTime};
       }
-      if(process.env.RC_SKILLS_ENABLED==='true' && governedCommand.rankingContract.payload.schemaVersion===3){
+      if(process.env.RC_SKILLS_ENABLED==='true' && [3,4].includes(governedCommand.rankingContract.payload.schemaVersion)){
         const {RcRepository}=await import('../rc-skills/repository');
         const rc=new RcRepository(),identity={tenantId,flowRunId:governedCommand.flowRunId,
           executionAttemptId:job.data.executionAttemptId!,processingLeaseId};
@@ -386,7 +386,7 @@ async function processSourcingJobMeasured(
         // existing durable run without reading candidate evidence on this path.
         if(!rcIdentity){
           const bound=await new GovernedRepository().call<GovernedSource>('boundCommand',[tenantId,requestId]);
-          if(bound?.protocolVersion===2 && bound.rankingContract.payload.schemaVersion===3 && await rc.progress(tenantId,bound.flowRunId))
+          if(bound?.protocolVersion===2 && [3,4].includes(bound.rankingContract.payload.schemaVersion) && await rc.progress(tenantId,bound.flowRunId))
             rcIdentity={tenantId,flowRunId:bound.flowRunId,executionAttemptId:job.data.executionAttemptId!,processingLeaseId};
         }
         if(rcIdentity){

@@ -22,6 +22,8 @@ import type {
 import { runContactEnrichmentCycle } from "../worker";
 
 const requireCandidatePrivacyAllowed = vi.hoisted(() => vi.fn());
+const requirePublicContactCandidate = vi.hoisted(() => vi.fn());
+vi.mock('@/lib/sourcing/private-candidate-access', () => ({ requirePublicContactCandidate }));
 
 vi.mock("@/lib/candidate-privacy/repository", () => ({
   requireCandidatePrivacyAllowed,
@@ -203,6 +205,8 @@ const cycleOptions = {
 
 describe("durable contact enrichment worker", () => {
   beforeEach(() => {
+    requirePublicContactCandidate.mockReset();
+    requirePublicContactCandidate.mockResolvedValue(undefined);
     requireCandidatePrivacyAllowed.mockReset();
     requireCandidatePrivacyAllowed.mockResolvedValue({
       generation: BigInt(1),
@@ -232,6 +236,32 @@ describe("durable contact enrichment worker", () => {
     expect(memory.lookup).not.toHaveBeenCalled();
     expect(providers.startFullEnrich).not.toHaveBeenCalled();
     expect(providers.callEnrichLayer).not.toHaveBeenCalled();
+  });
+
+  it('terminates an old queued applicant before waiting or looking up contacts', async () => {
+    requirePublicContactCandidate.mockRejectedValue(new Error('candidate_contact_ineligible'));
+    const store = new FakeStore(operation('awaiting_global_id', { globalCandidateId: null, linkedGlobalCandidateId: null }));
+    const memory = memoryClient('miss');
+    const providers = providerClient();
+    await runContactEnrichmentCycle({ ...cycleOptions, store, memory, providers });
+    expect(store.row.state).toBe('failed');
+    expect(store.row.lastErrorCode).toBe('candidate_contact_ineligible');
+    expect(memory.lookup).not.toHaveBeenCalled();
+    expect(providers.startFullEnrich).not.toHaveBeenCalled();
+    expect(providers.callEnrichLayer).not.toHaveBeenCalled();
+  });
+
+  it('rechecks applicant status immediately before paid provider dispatch', async () => {
+    requirePublicContactCandidate.mockResolvedValueOnce(undefined)
+      .mockRejectedValue(new Error('candidate_contact_ineligible'));
+    const store = new FakeStore(operation());
+    const memory = memoryClient('miss');
+    const providers = providerClient();
+    await runContactEnrichmentCycle({ ...cycleOptions, store, memory, providers });
+    expect(requirePublicContactCandidate).toHaveBeenCalledTimes(2);
+    expect(store.row.state).toBe('failed');
+    expect(store.row.lastErrorCode).toBe('candidate_contact_ineligible');
+    expect(providers.startFullEnrich).not.toHaveBeenCalled();
   });
 
   it("does not call a provider while Memory is unavailable", async () => {

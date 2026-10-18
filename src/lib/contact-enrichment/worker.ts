@@ -22,6 +22,7 @@ import {
   type StagedContactEvidence,
 } from "./types";
 import { requireCandidatePrivacyAllowed } from "@/lib/candidate-privacy/repository";
+import { requirePublicContactCandidate } from "@/lib/sourcing/private-candidate-access";
 
 const log = createLogger("ContactEnrichmentWorker");
 const DEFAULT_RETRY_MS = 60_000;
@@ -297,6 +298,7 @@ async function startEnrichLayer({
   if (!starting) return "pending";
 
   await requireCandidatePrivacyAllowed(starting.tenantId, starting.candidateId);
+  await requirePublicContactCandidate(starting.tenantId, starting.candidateId);
   const result = await providers.callEnrichLayer({
     requestKey,
     candidate: starting,
@@ -566,6 +568,7 @@ async function startFullEnrich({
   if (!starting) return "pending";
 
   await requireCandidatePrivacyAllowed(starting.tenantId, starting.candidateId);
+  await requirePublicContactCandidate(starting.tenantId, starting.candidateId);
   const result = await providers.startFullEnrich({
     operationId: starting.id,
     generation: starting.generation,
@@ -707,6 +710,9 @@ async function processContactOperation({
   linkRetryMs: number;
   pollMs: number;
 }): Promise<"completed" | "pending" | "ambiguous"> {
+  // Check before global-link waiting, Memory contact reads or any provider work.
+  // Old queued applicant work terminates instead of waiting for a LinkedIn ID.
+  await requirePublicContactCandidate(row.tenantId, row.candidateId, undefined, {allowUnlinked:true});
   try {
     await requireCandidatePrivacyAllowed(row.tenantId, row.candidateId);
   } catch (error) {
@@ -838,13 +844,14 @@ export async function runContactEnrichmentCycle(
         const failureNow = now();
         const privacyFailure =
           error instanceof Error && error.message.startsWith("candidate_privacy_");
+        const ineligible = error instanceof Error && error.message === "candidate_contact_ineligible";
         await transitionClaim(
           store,
           row,
-          privacyFailure ? [...CONTACT_OPERATION_STATES] : [row.state],
+          privacyFailure || ineligible ? [...CONTACT_OPERATION_STATES] : [row.state],
           {
-            state: privacyFailure ? "failed" : row.state,
-            ...(privacyFailure
+            state: privacyFailure || ineligible ? "failed" : row.state,
+            ...(privacyFailure || ineligible
               ? {
                   selectedEmail: null,
                   stagedEvidence: null,
@@ -855,7 +862,7 @@ export async function runContactEnrichmentCycle(
                     failureNow.getTime() + (options.retryMs ?? DEFAULT_RETRY_MS),
                   ),
                 }),
-            lastErrorCode: privacyFailure
+            lastErrorCode: ineligible ? "candidate_contact_ineligible" : privacyFailure
               ? (error.message === "candidate_privacy_restricted"
                   ? "privacy_restricted"
                   : "privacy_unavailable")

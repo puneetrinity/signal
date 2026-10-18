@@ -79,6 +79,8 @@ async function main() {
     where: {
       tenantId: request.tenantId,
       linkedinId: { in: vectorSlugs },
+      identityKind: 'linkedin',
+      privateCandidateRef: null,
     },
     select: {
       id: true,
@@ -105,7 +107,8 @@ async function main() {
       },
     },
   });
-  const candidateBySlug = new Map(candidates.map((candidate) => [candidate.linkedinId.toLowerCase(), candidate]));
+  const candidateBySlug = new Map(candidates.flatMap((candidate) =>
+    candidate.linkedinId ? [[candidate.linkedinId.toLowerCase(), candidate] as const] : []));
 
   let skippedNoLocalCandidate = 0;
   let skippedNoProfile = 0;

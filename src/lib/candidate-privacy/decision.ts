@@ -20,6 +20,7 @@ export interface CandidatePrivacyAdmissionAnchor {
   linkedinUrl?: string | null;
   signalCandidateId?: string | null;
   globalCandidateId?: string | null;
+  privateCandidate?: { tenantId: string; candidateId: string };
 }
 
 export async function createCandidateAdmissionProofs(
@@ -45,6 +46,7 @@ export async function createCandidateAdmissionProofs(
         generation: BigInt(1),
         cursor: BigInt(0),
         decision: 'allow',
+        ...(anchor.privateCandidate ? {privateCandidate:anchor.privateCandidate} : {}),
       }),
     ]));
   }
@@ -70,6 +72,7 @@ export async function createCandidateAdmissionProofs(
       linkedinUrl: anchor.linkedinUrl,
       signalCandidateId: anchor.signalCandidateId,
       globalCandidateId: anchor.globalCandidateId,
+      privateCandidate: anchor.privateCandidate,
     };
     return anchorToEligibilitySubject(model);
   });
@@ -113,12 +116,13 @@ export async function createCandidateAdmissionProofs(
       throw new CandidatePrivacyUnavailableError('candidate_privacy_conflict');
     }
     if (decision === 'review') continue;
-    if (!decisionAllowsDiscoverUse(decision)) continue;
+    if (!decisionAllowsDiscoverUse(decision) && !(anchor.privateCandidate && decision === 'block_global')) continue;
     proofs.set(anchor.key, CandidatePrivacyAdmissionProof.issue({
       requestRef,
       generation: context.generation,
       cursor: context.cursor,
-      decision,
+      decision: anchor.privateCandidate && decision === 'block_global' ? 'allow' : decision,
+      ...(anchor.privateCandidate ? {privateCandidate:anchor.privateCandidate} : {}),
     }));
   }
   return proofs;

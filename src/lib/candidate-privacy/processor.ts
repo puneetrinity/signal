@@ -25,6 +25,8 @@ const candidateSnapshotSelect = {
   id: true,
   tenantId: true,
   linkedinUrl: true,
+  identityKind: true,
+  privateCandidateRef: true,
   globalLink: { select: { globalCandidateId: true } },
 } as const;
 
@@ -78,6 +80,8 @@ function candidateSnapshotFingerprint(rows: CandidateSnapshotRow[]): Buffer {
       row.tenantId,
       row.linkedinUrl,
       row.globalLink?.globalCandidateId,
+      row.identityKind,
+      row.privateCandidateRef,
     ]) {
       if (value === null || value === undefined) {
         hash.update('n:');
@@ -108,8 +112,10 @@ async function evaluateCandidateSnapshot(
       refs.map(({ row, requestRef }) => anchorToEligibilitySubject({
         requestRef,
         linkedinUrl: row.linkedinUrl,
-        signalCandidateId: row.id,
+        signalCandidateId: row.identityKind === 'organization_candidate' ? undefined : row.id,
         globalCandidateId: row.globalLink?.globalCandidateId,
+        ...(row.identityKind === 'organization_candidate' && row.privateCandidateRef
+          ? {privateCandidate:{tenantId:row.tenantId,candidateId:row.privateCandidateRef}} : {}),
       })),
     );
     await afterBatch();
@@ -117,7 +123,8 @@ async function evaluateCandidateSnapshot(
       tenantId: row.tenantId,
       candidateId: row.id,
       generation,
-      decision: decisions.get(requestRef) ?? 'review',
+      decision: row.identityKind === 'organization_candidate' && row.privateCandidateRef
+        && decisions.get(requestRef) === 'block_global' ? 'allow' : decisions.get(requestRef) ?? 'review',
       evaluatedCursor,
     })));
   }

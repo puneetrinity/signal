@@ -1,5 +1,5 @@
 import { byteCompare, rankingContractSchema, type Criterion, type RankingContract } from './contracts';
-import { evidenceFor, evidenceSchema, type CanonicalEvidence, type EvidenceFact } from './evidence';
+import { evidenceFor, evidenceSchema, selectEmployment, type CanonicalEvidence, type EvidenceFact } from './evidence';
 import { calculateExperience, experienceEligibility, experienceDisplay, DAYS_PER_YEAR, type ExperienceRange, type ExperienceEligibility } from './experience';
 import { atomicSkill, automaticallyMapped, canonicalDegree, canonicalLanguage, canonicalLocation, functionFamily, normalize, normalizedTitle, predicateKey, seniority, languageRequirement, educationRequirement, certificationRequirement, CEFR_LEVELS } from './taxonomy';
 import { localMatch } from './lexical';
@@ -97,14 +97,15 @@ export function scoreEvidence(rawContract:RankingContract,rawEvidence:CanonicalE
 }
 function scoreWithContract(contract:RankingContract,rawEvidence:CanonicalEvidence,asOf:string,normalizeSkill:(value:string)=>string) {
   const evidence=evidenceSchema.parse(rawEvidence);
+  if(evidence.version!==contract.adapterVersion)throw Error('RUBRIC_EVIDENCE_VERSION_MISMATCH');
   const groups=new Map<string,Criterion[]>();
   for(const c of contract.payload.criteria) {const key=predicateKey(c);groups.set(key,[...(groups.get(key)??[]),c]);}
   let range:ExperienceRange|null=null;
   const rangeCriterion=contract.payload.criteria.find(c=>c.subject==='experience_years');
   // This adapter's dated employment is provider-profile evidence. Do not use
   // it to satisfy (or exclude against) a criterion restricted to other kinds.
-  const permittedEmployment=!rangeCriterion||rangeCriterion.evidenceKinds.includes('profile_evidence')?evidence.employment:[];
-  const experience=calculateExperience(permittedEmployment,asOf);
+  const employment=selectEmployment(evidence,rangeCriterion?.evidenceKinds??['candidate_provided','profile_evidence'],asOf);
+  const experience=calculateExperience(employment.intervals,asOf);
   if(rangeCriterion && (rangeCriterion.requirement.kind==='minimum_years'||rangeCriterion.requirement.kind==='experience_range')) {
     range={minimum:rangeCriterion.requirement.minimum,...(rangeCriterion.requirement.kind==='experience_range'?{maximum:rangeCriterion.requirement.maximum}:{})};
   }
@@ -119,7 +120,7 @@ function scoreWithContract(contract:RankingContract,rawEvidence:CanonicalEvidenc
       if(['measured','bounded'].includes(experience.status)&&experience.lowerDays!==null&&experience.upperDays!==null) {
         const lo=experience.lowerDays/DAYS_PER_YEAR,hi=experience.upperDays/DAYS_PER_YEAR;
         state=lo>=range.minimum&&hi<=(range.maximum??Infinity)?'met':hi<range.minimum||lo>(range.maximum??Infinity)?'not_met':'unknown';
-        if(state==='met') positive=['recorded employment'];refs=['employment'];
+        if(state==='met') positive=['recorded employment'];refs=[employment.ref];
       }
     } else ({state,positive,refs}=assess(c,evidence,asOf,normalizeSkill));
     const orderedCriteria=[...candidates].sort((a,b)=>byteCompare(a.id,b.id));

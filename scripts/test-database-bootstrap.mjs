@@ -81,9 +81,9 @@ async function assertBootstrapShape() {
         COUNT(finished_at)::INTEGER AS "finishedCount"
       FROM "_prisma_migrations"
     `);
-    assert(tableCount === 36, `Expected 36 tables, found ${tableCount}`);
-    assert(migrationCount === 32, `Expected 32 migrations, found ${migrationCount}`);
-    assert(finishedCount === 32, 'Every baseline migration must be finished');
+    assert(tableCount === 37, `Expected 37 tables, found ${tableCount}`);
+    assert(migrationCount === 33, `Expected 33 migrations, found ${migrationCount}`);
+    assert(finishedCount === 33, 'Every baseline migration must be finished');
   });
 
   await runPrisma(
@@ -136,7 +136,7 @@ async function verifyConcurrentBootstrap() {
   const codes = results.map((result) => result.code).sort();
   assert(
     JSON.stringify(codes) === JSON.stringify([0, 1]),
-    `Expected one bootstrap success and one refusal, got ${codes.join(',')}`,
+    `Expected one bootstrap success and one refusal, got ${codes.join(',')}\n${results.map(result => `${result.stdout}\n${result.stderr}`).join('\n')}`,
   );
   const refusal = results.find((result) => result.code !== 0);
   assert(

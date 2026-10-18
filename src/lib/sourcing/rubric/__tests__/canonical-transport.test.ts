@@ -6,7 +6,7 @@ import {spawnSync} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
 import {z} from 'zod';
 import {canonical,createRankingContract,rankingHash} from '../contracts';
-import {evidenceSchema,withheldProfileSchema,evidenceBytes} from '../evidence';
+import {evidenceV1Schema as evidenceSchema,withheldProfileSchema,evidenceBytes} from '../evidence';
 import {computeRankingMessage} from '../ranking-compute-worker';
 import {rankEvidence} from '../score';
 import {checkRankingSource} from '../../../../../scripts/check-rubric-ranking.mjs';

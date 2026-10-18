@@ -347,6 +347,33 @@ describe.skipIf(!enabled)('ranking atomic database publication',()=>{
   await refusal(f.claim,'RANKING_CLAIM_REFUSED');
   await refusal(()=>one('SELECT signal_ranking_claim($1,$2,$3) result',[tenant,f.flow,{...f.command,evidence:f.evidence.slice(0,1)}]),'RANKING_INPUT_CONFLICT');
  });
+ it('publishes schema-4 resume evidence with immutable provenance and no public identity',async()=>{
+  const tenant='org_28';
+  await db.query("INSERT INTO governed_sourcing_tenants(tenant_id,enabled_at,policy_hash,allow_new,organization_ref,callback_url) VALUES($1,clock_timestamp(),$2,true,'28','https://flow.example/api/webhooks/signal/callback')",[tenant,hash]);
+  const flow=randomUUID(),identity={candidateId:randomUUID(),referenceId:randomUUID(),applicationId:123,applicationJobId:188,
+   resumeVersionId:randomUUID(),sourceId:randomUUID(),generationId:randomUUID(),sourceHash:hash};
+  const candidateId=await one('SELECT signal_private_candidate_materialize($1,$2) result',
+   [tenant,{identity,linkedPublicId:null,observedAt:'2026-01-01T00:00:00Z'}]);
+  const ranking=createRankingContract(randomUUID(),hash,{schemaVersion:4,compilerVersion:4,taxonomyVersion:4,criteria:[{
+   id:randomUUID(),label:'Python',class:'must_have',subject:'skill',requirement:{kind:'accepted_skills',primary:'Python',alternatives:[]},
+   use:'assessment',evidenceKinds:['candidate_provided','profile_evidence'],provenance:{kind:'recruiter_edit'}}]});
+  const body={protocolVersion:2,flowRunId:flow,organizationRef:'28',externalJobId:'vanta:jobs:95101',briefVersionId:ranking.briefVersionId,
+   materialHash:hash,artifactHash:hash,compilerVersion:'1',queryArtifact:{jobContext:{}},rankingContract:ranking,
+   callbackUrl:'https://flow.example/api/webhooks/signal/callback'};
+  const bound=await one('SELECT signal_sourcing_bind($1,$2,$3) result',[tenant,flow,body]),processingLeaseId=randomUUID();
+  await db.query("UPDATE job_sourcing_requests SET status='processing',processing_lease_id=$2 WHERE id=$1",[bound.requestId,processingLeaseId]);
+  await db.query("INSERT INTO candidate_privacy_projection(tenant_id,candidate_id,generation,decision,evaluated_cursor) VALUES($1,$2,1,'allow',0)",[tenant,candidateId]);
+  await db.query("UPDATE candidate_privacy_sync_state SET status='healthy',active_generation=1,expected_candidates=1,projected_candidates=1,last_success_at=clock_timestamp() WHERE consumer_name='discover'");
+  const evidence=evidenceSchema.parse({candidateId,organizationRef:'28',version:'rubric-evidence-v2',employment:[],employmentSources:[],resumeIdentity:identity,
+   facts:[{field:'skill',value:'Python',ref:'resume.skill',kind:'candidate_provided',scope:'organization',organizationRef:'28',sourceVersion:hash,observedAt:'2026-01-01T00:00:00.000Z'}]});
+  expect(await one("SELECT signal_ranking_transport_record('evidence',$1) result",[canonical(evidence)])).toEqual(evidence);
+  const repo=new RankingRepository(async(sql,args)=>(await db.query(sql,args)).rows);
+  const result=await repo.publish({tenantId:tenant,flowRunId:flow,contract:ranking,executionAttemptId:bound.executionAttemptId,
+   processingLeaseId,evidence:[evidence],sourceTypes:new Map([[candidateId,'pool' as const]])});
+  expect(result.items).toHaveLength(1);expect(result.items[0]).toMatchObject({candidateId,N:3,D:3});
+  expect(await one('SELECT signal_private_ranking_sources($1,$2,$3) result',[tenant,flow,result.revisionId])).toEqual([{candidateId,identity}]);
+  expect(await one('SELECT signal_private_contact_allowed($1,$2) result',[tenant,candidateId])).toBe(false);
+ });
  it('compact claim returns only sealed metadata; replacement recovery returns the identical stored pool',async()=>{
   const f=await fixture();
   await refusal(()=>one('SELECT signal_ranking_claim($1,$2,$3) result',[tenant,f.flow,{...f.command,responseMode:'invalid'}]),'RANKING_INVALID_COMMAND');

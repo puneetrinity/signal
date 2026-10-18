@@ -5,6 +5,16 @@ import { describe, expect, it } from 'vitest';
 const root = process.cwd();
 
 const enforcementContracts = [
+  ['private-flow-eligibility-boundary','src/lib/sourcing/private-resume-flow-client.ts',
+    ['privateResumeTenant.parse(tenantId)', 'new SignJWT(', "scopes:'sourcing:candidates:read'","body_hash:hash","redirect:'error'",'result.bodyHash!==hash']],
+  ['private-resume-fusion-boundary','src/lib/sourcing/private-resume-fusion.ts',
+    ['privateResumeTenant.parse(tenantId)','hit.evidence.scope!==tenantId','PRIVATE_RETRIEVAL_DUPLICATE','managed.length>100||legacy.length>300']],
+  ['private-resume-reader-boundary','src/lib/sourcing/private-resume-client.ts',
+    ['signPrivateResumeSourcingJWT','v.evidence.scope !== tenant','MAX_RESPONSE_BYTES',"redirect:'error'",'JSON.stringify(v.identity) !== JSON.stringify(request.data.items[i])']],
+  ['private-resume-contract-boundary','src/lib/sourcing/private-resume-contracts.ts',
+    ['privateResumeIdentity','sourceHash: hash','candidate_provided','privateResumeTenant']],
+  ['private-resume-signer-boundary','src/lib/sourcing/activegraph-auth.ts',
+    ["scopes: ['organization-candidate-sourcing:read']",'.setIssuedAt(issued).setExpirationTime(issued+300)',".setSubject('signal-service')"]],
   ['rc-contract-boundary','src/lib/sourcing/rc-skills/contracts.ts',['observationBodySchema=z.object','contentHash!==rankingHash(body)']],
   ['rc-evidence-boundary','src/lib/sourcing/rc-skills/evidence.ts',['RC_EVIDENCE_IDENTITY_CONFLICT','throw new OversizedEvidenceError']],
   ['rc-compute-boundary','src/lib/sourcing/rc-skills/rc-compute-worker.ts',['RC_COMPUTE_IDENTITY_CONFLICT','maxOldGenerationSizeMb:512','RC_COMPUTE_INVALID']],
@@ -17,7 +27,7 @@ const enforcementContracts = [
   ['rc-alert-boundary','src/lib/sourcing/rc-skills/alerts.ts',['rcAlertSchema.parse(event)',"redirect:'error'"]],
   ['rc-maintenance-boundary','src/lib/sourcing/rc-skills/maintenance.ts',['if(!input.enabled)return summary',"await call('cleanup')"]],
   ['rubric-contract-boundary','src/lib/sourcing/rubric/contracts.ts',['rankingContractSchema','rankingHash(body)!==contractHash']],
-  ['rubric-evidence-boundary','src/lib/sourcing/rubric/evidence.ts',['Foreign private evidence','evidenceShape.parse','new OversizedEvidenceError']],
+  ['rubric-evidence-boundary','src/lib/sourcing/rubric/evidence.ts',['Foreign private evidence','evidenceV1Schema.parse','new OversizedEvidenceError']],
   ['rubric-experience-boundary','src/lib/sourcing/rubric/experience.ts',['calculateExperience','roles.filter(role => !isInternship(role))']],
   ['rubric-score-boundary','src/lib/sourcing/rubric/score.ts',['evidenceSchema.parse','experienceEligibility']],
   ['rubric-repository-boundary','src/lib/sourcing/rubric/repository.ts',["SET LOCAL lock_timeout='2s'","set_config('signal.ranking_privacy_max_age_ms'","transaction.$queryRawUnsafe"]],

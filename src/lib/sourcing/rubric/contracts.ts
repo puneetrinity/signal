@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { acceptedSkillsShape, duplicateSkillNames, overlappingSkillCriteria } from './skill-alternatives';
-export const BRIEF_VERSION = 3;
+export const BRIEF_VERSION = 4;
 // Wire copy of Flow's closed brief contract. Cross-repository tests must assert parity.
 export const criterionClasses = ['must_have', 'preferred', 'disqualifier', 'evidence_required'] as const;
 export const criterionSubjects = ['title', 'seniority', 'experience_years', 'skill', 'domain', 'function', 'location', 'certification', 'language', 'education_requirement', 'relevant_work', 'responsibility', 'leadership', 'availability', 'work_eligibility'] as const;
@@ -70,26 +70,27 @@ const criterion = z.object({
   }
 });
 export const briefPayloadSchema = z.object({
-  schemaVersion: z.union([z.literal(1),z.literal(2),z.literal(3)]), compilerVersion: z.union([z.literal(1),z.literal(2),z.literal(3)]), taxonomyVersion: z.union([z.literal(1),z.literal(2),z.literal(3)]),
+  schemaVersion: z.union([z.literal(1),z.literal(2),z.literal(3),z.literal(4)]), compilerVersion: z.union([z.literal(1),z.literal(2),z.literal(3),z.literal(4)]), taxonomyVersion: z.union([z.literal(1),z.literal(2),z.literal(3),z.literal(4)]),
   criteria: z.array(criterion).min(1).max(12),
 }).strict().superRefine((value, ctx) => {
   if (new Set(value.criteria.map(c => c.id)).size !== value.criteria.length) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Duplicate criterion ID' });
   if (value.schemaVersion !== value.compilerVersion || value.schemaVersion !== value.taxonomyVersion) ctx.addIssue({code:z.ZodIssueCode.custom,message:'Mixed brief versions'});
   for (const c of value.criteria) {
     if (value.schemaVersion < 3 && c.requirement.kind === 'accepted_skills') ctx.addIssue({code:z.ZodIssueCode.custom,message:'Historical brief shape cannot change'});
-    if (value.schemaVersion === 3 && c.subject === 'skill' && c.requirement.kind !== 'accepted_skills') ctx.addIssue({code:z.ZodIssueCode.custom,message:'Skill needs approved names'});
+    if (value.schemaVersion >= 3 && c.subject === 'skill' && c.requirement.kind !== 'accepted_skills') ctx.addIssue({code:z.ZodIssueCode.custom,message:'Skill needs approved names'});
     if (value.schemaVersion === 1 && ['experience_range','accepted_titles'].includes(c.requirement.kind)) ctx.addIssue({code:z.ZodIssueCode.custom,message:'Historical brief shape cannot change'});
     if (value.schemaVersion >= 2 && c.subject === 'title' && c.requirement.kind !== 'accepted_titles') ctx.addIssue({code:z.ZodIssueCode.custom,message:'Title needs approved alternatives'});
-    if (value.schemaVersion >= 2 && c.subject === 'experience_years' && !c.evidenceKinds.includes('profile_evidence')) ctx.addIssue({code:z.ZodIssueCode.custom,message:'Experience calculation requires profile employment evidence'});
+    if (value.schemaVersion >= 2 && c.subject === 'experience_years' &&
+      !(c.evidenceKinds.includes('profile_evidence') || (value.schemaVersion === 4 && c.evidenceKinds.includes('candidate_provided')))) ctx.addIssue({code:z.ZodIssueCode.custom,message:value.schemaVersion===4?'Experience calculation requires permitted dated employment evidence':'Experience calculation requires profile employment evidence'});
     if (value.schemaVersion >= 2 && ['experience_years','title'].includes(c.subject) && c.use !== 'assessment') ctx.addIssue({code:z.ZodIssueCode.custom,message:'Scoring titles and experience are assessed after retrieval'});
   }
-  if (value.schemaVersion === 3 && overlappingSkillCriteria(value.criteria).length) ctx.addIssue({code:z.ZodIssueCode.custom,message:'A skill name appears under multiple criteria; merge or edit the skills'});
+  if (value.schemaVersion >= 3 && overlappingSkillCriteria(value.criteria).length) ctx.addIssue({code:z.ZodIssueCode.custom,message:'A skill name appears under multiple criteria; merge or edit the skills'});
   if (value.schemaVersion >= 2) for (const subject of ['title','experience_years']) {
     if (value.criteria.filter(c=>c.subject===subject).length>1) ctx.addIssue({code:z.ZodIssueCode.custom,message:'Duplicate title or experience criterion'});
   }
 });
 export type BriefPayload = z.infer<typeof briefPayloadSchema>;
-/** Historical versions remain readable; only an explicit v3 save can be approved. */
+/** Historical versions remain readable; v4 requires explicit save/reapproval. */
 export const currentBriefPayloadSchema = briefPayloadSchema.refine(v=>v.schemaVersion===BRIEF_VERSION, 'Review and save the updated brief');
 
 export const POLICY_VERSION = 'rubric-approved-skills-v1' as const;
@@ -97,6 +98,10 @@ export const TAXONOMY_VERSION = 'rubric-taxonomy-v4' as const;
 export const ADAPTER_VERSION = 'rubric-evidence-v1' as const;
 export const LOCAL_MATCH_VERSION = 'rubric-local-match-v4' as const;
 export function rankingVersions(briefVersion: number) {
+  if (briefVersion === 4) return {
+    policyVersion: 'rubric-resume-evidence-v1' as const, taxonomyVersion: TAXONOMY_VERSION,
+    adapterVersion: 'rubric-evidence-v2' as const, localMatchVersion: LOCAL_MATCH_VERSION,
+  };
   if (briefVersion === 2) return {
     policyVersion: 'rubric-range-v1' as const, taxonomyVersion: 'rubric-taxonomy-v3' as const,
     adapterVersion: ADAPTER_VERSION, localMatchVersion: 'rubric-local-match-v3' as const,
@@ -131,19 +136,19 @@ export function rankingProjection(payload: BriefPayload): string {
 }
 const rankingContractBody = z.object({
   schemaVersion:z.literal(1), briefVersionId:z.string().uuid(), materialHash:hash,
-  policyVersion:z.enum(['rubric-range-v1', POLICY_VERSION]), taxonomyVersion:z.enum(['rubric-taxonomy-v3', TAXONOMY_VERSION]),
-  adapterVersion:z.literal(ADAPTER_VERSION), localMatchVersion:z.enum(['rubric-local-match-v3', LOCAL_MATCH_VERSION]),
+  policyVersion:z.enum(['rubric-range-v1', POLICY_VERSION, 'rubric-resume-evidence-v1']), taxonomyVersion:z.enum(['rubric-taxonomy-v3', TAXONOMY_VERSION]),
+  adapterVersion:z.enum([ADAPTER_VERSION, 'rubric-evidence-v2']), localMatchVersion:z.enum(['rubric-local-match-v3', LOCAL_MATCH_VERSION]),
   payload:briefPayloadSchema.refine(v=>v.schemaVersion>=2, 'Ranking requires a versioned sourcing brief'), projectionText:z.string().max(20000), projectionHash:hash,
 }).strict();
 export const rankingContractSchema = rankingContractBody.extend({contractHash:hash}).superRefine((v,ctx)=>{
   const {contractHash,...body}=v;
-  if (v.payload.schemaVersion !== 2 && v.payload.schemaVersion !== 3) {
+  if (v.payload.schemaVersion !== 2 && v.payload.schemaVersion !== 3 && v.payload.schemaVersion !== 4) {
     ctx.addIssue({code:z.ZodIssueCode.custom,message:'Unsupported ranking brief version'});
     return;
   }
   const versions=rankingVersions(v.payload.schemaVersion);
   if (v.policyVersion!==versions.policyVersion || v.taxonomyVersion!==versions.taxonomyVersion ||
-      v.localMatchVersion!==versions.localMatchVersion) {
+      v.localMatchVersion!==versions.localMatchVersion || v.adapterVersion!==versions.adapterVersion) {
     ctx.addIssue({code:z.ZodIssueCode.custom,message:'Mixed ranking versions'});
   }
   if (rankingHash(body)!==contractHash || v.projectionText!==rankingProjection(v.payload) ||

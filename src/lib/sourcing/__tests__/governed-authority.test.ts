@@ -16,6 +16,7 @@ import { artifactHash, governedEnabled, governedSourceSchema, parseGovernedSourc
 import {GovernedRepository,runGovernedPreview} from '../governed-authority';
 import {RankingRepository} from '../rubric/repository';
 import {RcRepository} from '../rc-skills/repository';
+import {createRankingContract} from '../rubric/contracts';
 import * as timingStore from '../stage-timings-store';
 const id='10000000-0000-4000-8000-000000000001', hash='a'.repeat(64);
 const artifact={compilerVersion:'1' as const,digestVersion:3 as const,jobContext:{title:'Backend Engineer',location:'Bengaluru',jdDigest:'{}',skills:['Python'],goodToHaveSkills:[]},
@@ -113,15 +114,19 @@ describe('actual governed results route',()=>{
   });
   it('removes blocked IDs from the service response while preserving the visible original ordinal',async()=>{
     workerMocks.published.mockResolvedValue({...row(),candidates:[{candidateId:'visible',rank:2,fitScore:null,sourceType:'pool',
-      candidate:{id:'visible',intelligenceSnapshots:[],enrichmentSessions:[],searchMeta:null}}]});
-    const calls=vi.spyOn(GovernedRepository.prototype,'call').mockResolvedValue({protocolVersion:2,flowRunId:id,artifactHash:hash,
+      candidate:{id:'visible',identityKind:'linkedin',intelligenceSnapshots:[],enrichmentSessions:[],searchMeta:null}}]});
+    const rankingContract=createRankingContract(id,hash,{schemaVersion:3,compilerVersion:3,taxonomyVersion:3,criteria:[{
+      id,label:'Python',class:'must_have',subject:'skill',requirement:{kind:'accepted_skills',primary:'Python',alternatives:[]},
+      use:'assessment',evidenceKinds:['profile_evidence'],provenance:{kind:'recruiter_edit'}}]});
+    const calls=vi.spyOn(GovernedRepository.prototype,'call').mockImplementation(async op=>op==='boundCommand'
+      ?{...command,protocolVersion:2,rankingContract}:{protocolVersion:2,flowRunId:id,artifactHash:hash,
       executionAttemptId:id,revision:1,orderedSignalIds:['blocked','visible'],rankingRevision:id,rankingHash:hash,contractHash:hash});
     vi.spyOn(RankingRepository.prototype,'read').mockResolvedValue({protocolVersion:2,flowRunId:id,revisionId:id,outputHash:hash,contractHash:hash,
       asOf:'2026-10-01T00:00:00.000Z',items:[{candidateId:'blocked',ordinal:1},{candidateId:'visible',ordinal:2}]} as never);
     const response=await get(),body=await response.json();expect(response.status).toBe(200);
     expect(body.governed.orderedSignalIds).toEqual(['visible']);expect(body.data[0].ranking.ordinal).toBe(2);
     expect(JSON.stringify(body)).not.toContain('blocked');expect(body.resultCount).toBe(1);
-    expect(calls.mock.calls.map(([op])=>op)).toEqual(['delivery']);
+    expect(calls.mock.calls.map(([op])=>op)).toEqual(['delivery','boundCommand']);
   });
   it('leaves protocol1 on its original delivery path with no ranking or bound-command read',async()=>{
     workerMocks.published.mockResolvedValue(row('complete',1));resultMocks.candidates.mockResolvedValue([]);

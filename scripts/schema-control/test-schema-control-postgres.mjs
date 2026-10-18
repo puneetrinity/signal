@@ -9,6 +9,7 @@ import { beginBoundedTransaction, createPrisma } from './database.mjs';
 import { GOVERNED_FUNCTIONS, GOVERNED_TABLES } from '../check-governed-sourcing.mjs';
 import { RANKING_FUNCTIONS, RANKING_PRIVATE_FUNCTIONS, RANKING_TABLES } from '../check-rubric-ranking.mjs';
 import { RC_FUNCTIONS, RC_OWNER_FUNCTIONS, RC_TABLES } from '../check-rc-skills.mjs';
+import { PRIVATE_RESUME_FUNCTIONS, PRIVATE_RESUME_OWNER_FUNCTIONS, assertPrivateResumeAccess } from '../check-private-resume.mjs';
 
 if (process.env.RUN_SIGNAL_SCHEMA_CONTROL_POSTGRES !== '1') {
   throw new Error('RUN_SIGNAL_SCHEMA_CONTROL_POSTGRES=1 is required');
@@ -285,6 +286,10 @@ try {
   const stage1Migration = '20261012000000_ranking_lock_work';
   const prepareMigration = '20261013000000_rc_prepare_transport';
   const searchMigration = '20261014000000_rc_search_correction';
+  const privateMigration = '20261018000000_private_resume_sourcing';
+  assert(historicalLock.migrations.at(-1).name === privateMigration, 'Unexpected private resume tail');
+  historicalLock.migrations.pop();
+  const searchLock = structuredClone(historicalLock);
   assert(historicalLock.migrations.at(-1).name === searchMigration, 'Unexpected RC search correction tail');
   historicalLock.migrations.pop();
   const prepareLock = structuredClone(historicalLock);
@@ -315,6 +320,17 @@ try {
     await cp(resolve(ROOT_DIR, 'prisma/migrations', migration.name), resolve(historicalRoot, 'prisma/migrations', migration.name), { recursive: true });
   }
   await writeFile(resolve(historicalRoot, 'prisma/migrations.lock.json'), `${JSON.stringify(historicalLock, null, 2)}\n`);
+  // Rewind only this attested empty fixture, preserving the real 32 -> 33 upgrade below.
+  const [privateRows] = await admin.$queryRawUnsafe('SELECT count(*)::integer count FROM public.private_candidate_sources');
+  const [candidateRows] = await admin.$queryRawUnsafe('SELECT count(*)::integer count FROM public.candidates');
+  assert(privateRows.count === 0 && candidateRows.count === 0, 'Historical rehearsal requires empty candidate tables');
+  await admin.$executeRawUnsafe('DROP TRIGGER private_identity_immutable ON public.candidates');
+  for (const signature of [...PRIVATE_RESUME_FUNCTIONS, ...PRIVATE_RESUME_OWNER_FUNCTIONS])
+    await admin.$executeRawUnsafe(`DROP FUNCTION public.${signature}`);
+  await admin.$executeRawUnsafe('DROP TABLE public.private_candidate_sources');
+  await admin.$executeRawUnsafe('ALTER TABLE public.candidates DROP CONSTRAINT candidates_identity_shape');
+  await admin.$executeRawUnsafe('ALTER TABLE public.candidates DROP COLUMN "identityKind", DROP COLUMN "privateCandidateRef", ALTER COLUMN "linkedinUrl" SET NOT NULL, ALTER COLUMN "linkedinId" SET NOT NULL');
+  await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1', privateMigration);
   for (const table of RC_TABLES) {
     const [row] = await admin.$queryRawUnsafe(`SELECT count(*)::integer count FROM public.${table}`);
     assert(row.count === 0, 'Historical rehearsal requires empty RC tables');
@@ -431,7 +447,10 @@ try {
       const [rights]=await admin.$queryRawUnsafe('SELECT has_function_privilege($1,$2,\'EXECUTE\') allowed',RUNTIME_ROLE,signature);
       assert(rights.allowed===false,'New RC helper leaked default EXECUTE before provisioning');
     }
-    await requireSuccess(await runNode('scripts/schema-control/migrate-release.mjs',releaseEnvironment),
+    await cp(resolve(ROOT_DIR,'prisma/migrations',searchMigration),resolve(historicalRoot,'prisma/migrations',searchMigration),{recursive:true});
+    await writeFile(resolve(historicalRoot,'prisma/migrations.lock.json'),`${JSON.stringify(searchLock,null,2)}\n`);
+    await requireSuccess(await runNode('scripts/schema-control/migrate-release.mjs', {...releaseEnvironment,
+      SIGNAL_SCHEMA_CONTROL_TEST_ROOT:historicalRoot,SIGNAL_SCHEMA_DISPOSABLE_SINGLE_CREDENTIAL:'1'}),
       '31-to-32 direct fetch and compact reads release');
     const [workRights]=await admin.$queryRawUnsafe("SELECT has_function_privilege($1,'signal_rc_work(text,uuid,jsonb)','EXECUTE') allowed",RUNTIME_ROLE);
     assert(workRights.allowed===false,'New RC wrapper leaked default EXECUTE before provisioning');
@@ -440,6 +459,8 @@ try {
     const [baselineGuard]=await admin.$queryRawUnsafe("SELECT tgenabled FROM pg_trigger WHERE tgrelid='public.rc_sourcing_runs'::regclass AND tgname='rc_baseline_write_guard'");
     assert(baselineGuard?.tgenabled==='A','Baseline trigger must enforce writes in replica mode too');
   } finally { await admin.$executeRawUnsafe(`ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM ${RUNTIME_ROLE}`); }
+  await requireSuccess(await runNode('scripts/schema-control/migrate-release.mjs', releaseEnvironment),
+    '32-to-33 private resume sourcing release');
   await requireSuccess(
     await runNode('scripts/schema-control/provision-runtime-role.mjs', {
       ...commonIdentity, DIRECT_URL: adminUrl,
@@ -448,6 +469,7 @@ try {
     }),
     'post-release governed runtime-role provision',
   );
+  await admin.$transaction(tx => assertPrivateResumeAccess(tx, { role: RUNTIME_ROLE }));
 
   await requireSuccess(
     await runNode('scripts/schema-control/migrate-release.mjs', releaseEnvironment),

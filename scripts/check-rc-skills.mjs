@@ -8,7 +8,7 @@ export const RC_FUNCTIONS=['signal_rc_admit(text,uuid,jsonb)','signal_rc_prepare
  'signal_rc_seal(text,uuid,jsonb)','signal_rc_outbox(text,uuid,jsonb)','signal_rc_maintain(jsonb)','signal_rc_work(text,uuid,jsonb)'];
 export const RC_PREPARE_PRIVATE_FUNCTIONS=['signal_rc_prepare_rebuild(text,jsonb)','signal_rc_prepare_transport(jsonb)'];
 export const RC_OWNER_FUNCTIONS=['signal_rc_set_policy(jsonb)','signal_rc_recover(text,uuid,jsonb)',...RC_PREPARE_PRIVATE_FUNCTIONS,'signal_rc_free_rejection_valid(jsonb)','signal_rc_validate_baseline_write()'];
-export const RC_CATALOG_SHA256='f0664e11194525d20f95c16f5e0852e6665367d88420d56268fdd65de596557d';
+export const RC_CATALOG_SHA256='3de5ea6302225fbf4e83c3c308e02ee01e60dfe9b0e84ebc930d3201e5306bbb';
 export const RC_CATALOG_SQL=`WITH relations AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname LIKE 'rc\\_%' ESCAPE '\\' AND c.relkind IN ('r','p')
 ), functions AS (

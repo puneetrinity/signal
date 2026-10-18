@@ -144,12 +144,13 @@ export async function POST(request: NextRequest) {
 
   // 4. Load existing pool LinkedIn IDs (recent 5000)
   const poolRows = await prisma.candidate.findMany({
-    where: { tenantId, ...candidatePrivacyAllowedRelationWhere(privacyContext) },
+    where: { tenantId, identityKind: 'linkedin', privateCandidateRef: null,
+      ...candidatePrivacyAllowedRelationWhere(privacyContext) },
     select: { linkedinId: true },
     take: 5000,
     orderBy: { updatedAt: 'desc' },
   });
-  const existingLinkedinIds = new Set(poolRows.map(r => r.linkedinId));
+  const existingLinkedinIds = new Set(poolRows.flatMap(r => r.linkedinId ? [r.linkedinId] : []));
 
   // 5. dryRun path — no SERP spend
   if (dryRun) {

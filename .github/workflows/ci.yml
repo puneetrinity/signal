@@ -84,6 +84,7 @@ jobs:
       - run: npm run check:governed-sourcing
       - run: npm run check:rubric-ranking
       - run: npm run check:rc-skills
+      - run: node scripts/check-private-resume.mjs
       - run: npm run check:candidate-privacy
       - run: npm run test:schema-control
       - run: npm run test:candidate-privacy-surfaces
@@ -205,6 +206,20 @@ jobs:
           CREATE DATABASE signal_sourcing_test OWNER signal_sourcing_owner_test;
           SQL
           npm run test:governed-sourcing:pg
+      - name: Prove private applicant identity and contact restrictions
+        env:
+          PRIVATE_RESUME_DISPOSABLE: '1'
+          PRIVATE_RESUME_TEST_INIT: '1'
+          PRIVATE_RESUME_TEST_DSN: postgresql://resume_discover_owner_test:private-test-only@127.0.0.1:5432/resume_discover_ci_test
+        run: |
+          sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE resume_discover_owner_test LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD 'private-test-only';
+          DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='signal_runtime') THEN CREATE ROLE signal_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
+          CREATE DATABASE resume_discover_ci_test OWNER resume_discover_owner_test;
+          SQL
+          python3 -m venv "$RUNNER_TEMP/private-resume-test-venv"
+          "$RUNNER_TEMP/private-resume-test-venv/bin/pip" install 'psycopg[binary]>=3.2,<4'
+          "$RUNNER_TEMP/private-resume-test-venv/bin/python" scripts/test-private-resume-postgres.py
       - name: Prove shared provider capacity on isolated Redis
         env:
           SIGNAL_SOURCING_REDIS_DISPOSABLE: '1'

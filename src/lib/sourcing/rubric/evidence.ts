@@ -2,6 +2,8 @@ import { z } from 'zod';
 import { canonical, rankingHash } from './contracts';
 import { normalize } from './taxonomy';
 import type { EmploymentInterval } from './experience';
+import { calculateExperience } from './experience';
+import {privateResumeIdentity} from '../private-resume-contracts';
 
 const term=z.string().min(1).max(500);
 const field=z.enum(['title','skill','seniority','function','domain','city','country','work_arrangement','certification','language','education_requirement','work_eligibility']);
@@ -13,7 +15,7 @@ export const factSchema=z.object({
   qualifier:z.string().max(160).optional(), validUntil:z.string().datetime().optional(), revoked:z.boolean().optional(),
 }).strict().refine(v=>v.scope==='organization'?!!v.organizationRef:v.organizationRef===null,'Evidence scope mismatch');
 export type EvidenceFact=z.infer<typeof factSchema>;
-const roleSchema=z.object({title:z.string().max(500).optional(),employmentType:z.string().max(100).optional(),
+export const roleSchema=z.object({title:z.string().max(500).optional(),employmentType:z.string().max(100).optional(),
   start:z.string().max(40).nullable().optional(),end:z.string().max(40).nullable().optional(),ongoing:z.boolean().optional()}).strict();
 export const EVIDENCE_MAX_BYTES=65_536;
 export const EVIDENCE_POOL_MAX_BYTES=134_217_728;
@@ -36,17 +38,53 @@ export type WithheldProfile=z.infer<typeof withheldProfileSchema>;
 export class OversizedEvidenceError extends Error {
   constructor(readonly record:WithheldProfile){super('RANKING_EVIDENCE_TOO_LARGE');}
 }
-const evidenceShape=z.object({candidateId:z.string().min(1).max(200),organizationRef:z.string().regex(/^[1-9][0-9]*$/),
+const evidenceBase=z.object({candidateId:z.string().min(1).max(200),organizationRef:z.string().regex(/^[1-9][0-9]*$/),
   // Frozen display provenance only. Never read by a criterion or comparator.
   presentationSource:z.enum(['pool','pool_enriched','discovered']).optional(),
   facts:z.array(factSchema).max(1000),employment:z.array(roleSchema).max(500),version:z.literal('rubric-evidence-v1'),
-}).strict().superRefine((v,ctx)=>{
+}).strict();
+export const evidenceV1Schema=evidenceBase.superRefine((v,ctx)=>{
   if(v.facts.some(f=>f.scope==='organization'&&f.organizationRef!==v.organizationRef)) ctx.addIssue({code:z.ZodIssueCode.custom,message:'Foreign private evidence'});
 });
-export const evidenceSchema=evidenceShape.superRefine((v,ctx)=>{
+export const employmentSourceSchema=z.object({
+  kind:z.enum(['candidate_provided','profile_evidence']),
+  scope:z.enum(['public','organization']), organizationRef:z.string().nullable(),
+  sourceVersion:z.string().min(1).max(100), sourceHash:z.string().regex(/^[a-f0-9]{64}$/),
+  observedAt:z.string().datetime(), referenceId:z.string().uuid().nullable(),
+  intervals:z.array(roleSchema).max(500),
+}).strict().refine(v=>v.kind==='candidate_provided'
+  ? v.scope==='organization' && !!v.organizationRef && v.referenceId!==null
+  : v.scope==='public' && v.organizationRef===null && v.referenceId===null);
+export const evidenceV2Schema=evidenceBase.extend({version:z.literal('rubric-evidence-v2'),
+  // v2 dates only live in attributed sources. The legacy lane must be empty.
+  employment:z.array(roleSchema).max(0),
+  employmentSources:z.array(employmentSourceSchema).max(2),
+  resumeIdentity:privateResumeIdentity.optional(),
+}).strict().superRefine((v,ctx)=>{
+  if(v.facts.some(f=>f.scope==='organization'&&f.organizationRef!==v.organizationRef) ||
+    v.employmentSources.some(s=>s.scope==='organization'&&s.organizationRef!==v.organizationRef) ||
+    new Set(v.employmentSources.map(s=>s.kind)).size!==v.employmentSources.length)
+    ctx.addIssue({code:z.ZodIssueCode.custom,message:'Foreign or duplicate employment source'});
+});
+export const evidenceSchema=z.union([evidenceV1Schema,evidenceV2Schema]).superRefine((v,ctx)=>{
   if(evidenceBytes(v)>EVIDENCE_MAX_BYTES)ctx.addIssue({code:z.ZodIssueCode.custom,message:'Evidence too large'});
 });
 export type CanonicalEvidence=z.infer<typeof evidenceSchema>;
+export function selectEmployment(evidence:CanonicalEvidence, allowed:readonly string[], asOf:string):{
+  intervals:EmploymentInterval[]; ref:string;
+} {
+  if(evidence.version==='rubric-evidence-v1')return {
+    intervals:allowed.includes('profile_evidence')?evidence.employment:[], ref:'employment'};
+  const available=evidence.employmentSources.filter(s=>allowed.includes(s.kind)&&Date.parse(s.observedAt)<=Date.parse(asOf));
+  for(const kind of ['candidate_provided','profile_evidence']) {
+    const source=available.find(s=>s.kind===kind);
+    if(!source)continue;
+    const measured=calculateExperience(source.intervals,asOf);
+    if(measured.status==='measured'||measured.status==='bounded')return {
+      intervals:source.intervals,ref:kind==='candidate_provided'?'resume.employment':'profile.employment'};
+  }
+  return {intervals:[],ref:'employment'};
+}
 const record=(v:unknown):Record<string,unknown>=>v!==null && typeof v==='object' && !Array.isArray(v)?v as Record<string,unknown>:{};
 const objects=(v:unknown)=>Array.isArray(v)?v.map(record):[];
 const strings=(v:unknown):string[]=>Array.isArray(v)?v.filter((x):x is string=>typeof x==='string'&&x.trim().length>0):[];
@@ -101,7 +139,7 @@ export function adaptProfile(input:{candidateId:string;organizationRef:string;pr
   const unique=[...new Map(facts.map(f=>[rankingHash(f),f])).values()].sort((a,b)=>{
     const x=rankingHash(a),y=rankingHash(b);return x<y?-1:x>y?1:0;
   });
-  const result=evidenceShape.parse({candidateId:input.candidateId,organizationRef:input.organizationRef,
+  const result=evidenceV1Schema.parse({candidateId:input.candidateId,organizationRef:input.organizationRef,
     facts:unique,employment,version:'rubric-evidence-v1'});
   // Reserve the longest source label before classification; attaching display
   // provenance later cannot push an admitted profile over the database cap.

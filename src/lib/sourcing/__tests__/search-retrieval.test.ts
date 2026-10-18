@@ -85,7 +85,7 @@ describe('actual orchestration pre-purchase boundary',()=>{
   boundary.publicLane.mockReset().mockRejectedValue(new SearchRetrievalError(code==='configuration'?'transport':code,code==='transport'));
   boundary.privateLane.mockReset().mockResolvedValue({results:[],total:0,appliedLimit:300});
   boundary.purchase.mockReset();boundary.pool.mockReset();
-  vi.spyOn(GovernedRepository.prototype,'call').mockResolvedValue({protocolVersion:2,flowRunId:'10000000-0000-4000-8000-000000000001'});
+  vi.spyOn(GovernedRepository.prototype,'call').mockResolvedValue({protocolVersion:2,flowRunId:'10000000-0000-4000-8000-000000000001',rankingContract:{payload:{schemaVersion:3}}});
   vi.spyOn(RcRepository.prototype,'retrievalConfiguration').mockImplementation(async(_identity,config)=>config);
   const {runSourcingOrchestrator}=await import('../orchestrator');
   await expect(runSourcingOrchestrator('synthetic-request','org_28',{title:'Backend Engineer',skills:['Python'],goodToHaveSkills:[],jdDigest:'{}',location:'Bengaluru'},undefined,1,'execution','lease'))
