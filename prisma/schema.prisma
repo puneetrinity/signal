@@ -117,8 +117,10 @@ model Candidate {
   tenantId String
 
   // LinkedIn anchor (URL only - no scraped data)
-  linkedinUrl String // Unique per tenant (see @@unique below)
-  linkedinId  String // Username from URL (e.g., "johnsmith")
+  identityKind String @default("linkedin")
+  privateCandidateRef String? @db.Uuid
+  linkedinUrl String? // Required by SQL for public identities only
+  linkedinId  String? // Never fabricated for resume-only applicants
 
   // Data from search snippets (public SERP data, not scraped)
   searchTitle   String? @db.Text // Title from Google result
@@ -161,9 +163,11 @@ model Candidate {
   contactEnrichmentOperation ContactEnrichmentOperation?
   privacyProjections         CandidatePrivacyProjection[]
   rankingItems               GovernedRankingItem[]
+  privateSources             PrivateCandidateSource[]
 
   // Tenant-scoped unique constraints
   @@unique([tenantId, id])
+  @@unique([tenantId, privateCandidateRef])
   @@unique([tenantId, linkedinUrl])
   @@unique([tenantId, linkedinId])
   @@index([tenantId])
@@ -174,6 +178,28 @@ model Candidate {
   @@index([confidenceScore])
   @@index([createdAt])
   @@map("candidates")
+}
+
+/// Organisation-scoped provenance; never a public profile or a contact target.
+model PrivateCandidateSource {
+  tenantId String @map("tenant_id")
+  candidateId String @map("candidate_id")
+  referenceId String @map("reference_id") @db.Uuid
+  generationId String @map("generation_id") @db.Uuid
+  memoryCandidateId String @map("memory_candidate_id") @db.Uuid
+  applicationId Int @map("application_id")
+  applicationJobId Int @map("application_job_id")
+  resumeVersionId String @map("resume_version_id") @db.Uuid
+  sourceId String @map("source_id") @db.Uuid
+  sourceHash String @map("source_hash")
+  linkedPublicId String? @map("linked_public_id") @db.Uuid
+  authorityVersion Int @default(1) @map("authority_version")
+  observedAt DateTime @map("observed_at") @db.Timestamptz(6)
+  candidate Candidate @relation(fields: [tenantId, candidateId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@id([tenantId, candidateId, referenceId, generationId])
+  @@index([tenantId, linkedPublicId])
+  @@map("private_candidate_sources")
 }
 
 /// Candidate-keyed, generation-scoped projection of Memory's privacy decision.

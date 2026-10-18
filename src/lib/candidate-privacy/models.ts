@@ -30,7 +30,10 @@ export type CandidatePrivacyIdentifier = z.infer<typeof privacyIdentifierSchema>
 
 export const canonicalReferenceSchema = z.object({
   global_candidate_id: z.string().uuid().optional(),
-}).strict();
+  candidate_tenant_id: z.string().regex(/^org_[1-9][0-9]*$/).optional(),
+  candidate_id: z.string().uuid().optional(),
+}).strict().refine(value => (value.candidate_tenant_id === undefined) === (value.candidate_id === undefined),
+  'Private canonical identity requires tenant and candidate');
 export type CandidatePrivacyCanonicalReference = z.infer<typeof canonicalReferenceSchema>;
 
 export const eligibilitySubjectSchema = z.object({
@@ -101,6 +104,7 @@ export interface CandidatePrivacyAnchor {
   linkedinUrl?: string | null;
   signalCandidateId?: string | null;
   globalCandidateId?: string | null;
+  privateCandidate?: { tenantId: string; candidateId: string };
 }
 
 export function anchorToEligibilitySubject(
@@ -122,8 +126,10 @@ export function anchorToEligibilitySubject(
   return eligibilitySubjectSchema.parse({
     request_ref: anchor.requestRef,
     identifiers,
-    ...(anchor.globalCandidateId
-      ? { canonical: { global_candidate_id: anchor.globalCandidateId } }
+    ...(anchor.globalCandidateId || anchor.privateCandidate
+      ? { canonical: { ...(anchor.globalCandidateId ? { global_candidate_id: anchor.globalCandidateId } : {}),
+          ...(anchor.privateCandidate ? {candidate_tenant_id:anchor.privateCandidate.tenantId,
+            candidate_id:anchor.privateCandidate.candidateId} : {}) } }
       : {}),
   });
 }

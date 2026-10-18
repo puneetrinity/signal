@@ -129,6 +129,10 @@
     {
       "name": "20261014000000_rc_search_correction",
       "sha256": "936712140fb0d17d30d6e668cfa5dc50e9bceb0e973396105c16ee99b9bf1636"
+    },
+    {
+      "name": "20261018000000_private_resume_sourcing",
+      "sha256": "d46728e7f2fb11feccc4adaf661d3c2c73963a11cd81e5c558100659487464a9"
     }
   ]
 }

@@ -6,7 +6,7 @@ export const RANKING_TABLES=['governed_ranking_runs','governed_ranking_items'];
 export const RANKING_FUNCTIONS=['signal_ranking_claim(text,uuid,jsonb)','signal_ranking_finish(text,uuid,uuid,jsonb)','signal_ranking_read(text,uuid,uuid)'];
 export const RANKING_PRIVATE_FUNCTIONS=['signal_ranking_immutable()','signal_ranking_canonical(jsonb)',
  'signal_ranking_transport_parse(text)','signal_ranking_rebuild(text,jsonb)','signal_ranking_transport_record(text,text)'];
-export const RANKING_CATALOG_SHA256='ae0d6c4261b501fbf3228108e20f8a873a8c0fc2516b1767a7bfadc1897ac108';
+export const RANKING_CATALOG_SHA256='46e584ecfbb7d94d188920c1c40810b9ce05f18c570ded46431bcf01f3369d79';
 export const RANKING_CATALOG_SQL=`WITH relations AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname='public' AND c.relname LIKE 'governed_ranking_%' AND c.relkind IN ('r','p')

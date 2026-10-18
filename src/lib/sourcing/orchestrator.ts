@@ -9,6 +9,13 @@ import {governedEnabled,type GovernedSource} from './governed-contracts';
 import {RankingRepository,type RankingRead,type RankingSourceType} from './rubric/repository';
 import {adaptProfile,OversizedEvidenceError,type WithheldProfile,type CanonicalEvidence,type EvidenceFact} from './rubric/evidence';
 import {rankingHash} from './rubric/contracts';
+import {adaptPrivateResume} from './rubric/private-resume-evidence';
+import {readResumeLane,revalidateResumeLane,publicApplicantIds,type ResumeLaneContext} from './private-resume-lane';
+import {fusePrivateResumes} from './private-resume-fusion';
+import {materializePrivateResume} from './private-resume-materialization';
+import type {PrivateResumeHit} from './private-resume-contracts';
+import {createCandidateAdmissionProofs} from '@/lib/candidate-privacy/decision';
+import {persistAdmissionProjection} from '@/lib/candidate-privacy/repository';
 import { createLogger } from '@/lib/logger';
 import { buildJobRequirements, type SourcingJobContextInput } from './jd-digest';
 import { rankCandidates } from './ranking-new';
@@ -355,6 +362,7 @@ interface PublicMemoryTelemetry {
   identityReceiptConflicts: number;
   privateSearchAvailable: boolean | null;
   privateRetrieved: number;
+  publicApplicantCopiesWithheld: number;
   privateMaterialized: number;
   privateSkippedNoLinkedin: number;
   materializedCandidates: number;
@@ -520,6 +528,7 @@ async function runSourcingOrchestratorMeasured(
     identityReceiptConflicts: 0,
     privateSearchAvailable: null,
     privateRetrieved: 0,
+    publicApplicantCopiesWithheld: 0,
     privateMaterialized: 0,
     privateSkippedNoLinkedin: 0,
     materializedCandidates: 0,
@@ -655,6 +664,12 @@ async function runSourcingOrchestratorMeasured(
     HOME_POOL_ENABLED,
   } = await import('./activegraph-client');
   const publicHydrationEnabled = config.publicMemoryHydrationEnabled;
+  const resumeContext:ResumeLaneContext|undefined=governedCommand?.protocolVersion===2
+    && governedCommand.rankingContract.payload.schemaVersion===4 && executionAttemptId
+    ? {tenantId,requestId,executionAttemptId,command:governedCommand}:undefined;
+  if(resumeContext&&(!publicHydrationEnabled||!config.twoLayerPoolEnabled))throw Error('PRIVATE_RETRIEVAL_CONFIGURATION');
+  let managedResumes:PrivateResumeHit[]=[];
+  if(resumeContext)managedResumes=await readResumeLane(resumeContext,Date.now()+9000);
   const requiredMemory = governedCommand?.protocolVersion === 2 && process.env.RC_SKILLS_ENABLED === 'true';
   let requiredPoolMaximum = 2000;
   let requiredLanes: {
@@ -745,6 +760,7 @@ async function runSourcingOrchestratorMeasured(
     prisma.candidate.findMany({
       where: {
         tenantId,
+        identityKind:'linkedin',
         id: { in: ids },
         ...candidatePrivacyAllowedRelationWhere(privacyContext),
       },
@@ -764,6 +780,7 @@ async function runSourcingOrchestratorMeasured(
        AND privacy_projection."evaluated_cursor" = ${privacyContext.cursor}
        AND privacy_projection."decision" = 'allow'
       WHERE "candidates"."tenantId" = ${tenantId}
+        AND "candidates"."identityKind" = 'linkedin'
       ORDER BY "candidates"."updatedAt" DESC
       LIMIT ${config.poolLayer1Cap}
     `;
@@ -1285,6 +1302,16 @@ async function runSourcingOrchestratorMeasured(
       publicMemory.privateSearchAvailable = privateResponse !== null;
       publicMemory.privateRetrieved = privateResponse?.results.length ?? 0;
 
+      if(resumeContext) {
+        if(!privateResponse)throw Error('PRIVATE_RETRIEVAL_UNAVAILABLE');
+        const fused=fusePrivateResumes(tenantId,managedResumes,privateResponse.results.slice(0,300).map(value=>({
+          candidateId:value.candidateId,globalCandidateId:value.globalCandidateId??null,value,
+        })),Math.min(300,HOME_POOL_LIMIT));
+        managedResumes=fused.flatMap(entry=>entry.kind==='managed'?[entry.resume]:[]);
+        privateResponse={...privateResponse,results:fused.flatMap(entry=>entry.kind==='legacy'?[entry.legacy]:[])};
+        publicMemory.privateRetrieved=privateResponse.results.length+managedResumes.length;
+      }
+
       if (privateResponse?.results.length) {
         const prepared = privateResponse.results.flatMap((result) => {
           const candidate = buildTenantPrivateRankingCandidate(result);
@@ -1334,6 +1361,7 @@ async function runSourcingOrchestratorMeasured(
             : [];
         const privateRowBySlug = new Map<string, (typeof privateRows)[number]>();
         for (const row of privateRows) {
+          if (!row.linkedinId) continue;
           privateRowBySlug.set(row.linkedinId.toLowerCase(), row);
           if (row.linkedinUrl) {
             const slug = extractLinkedInIdFromUrl(row.linkedinUrl);
@@ -2037,7 +2065,7 @@ async function runSourcingOrchestratorMeasured(
       // hydrated poolRows subset would let discovery re-buy pool members.
       const existingLinkedinIds = config.twoLayerPoolEnabled
         ? new Set(slimPool.map((r) => r.linkedinId))
-        : new Set(poolRows.map((r) => r.linkedinId));
+        : new Set(poolRows.flatMap((r) => r.linkedinId ? [r.linkedinId] : []));
       log.info(
         {
           requestId,
@@ -3372,8 +3400,10 @@ async function runSourcingOrchestratorMeasured(
                   ref:'tenant_private_v1.skills',kind:'candidate_provided',sourceVersion:rankingHash(privateEvidence?.skills),
                   observedAt,scope:'organization',organizationRef:governedCommand.organizationRef}));
                 try {
-                const normalized=adaptProfile({candidateId:dbId,organizationRef:governedCommand.organizationRef,
+                const profileEvidence=adaptProfile({candidateId:dbId,organizationRef:governedCommand.organizationRef,
                   profile:evidenceProfile,sourceVersion:rankingHash(evidenceProfile),observedAt,permittedFacts});
+                const normalized=resumeContext?adaptPrivateResume({candidateId:dbId,organizationRef:governedCommand.organizationRef,
+                  publicEvidence:profileEvidence,publicSource:{observedAt,sourceVersion:rankingHash(evidenceProfile),sourceHash:rankingHash(evidenceProfile)}}):profileEvidence;
                 if(governedWithheldById.has(dbId))throw Error('RANKING_IDENTITY_CONFLICT');
                 if(governedEvidenceById.has(dbId)&&rankingHash(governedEvidenceById.get(dbId))!==rankingHash(normalized))throw Error('RANKING_IDENTITY_CONFLICT');
                 governedEvidenceById.set(dbId,normalized);
@@ -3416,7 +3446,58 @@ async function runSourcingOrchestratorMeasured(
             if(governedCommand?.protocolVersion===2) {
               if(!executionAttemptId||!processingLeaseId)throw Error('GOVERNED_EXECUTION_STALE');
               await assertCurrentExecution();
-              if(process.env.RC_SKILLS_ENABLED==='true'&&governedCommand.rankingContract.payload.schemaVersion===3){
+              if(resumeContext&&managedResumes.length) {
+                managedResumes=await revalidateResumeLane(resumeContext,managedResumes,Date.now()+9000);
+                const proofs=await createCandidateAdmissionProofs(managedResumes.map(resume=>({
+                  key:resume.identity.candidateId,privateCandidate:{tenantId,candidateId:resume.identity.candidateId},
+                })),undefined,Date.now()+9000);
+                // Verified links only. Never join by names, email or inferred URLs.
+                const globalIds=managedResumes.flatMap(resume=>resume.linkedPublicId?[resume.linkedPublicId]:[]);
+                const publicLinks=globalIds.length?await prisma.candidateGlobalLink.findMany({where:{tenantId,
+                  globalCandidateId:{in:globalIds},candidate:{identityKind:'linkedin'}},
+                  select:{candidateId:true,globalCandidateId:true}}):[];
+                for(const resume of managedResumes) {
+                  const proof=proofs.get(resume.identity.candidateId);if(!proof)continue;
+                  const id=await prisma.$transaction(async tx=>{
+                    const candidateId=await materializePrivateResume(tx,tenantId,resume);
+                    await persistAdmissionProjection(tx,{tenantId,candidateId,proof});
+                    return candidateId;
+                  },{isolationLevel:Prisma.TransactionIsolationLevel.Serializable,maxWait:2000,timeout:5000});
+                  const duplicateIds=publicLinks.filter(link=>link.globalCandidateId===resume.linkedPublicId).map(link=>link.candidateId);
+                  // Keep public facts scoped public; never copy resume data into that record.
+                  const duplicate=duplicateIds.map(key=>governedEvidenceById.get(key)).find(Boolean);
+                  const publicEvidence=duplicate?{...duplicate,candidateId:id,version:'rubric-evidence-v1' as const,
+                    employment:duplicate.version==='rubric-evidence-v2'
+                      ? duplicate.employmentSources.find(source=>source.kind==='profile_evidence')?.intervals??[]:duplicate.employment,
+                  }:undefined;
+                  const cleanPublic=publicEvidence?{candidateId:id,organizationRef:publicEvidence.organizationRef,
+                    version:'rubric-evidence-v1' as const,employment:publicEvidence.employment,facts:publicEvidence.facts}:undefined;
+                  const evidence=adaptPrivateResume({candidateId:id,organizationRef:governedCommand.organizationRef,resume,
+                    ...(cleanPublic?{publicEvidence:cleanPublic,publicSource:{observedAt:governedObservedAt,
+                      sourceVersion:rankingHash(cleanPublic),sourceHash:rankingHash(cleanPublic)}}:{})});
+                  for(const duplicateId of duplicateIds) {
+                    governedEvidenceById.delete(duplicateId);governedWithheldById.delete(duplicateId);governedSourceById.delete(duplicateId);
+                    const index=allRankedWithIds.findIndex(card=>card.candidateId===duplicateId);if(index>=0)allRankedWithIds.splice(index,1);
+                  }
+                  governedEvidenceById.set(id,evidence);governedSourceById.set(id,'pool');materializedPrivateLocalIds.add(id);
+                  allRankedWithIds.push({candidateId:id,linkedinUrl:'',name:'',headlineHint:resume.evidence.currentTitle??'',
+                    locationHint:[resume.evidence.location.city,resume.evidence.location.country].filter(Boolean).join(', '),
+                    fitScore:null,fitBreakdown:null,matchTier:null,locationMatchType:null});
+                }
+                if(governedEvidenceById.size+governedWithheldById.size>requiredPoolMaximum)throw Error('RANKING_POOL_TOO_LARGE');
+              }
+              if(resumeContext) {
+                const publicLinks=await prisma.candidateGlobalLink.findMany({where:{tenantId,
+                  candidateId:{in:[...governedEvidenceById.keys(),...governedWithheldById.keys()]},candidate:{identityKind:'linkedin'}},
+                  select:{candidateId:true,globalCandidateId:true}});
+                const applicants=await publicApplicantIds(resumeContext,publicLinks.map(link=>link.globalCandidateId),Date.now()+9000);
+                for(const link of publicLinks)if(applicants.has(link.globalCandidateId)) {
+                  publicMemory.publicApplicantCopiesWithheld++;
+                  governedEvidenceById.delete(link.candidateId);governedWithheldById.delete(link.candidateId);governedSourceById.delete(link.candidateId);
+                  const index=allRankedWithIds.findIndex(card=>card.candidateId===link.candidateId);if(index>=0)allRankedWithIds.splice(index,1);
+                }
+              }
+              if(process.env.RC_SKILLS_ENABLED==='true'&&[3,4].includes(governedCommand.rankingContract.payload.schemaVersion)){
                 const {RcRepository}=await import('./rc-skills/repository');
                 const repository=new RcRepository(),identity={tenantId,flowRunId:governedCommand.flowRunId,executionAttemptId,processingLeaseId};
                 const admission=await repository.admit(identity,requestId,acquisitionGeneration,governedCommand.rankingContract.contractHash);
@@ -3427,8 +3508,8 @@ async function runSourcingOrchestratorMeasured(
                   const {freezeRcBaseline,completeRcRanking}=await import('./rc-skills/worker');
                   const candidateIds=[...governedEvidenceById.keys(),...governedWithheldById.keys()];
                   const links=await prisma.candidateGlobalLink.findMany({where:{tenantId,candidateId:{in:candidateIds}},
-                    select:{candidateId:true,globalCandidateId:true,candidate:{select:{linkedinUrl:true}}}});
-                  const identities=rcPublicIdentities(links.flatMap(link=>link.candidate.linkedinUrl?[{
+                    select:{candidateId:true,globalCandidateId:true,candidate:{select:{linkedinUrl:true,identityKind:true}}}});
+                  const identities=rcPublicIdentities(links.flatMap(link=>link.candidate.identityKind==='linkedin'&&link.candidate.linkedinUrl?[{
                     candidateId:link.candidateId,globalCandidateId:link.globalCandidateId,url:link.candidate.linkedinUrl}]:[]));
                   const receipts=await prisma.crustdataAcquisitionReceipt.findMany({where:{tenantId,sourcingRequestId:requestId,
                     acquisitionGeneration,status:'complete'},select:{id:true}});

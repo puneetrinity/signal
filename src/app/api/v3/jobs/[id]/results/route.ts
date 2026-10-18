@@ -12,6 +12,10 @@ import { requireScope } from '@/lib/auth/service-scopes';
 import { prisma } from '@/lib/prisma';
 import {GovernedRepository,governedAdmissionRefusal} from '@/lib/sourcing/governed-authority';
 import { RankingRepository, type RankingRead } from '@/lib/sourcing/rubric/repository';
+import {governedSourceSchema} from '@/lib/sourcing/governed-contracts';
+import {privateResumeIdentity,type PrivateResumeIdentity} from '@/lib/sourcing/private-resume-contracts';
+import {revalidateResumeIdentities,publicApplicantIds} from '@/lib/sourcing/private-resume-lane';
+import {z} from 'zod';
 import { summarizeIdentitySignals } from '@/lib/sourcing/identity-summary';
 import {
   classifyMatchStrength,
@@ -109,6 +113,7 @@ export async function GET(
           candidate: {
             select: {
               id: true,
+              identityKind:true,
               linkedinUrl: true,
               linkedinId: true,
               nameHint: true,
@@ -162,7 +167,8 @@ export async function GET(
     );
   }
 
-  const candidates = (sourcingRequest as any).candidates || [];
+  let candidates = (sourcingRequest as any).candidates || [];
+  const resumeOriginById=new Map<string,PrivateResumeIdentity>();
   let governed:any;
   let ranking:RankingRead|undefined;
   if(sourcingRequest.flowRunId && sourcingRequest.protocolVersion===2) {
@@ -184,6 +190,30 @@ export async function GET(
           JSON.stringify(ranking.items.map(i=>i.candidateId))!==JSON.stringify(governed.orderedSignalIds))throw Error('RANKING_OUTPUT_CONFLICT');
         const byId=new Map(ranking.items.map(i=>[i.candidateId,i]));
         if(candidates.some((c:any)=>byId.get(c.candidateId)?.ordinal!==c.rank))throw Error('RANKING_OUTPUT_CONFLICT');
+        const command=governedSourceSchema.parse(await repository.call('boundCommand',[tenantId,sourcingRequest.id]));
+        if(command.protocolVersion===2&&command.rankingContract.payload.schemaVersion===4) {
+          const rows=await prisma.$queryRaw<Array<{result:unknown}>>`
+            SELECT public.signal_private_ranking_sources(${tenantId},${command.flowRunId}::uuid,${ranking.revisionId}::uuid) AS result`;
+          if(rows.length!==1)throw Error('PRIVATE_RANKING_UNAVAILABLE');
+          const sources=z.array(z.object({candidateId:z.string().min(1).max(200),identity:privateResumeIdentity}).strict()).max(100).parse(rows[0].result);
+          if(new Set(sources.map(item=>item.candidateId)).size!==sources.length)throw Error('PRIVATE_RANKING_UNAVAILABLE');
+          const visible=new Set(candidates.map((candidate:any)=>candidate.candidateId));
+          const requested=sources.filter(source=>visible.has(source.candidateId));
+          const allowed=await revalidateResumeIdentities({tenantId,requestId:sourcingRequest.id,
+            executionAttemptId:sourcingRequest.executionAttemptId,command},requested.map(source=>source.identity),
+            Date.now()+9000,undefined,ranking.revisionId);
+          const allowedIds=new Set(allowed.map(identity=>identity.candidateId));
+          for(const source of requested)if(allowedIds.has(source.identity.candidateId))resumeOriginById.set(source.candidateId,source.identity);
+          candidates=candidates.filter((candidate:any)=>candidate.candidate.identityKind==='linkedin'
+            || resumeOriginById.has(candidate.candidateId));
+          const links=await prisma.candidateGlobalLink.findMany({where:{tenantId,
+            candidateId:{in:candidates.filter((c:any)=>c.candidate.identityKind==='linkedin').map((c:any)=>c.candidateId)}},
+            select:{candidateId:true,globalCandidateId:true}});
+          const applicants=await publicApplicantIds({tenantId,requestId:sourcingRequest.id,
+            executionAttemptId:sourcingRequest.executionAttemptId,command},links.map(link=>link.globalCandidateId),Date.now()+9000);
+          const withheld=new Set(links.filter(link=>applicants.has(link.globalCandidateId)).map(link=>link.candidateId));
+          candidates=candidates.filter((candidate:any)=>!withheld.has(candidate.candidateId));
+        } else if(candidates.some((candidate:any)=>candidate.candidate.identityKind!=='linkedin'))throw Error('PRIVATE_RANKING_UNAVAILABLE');
         // The immutable full publication remains server-side. Only the current
         // privacy-admitted subsequence may cross the service boundary.
         const allowed=new Set(candidates.map((c:any)=>c.candidateId));
@@ -480,6 +510,8 @@ export async function GET(
       // --- NEW UNIFIED CARD SCHEMA ---
       candidate: {
         id: sc.candidate.id,
+        ...(resumeOriginById.has(sc.candidateId)?{candidateOrigin:{version:1,kind:'organization_candidate',
+          ...resumeOriginById.get(sc.candidateId)}}:{}),
         name: sc.candidate.nameHint,
         linkedinUrl: sc.candidate.linkedinUrl,
         headline: sc.candidate.headlineHint,

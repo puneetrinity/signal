@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+const requirePublicContactCandidate = vi.hoisted(() => vi.fn());
+vi.mock('@/lib/sourcing/private-candidate-access', () => ({ requirePublicContactCandidate }));
 
 const {
   candidateFindFirst,
@@ -83,6 +85,8 @@ function persistedOperation() {
 
 describe("contact operation store", () => {
   beforeEach(() => {
+    requirePublicContactCandidate.mockReset();
+    requirePublicContactCandidate.mockResolvedValue(undefined);
     vi.clearAllMocks();
     candidateFindFirst.mockResolvedValue({
       id: "candidate-1",
@@ -125,6 +129,13 @@ describe("contact operation store", () => {
         },
       }),
     );
+  });
+
+  it('refuses an applicant before creating a paid contact operation', async () => {
+    requirePublicContactCandidate.mockRejectedValue(new Error('candidate_contact_ineligible'));
+    await expect(findOrCreateContactOperation({ tenantId: 'org_1', candidateId: 'candidate-1' }))
+      .rejects.toThrow('candidate_contact_ineligible');
+    expect(operationUpsert).not.toHaveBeenCalled();
   });
 
   it("does not create an operation across a tenant boundary", async () => {

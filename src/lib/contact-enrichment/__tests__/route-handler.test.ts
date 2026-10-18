@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
+const contactAuthority=vi.hoisted(()=>vi.fn());
+vi.mock('@/lib/sourcing/private-candidate-access',()=>({requirePublicContactCandidate:contactAuthority}));
+
 const {
   verifyServiceJWT,
   memoryLookup,
@@ -60,6 +63,7 @@ function pendingOperation() {
 describe("find-contact route handler", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    contactAuthority.mockReset().mockResolvedValue(undefined);
     verifyServiceJWT.mockResolvedValue({
       authorized: true,
       context: {
@@ -79,6 +83,15 @@ describe("find-contact route handler", () => {
     applyContactMemoryRevalidation.mockImplementation(
       async ({ operation }) => operation,
     );
+  });
+
+  it('refuses applicants before any contact operation or cached email read',async()=>{
+    contactAuthority.mockRejectedValueOnce(Error('candidate_contact_ineligible'));
+    const response=await POST(new NextRequest('https://signal.example/api/v3/candidates/candidate-1/find-contact',
+      {method:'POST',body:JSON.stringify({trigger:'shortlist',jobId:'job-42'})}),{params:Promise.resolve({id:'candidate-1'})});
+    expect(response.status).toBe(409);
+    expect(findOrCreateContactOperation).not.toHaveBeenCalled();
+    expect(memoryLookup).not.toHaveBeenCalled();
   });
 
   it("creates or reads only the tenant-scoped operation and returns 202", async () => {

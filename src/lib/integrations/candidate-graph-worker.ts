@@ -23,6 +23,7 @@ import {
   type CandidateGraphSyncJobData,
 } from './candidate-graph-sync';
 import { requireCandidatePrivacyAllowed } from '@/lib/candidate-privacy/repository';
+import { isPublicAcquisitionIdentity } from '@/lib/sourcing/private-candidate-identity';
 
 const log = createLogger('candidate-graph-sync');
 
@@ -107,6 +108,10 @@ function buildGlobalCandidateFields(
   candidate: CandidateWithRelations,
   anchors: IdentityAnchors,
 ) {
+  if (candidate.identityKind !== 'linkedin' || candidate.privateCandidateRef !== null ||
+      !candidate.linkedinUrl || !candidate.linkedinId) {
+    throw new Error('private_candidate_global_sync_forbidden');
+  }
   const snapshot = candidate.intelligenceSnapshots?.[0];
 
   // Resolve structured location from snapshot or candidate hint.
@@ -163,6 +168,8 @@ async function processCandidateGraphSync(
     );
     return;
   }
+
+  if (!isPublicAcquisitionIdentity(candidate)) return;
 
   // 2. Build identity anchors
   const anchors = buildIdentityAnchors(candidate);

@@ -18,11 +18,11 @@ import {createRankingContract,rankingHash} from '../contracts';
 describe('ranking boundary and synthetic replay',()=>{
  it('executes the actual orchestration isolation branch without swallowing identity or validation failures',()=>{
   const source=readFileSync('src/lib/sourcing/orchestrator.ts','utf8');
-  const start=source.indexOf('                try {\n                const normalized=adaptProfile');
+  const start=source.indexOf('                try {\n                const profileEvidence=adaptProfile');
   const end=source.indexOf('\n              }\n\n              return {',start);
   expect(start).toBeGreaterThan(0);expect(end).toBeGreaterThan(start);
   const body=source.slice(start,end),governedEvidenceById=new Map(),governedWithheldById=new Map(),governedSourceById=new Map();
-  const context={adaptProfile,OversizedEvidenceError,rankingHash,dbId:'large',governedCommand:{organizationRef:'28'},
+  const context={adaptProfile,OversizedEvidenceError,rankingHash,resumeContext:undefined,dbId:'large',governedCommand:{organizationRef:'28'},
    evidenceProfile:{skills:{professional_network_skills:Array.from({length:250},(_,i)=>`skill ${i} ${'x'.repeat(150)}`)}},
    observedAt:'2020-01-01T00:00:00.000Z',permittedFacts:[],governedEvidenceById,governedWithheldById,governedSourceById,
    sourceTypeForScored:()=> 'pool',sc:{}};

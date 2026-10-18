@@ -9,6 +9,7 @@ import {
   findOrCreateContactOperation,
 } from "@/lib/contact-enrichment/store";
 import { requireCandidatePrivacyAllowed } from "@/lib/candidate-privacy/repository";
+import { requirePublicContactCandidate } from "@/lib/sourcing/private-candidate-access";
 
 interface ShortlistContactTrigger {
   trigger: "shortlist";
@@ -46,6 +47,7 @@ export async function POST(
   const { id: candidateId } = await params;
   try {
     await requireCandidatePrivacyAllowed(auth.context.tenantId, candidateId);
+    await requirePublicContactCandidate(auth.context.tenantId, candidateId, undefined, {allowUnlinked:true});
     const trigger = await readShortlistTrigger(request);
     if (!trigger) {
       return NextResponse.json(
@@ -90,6 +92,7 @@ export async function POST(
         );
       }
       try {
+        await requirePublicContactCandidate(auth.context.tenantId, candidateId);
         const memory = new ActiveGraphContactMemoryClient();
         const memoryResult = await memory.lookup({
           tenantId: auth.context.tenantId,
@@ -116,6 +119,10 @@ export async function POST(
     const result = contactOperationRouteResult(operation);
     return NextResponse.json(result.body, { status: result.status });
   } catch (error) {
+    if (error instanceof Error && error.message === "candidate_contact_ineligible") {
+      return NextResponse.json({ success: false, state: "failed", emails: [],
+        code: "candidate_contact_ineligible" }, { status: 409 });
+    }
     if (
       error instanceof Error &&
       error.message.startsWith("candidate_privacy_")

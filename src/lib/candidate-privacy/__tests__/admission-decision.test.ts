@@ -25,6 +25,18 @@ function client(): CandidatePrivacyMemoryClient {
 }
 beforeEach(() => vi.clearAllMocks());
 describe('complete privacy admission response', () => {
+  it.each(['allow','block_global','block_all','review'] as const)('uses scoped applicant authority for %s',async decision=>{
+    const api=client();
+    const privateCandidate={tenantId:'org_32',candidateId:'11111111-1111-4111-8111-111111111111'};
+    vi.mocked(api.eligibilityBatch).mockImplementation(async subjects=>{
+      expect(subjects[0].identifiers).toEqual([]);
+      expect(subjects[0].canonical).toEqual({candidate_tenant_id:'org_32',candidate_id:privateCandidate.candidateId});
+      return new Map([[subjects[0].request_ref,decision]]);
+    });
+    const proofs=await createCandidateAdmissionProofs([{key:'private',privateCandidate}],api);
+    if(decision==='allow'||decision==='block_global')expect(proofs.get('private')).toMatchObject({decision:'allow',privateCandidate});
+    else expect(proofs.size).toBe(0);
+  });
   it('does not grant proofs or start another batch after the retrieval deadline',async()=>{
     const api=client();let now=0;const clock=vi.spyOn(Date,'now').mockImplementation(()=>now);
     try{

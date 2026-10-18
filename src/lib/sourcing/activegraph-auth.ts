@@ -35,6 +35,20 @@ async function getSigningKey(): Promise<CryptoKey> {
   return cachedKey;
 }
 
+/** Private resume reads are not generic KG reads or provider ingestion. */
+export async function signPrivateResumeSourcingJWT(tenantId: string, requestId: string): Promise<string> {
+  if (!/^org_[1-9][0-9]{0,9}$/.test(tenantId) || Number(tenantId.slice(4)) > 2_147_483_647
+    || !requestId.trim() || requestId.length > 200 || /[\x00-\x1f\x7f]/.test(requestId)) {
+    throw new Error('PRIVATE_RESUME_AUTHORITY_INVALID');
+  }
+  const issued = Math.floor(Date.now()/1000);
+  return new SignJWT({ tenant_id: tenantId, request_id: requestId,
+    scopes: ['organization-candidate-sourcing:read'], actor_type: 'service' })
+    .setProtectedHeader({ alg: 'RS256', kid: process.env.SIGNAL_JWT_ACTIVE_KID || 'v1' })
+    .setIssuer('signal').setAudience('activekg').setSubject('signal-service')
+    .setIssuedAt(issued).setExpirationTime(issued+300).setJti(uuidv4()).sign(await getSigningKey());
+}
+
 export async function signActiveGraphJWT(
   tenantId: string,
   scopes: ActiveGraphScope,

@@ -11,6 +11,7 @@ import {
   type StagedContactEvidence,
 } from "./types";
 import type { MemoryContactLookupResult } from "./memory-client";
+import { requirePublicContactCandidate } from "@/lib/sourcing/private-candidate-access";
 import {
   candidatePrivacyAllowedRelationWhere,
   CANDIDATE_PRIVACY_ADMISSION_LOCK,
@@ -172,6 +173,7 @@ export async function findOrCreateContactOperation({
       )
     `;
     await requireCandidatePrivacyAllowed(tenantId, candidateId, tx);
+    await requirePublicContactCandidate(tenantId, candidateId, tx);
     const candidate = await tx.candidate.findFirst({
       where: { id: candidateId, tenantId },
       select: {

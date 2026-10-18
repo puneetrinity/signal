@@ -201,6 +201,7 @@ export class CandidatePrivacyAdmissionProof {
     readonly generation: bigint,
     readonly cursor: bigint,
     readonly decision: CandidatePrivacyDecision,
+    readonly privateCandidate?: Readonly<{tenantId:string;candidateId:string}>,
   ) {}
 
   static issue(input: {
@@ -208,12 +209,14 @@ export class CandidatePrivacyAdmissionProof {
     generation: bigint;
     cursor: bigint;
     decision: CandidatePrivacyDecision;
+    privateCandidate?: {tenantId:string;candidateId:string};
   }): CandidatePrivacyAdmissionProof {
     const proof = new CandidatePrivacyAdmissionProof(
       input.requestRef,
       input.generation,
       input.cursor,
       input.decision,
+      input.privateCandidate ? Object.freeze({...input.privateCandidate}) : undefined,
     );
     issuedAdmissionProofs.add(proof);
     return proof;
@@ -234,6 +237,17 @@ export async function persistAdmissionProjection(
 ): Promise<void> {
   if (isCandidatePrivacyDisposableTestAdapter()) return;
   await assertAdmissionProofCurrent(db, input.proof);
+  if(input.proof.privateCandidate) {
+    const bound=input.proof.privateCandidate;
+    if(bound.tenantId!==input.tenantId)throw new CandidatePrivacyUnavailableError('candidate_privacy_conflict');
+    const rows=await db.$queryRaw<Array<{ok:boolean}>>`
+      SELECT EXISTS(SELECT 1 FROM public.candidates WHERE id=${input.candidateId}
+        AND "tenantId"=${input.tenantId} AND "identityKind"='organization_candidate'
+        AND "privateCandidateRef"=${bound.candidateId}::uuid
+        AND "linkedinId" IS NULL AND "linkedinUrl" IS NULL) AS ok
+    `;
+    if(rows.length!==1||rows[0].ok!==true)throw new CandidatePrivacyUnavailableError('candidate_privacy_conflict');
+  }
   const existing = await db.$queryRaw<Array<{ present: boolean }>>`
     SELECT EXISTS (
       SELECT 1
