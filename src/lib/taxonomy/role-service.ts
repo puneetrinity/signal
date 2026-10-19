@@ -13,6 +13,7 @@
 import { createLogger } from '@/lib/logger';
 import { getSourcingConfig } from '@/lib/sourcing/config';
 import { groqClassifyRole } from './role-groq';
+import { groqFailureFields } from '@/lib/ai/groq-outcome';
 
 const log = createLogger('RoleService');
 
@@ -268,7 +269,7 @@ export async function resolveRole(
       normalizedTitle: det.normalizedTitle,
     };
   } catch (err) {
-    log.warn({ error: err, title }, 'Role Groq fallback failed, using deterministic');
+    log.warn(groqFailureFields(err), 'Role Groq fallback failed, using deterministic');
     return det;
   }
 }
@@ -406,7 +407,7 @@ export async function resolveRolesBatch(
             llmCalled: !groqResult.cached,
           };
         } catch (err) {
-          log.warn({ error: err, title: entry.title }, 'Batch role Groq failed for title');
+          log.warn(groqFailureFields(err), 'Batch role Groq failed for title');
           return {
             signature: entry.signature,
             resolution: resolveRoleDeterministic(entry.title),
