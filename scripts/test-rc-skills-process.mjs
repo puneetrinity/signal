@@ -48,10 +48,15 @@ async function main(protocolMode){
  }};
  const cleanEnv={PATH:process.env.PATH,HOME:process.env.HOME,LANG:'C.UTF-8',NODE_ENV:'test',
   UV_THREADPOOL_SIZE:'1',NODE_OPTIONS:'--max-old-space-size=512'};
- function start(file,maintenance=false){
-  const args=maintenance?[resolve(root,'scripts/rc-skills-maintenance.mjs'),'--once']:
+ function start(file,maintenance=false,skipReadiness=true){
+  const args=maintenance?[...(skipReadiness?['--import',resolve(root,'scripts/test-support-skip-schema-ready.mjs')]:[]),
+   resolve(root,'scripts/rc-skills-maintenance.mjs'),'--once']:
    ['--import','tsx',import.meta.filename,'--child',file];
-  const env=maintenance?{...cleanEnv,RC_SKILLS_ENABLED:'true',DATABASE_URL:dsn}:cleanEnv;
+  // Maintenance now always runs the shared Memory delivery step, which validates its
+  // Memory/privacy configuration even with no work. Use the standard disposable test
+  // adapter and a non-routable Memory URL: no work is queued here, so nothing is sent.
+  const env=maintenance?{...cleanEnv,RC_SKILLS_ENABLED:'true',DATABASE_URL:dsn,
+   ACTIVEGRAPH_URL:'http://127.0.0.1:9',SIGNAL_CANDIDATE_PRIVACY_TEST_ADAPTER:'disposable_passthrough'}:cleanEnv;
   const processChild=spawn(process.execPath,args,{cwd:root,env,stdio:['ignore','pipe','pipe']});
   children.add(processChild);let output='';
   processChild.stdout.on('data',data=>{output+=data;});
@@ -71,6 +76,11 @@ async function main(protocolMode){
   await db.query(await readFile(resolve(root,manifest.baselinePath),'utf8'));
   for(const name of (await readdir(resolve(root,'prisma/migrations'))).filter(n=>n>manifest.baselineMigrationThrough).sort())
    await db.query(await readFile(resolve(root,'prisma/migrations',name,'migration.sql'),'utf8'));
+  // The real entrypoint must refuse this raw-SQL database: it has no schema-control
+  // identity/ledger, so readiness fails before any maintenance work.
+  const refused=await start(undefined,true,false).done;
+  assert.notEqual(refused.code,0,'maintenance must refuse to start without schema readiness');
+  assert.doesNotMatch(refused.output,/rc_maintenance_cycle/);
   const maintenance=await start(undefined,true).done;
   assert.equal(maintenance.code,0,'independent maintenance entrypoint must start on the migrated local DB: '+maintenance.output);
   assert.match(maintenance.output,/rc_maintenance_cycle/);
