@@ -102,6 +102,10 @@ export async function claimApproval(env,approval,{mountinfo=()=>readFile('/proc/
   catch(error){if(error?.code==='EEXIST')throw Error('APPROVAL_ALREADY_USED');throw error;}
 }
 
+/**
+ * @param {Record<string, string | undefined>} env
+ * @param {{ probe?: typeof probe, mountinfo?: () => Promise<string> }} [deps] test seams only
+ */
 export async function run(env,{probe:probeImpl=probe,mountinfo}={}){
   checkEnvironment(env);
   requireThat(/^[a-f0-9]{64}$/.test(env.JOB192_APPROVED_HASH??'')&&/^[a-f0-9]{64}$/.test(env.JOB192_RUN_HASH??'')&&

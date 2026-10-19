@@ -215,7 +215,7 @@ describe.skipIf(!enabled)('immutable purchased-profile queue: real migrations an
     SIGNAL_SCHEMA_TARGET_ID:'t',RAILWAY_SERVICE_ID:'22cae129-4438-448e-b644-9e3604c4d766',RAILWAY_DEPLOYMENT_ID:'deployment-2',
     RAILWAY_VOLUME_MOUNT_PATH:volume,JOB192_RUN_HASH:b.runHash,JOB192_APPROVAL_NONCE:b.nonce,JOB192_APPROVAL_CREATED_AT:String(b.createdAt),
     JOB192_APPROVAL_EXPIRES_AT:String(b.expiresAt),JOB192_APPROVED_HASH:b.approvalHash},
-    {mountinfo:async()=>`40 25 8:16 / ${volume} rw - ext4 /dev/sdb rw\n`,probe:async()=>{probed=true;return {};}}))
+    {mountinfo:async()=>`40 25 8:16 / ${volume} rw - ext4 /dev/sdb rw\n`,probe:async()=>{probed=true;return {outcome:'prepared_then_rolled_back',transactions:1,expectedIdentityMode:'fresh_readonly_lookup'};}}))
     .rejects.toThrow('STATE_CHANGED_SINCE_PREVIEW');
    expect(probed).toBe(false);
   }finally{await su.end();}
