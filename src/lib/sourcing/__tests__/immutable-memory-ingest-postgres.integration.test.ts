@@ -1,6 +1,8 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { Client } from 'pg';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { PrismaClient } from '@prisma/client';
@@ -136,6 +138,87 @@ describe.skipIf(!enabled)('immutable purchased-profile queue: real migrations an
   const snapshot=await call(runtime,o,{action:'read'});
   expect(snapshot.sealed).toBe(false);expect(snapshot.members).toEqual([]);
   expect((await owner.query('SELECT memory_prepared_at,memory_member_count FROM crustdata_acquisition_receipts WHERE id=$1',[o.acquisitionReceiptId])).rows[0]).toEqual({memory_prepared_at:null,memory_member_count:null});
+ });
+ // ── job-192 worker wrapper (Claude) — reuses the job-192 rows left (rolled back) by the test above. ─────────────
+ async function job192Superuser(){const u=new URL(process.env.SIGNAL_IMMUTABLE_TEST_ADMIN_URL!);u.pathname=`/${database}`;
+  const su=new Client({connectionString:u.toString()});await su.connect();return su;}
+ async function job192State(){
+  const {TARGET}=await import('../../../../scripts/job192-probe/core.mjs');
+  const su=await job192Superuser();
+  try{
+   await owner.query(`UPDATE job_sourcing_requests SET "externalJobId"='vanta:jobs:192' WHERE id=$1`,[TARGET.requestId]);
+   if((await su.query('SELECT 1 FROM rc_sourcing_runs WHERE request_id=$1',[TARGET.requestId])).rowCount===0){
+    // Fixture only: FK to governed_sourcing_bindings skipped (replica role); CHECK constraints still enforced.
+    await su.query('SET session_replication_role=replica');
+    const policy=randomUUID();
+    await su.query(`INSERT INTO rc_rate_policies(id,policy_hash) VALUES($1,repeat('b',64))`,[policy]);
+    await su.query(`INSERT INTO rc_sourcing_runs(id,tenant_id,flow_run_id,request_id,generation,policy_id,brief_hash,state,
+      execution_attempt_id,processing_lease_id,rc_available) VALUES($1,'org_32',$2::uuid,$2,1,$3,repeat('c',64),'stalled',$4,$5,true)`,
+      [randomUUID(),TARGET.requestId,policy,fence.executionAttemptId,fence.processingLeaseId]);
+    await su.query('SET session_replication_role=origin');
+    await su.query('CREATE SCHEMA IF NOT EXISTS signal_schema_control');
+    await su.query('CREATE TABLE IF NOT EXISTS signal_schema_control.target_identity(system text,environment text,target_id text)');
+    await su.query(`INSERT INTO signal_schema_control.target_identity VALUES('discover','production','t')`);
+    await su.query(`GRANT USAGE ON SCHEMA signal_schema_control TO ${runtimeRole},${ownerRole}`);
+    await su.query(`GRANT SELECT ON signal_schema_control.target_identity TO ${runtimeRole},${ownerRole}`);
+   }
+  }finally{await su.end();}
+  return TARGET;
+ }
+ function job192RuntimeUrl(){const u=new URL(process.env.SIGNAL_IMMUTABLE_TEST_ADMIN_URL!);u.pathname=`/${database}`;
+  u.username=runtimeRole;u.password='local-test-only';return u.toString();}
+ it('job192 worker wrapper: success path — preview, approval, one run as the restricted runtime role, postcheck',async()=>{
+  const TARGET=await job192State();
+  const w=await import('../../../../scripts/job192-probe/worker.mjs');
+  const p=await w.preview(owner);
+  expect(p).toMatchObject({valid:true,profiles:300,packets:0,rcLookups:0,rcState:'stalled'});
+  const service='22cae129-4438-448e-b644-9e3604c4d766',b=w.approvalBundle(p,service);
+  const volume=mkdtempSync(join(tmpdir(),'job192-vol-'));
+  const env={NODE_ENV:'production',LOG_LEVEL:'silent',DATABASE_URL:job192RuntimeUrl(),ACTIVEGRAPH_URL:'https://memory.example',
+   SIGNAL_SCHEMA_TARGET_ID:'t',RAILWAY_SERVICE_ID:service,RAILWAY_DEPLOYMENT_ID:'deployment-1',RAILWAY_VOLUME_MOUNT_PATH:volume,
+   JOB192_RUN_HASH:b.runHash,JOB192_APPROVAL_NONCE:b.nonce,JOB192_APPROVAL_CREATED_AT:String(b.createdAt),
+   JOB192_APPROVAL_EXPIRES_AT:String(b.expiresAt),JOB192_APPROVED_HASH:b.approvalHash};
+  const calls:string[]=[];
+  const deps={mountinfo:async()=>`40 25 8:16 / ${volume} rw - ext4 /dev/sdb rw\n`,
+   probe:async(before:any)=>{calls.push(before.request.id);
+    expect(before.purchase.result.profiles).toHaveLength(300);expect(before.request.execution_attempt_id).toBe(fence.executionAttemptId);
+    return {outcome:'prepared_then_rolled_back',transactions:1,expectedIdentityMode:'fresh_readonly_lookup'};}};
+  const result=await w.run(env,deps);
+  expect(result).toMatchObject({mode:'run',outcome:'prepared_then_rolled_back',transactions:1,deploymentId:'deployment-1',
+   requestPurchaseUnchanged:true,packetsAfter:0,sealedAfter:false,rcVerification:'operator_postcheck_required'});
+  expect(result).not.toHaveProperty('rcLookups');expect(calls).toEqual([TARGET.requestId]);
+  expect(await w.postcheck(owner,p)).toMatchObject({fullStateUnchanged:true,packets:0,rcLookups:0,rcState:'stalled'});
+  await expect(w.run(env,deps)).rejects.toThrow('APPROVAL_ALREADY_USED');expect(calls).toHaveLength(1);
+ });
+ it('job192 worker wrapper: refuses a run when state changed after preview, and postcheck detects changed RC state',async()=>{
+  const TARGET=await job192State();
+  const w=await import('../../../../scripts/job192-probe/worker.mjs');
+  const p=await w.preview(owner);
+  const su=await job192Superuser();
+  try{
+   // RC revision changes (runtime role cannot see RC → only the operator postcheck can detect this).
+   await su.query('UPDATE rc_sourcing_runs SET revision=revision+1 WHERE request_id=$1',[TARGET.requestId]);
+   expect((await w.postcheck(owner,p)).fullStateUnchanged).toBe(false);
+   await su.query('UPDATE rc_sourcing_runs SET revision=revision-1 WHERE request_id=$1',[TARGET.requestId]);
+   expect((await w.postcheck(owner,p)).fullStateUnchanged).toBe(true);
+   // RC state changes.
+   await su.query(`UPDATE rc_sourcing_runs SET state='needs_attention' WHERE request_id=$1`,[TARGET.requestId]);
+   const changed=await w.postcheck(owner,p).catch((e:Error)=>({error:e.message}));
+   expect(changed).toEqual(expect.objectContaining({error:'RC_CHANGED'}));
+   await su.query(`UPDATE rc_sourcing_runs SET state='stalled' WHERE request_id=$1`,[TARGET.requestId]);
+   expect((await w.postcheck(owner,p)).fullStateUnchanged).toBe(true);
+   // Request row changes after preview → the run itself refuses before claiming nothing further / probing.
+   const b=w.approvalBundle(p,'22cae129-4438-448e-b644-9e3604c4d766'),volume=mkdtempSync(join(tmpdir(),'job192-vol-'));
+   await owner.query(`UPDATE job_sourcing_requests SET "callbackUrl"='https://example.invalid/changed-after-preview' WHERE id=$1`,[TARGET.requestId]);
+   let probed=false;
+   await expect(w.run({NODE_ENV:'production',LOG_LEVEL:'silent',DATABASE_URL:job192RuntimeUrl(),ACTIVEGRAPH_URL:'https://memory.example',
+    SIGNAL_SCHEMA_TARGET_ID:'t',RAILWAY_SERVICE_ID:'22cae129-4438-448e-b644-9e3604c4d766',RAILWAY_DEPLOYMENT_ID:'deployment-2',
+    RAILWAY_VOLUME_MOUNT_PATH:volume,JOB192_RUN_HASH:b.runHash,JOB192_APPROVAL_NONCE:b.nonce,JOB192_APPROVAL_CREATED_AT:String(b.createdAt),
+    JOB192_APPROVAL_EXPIRES_AT:String(b.expiresAt),JOB192_APPROVED_HASH:b.approvalHash},
+    {mountinfo:async()=>`40 25 8:16 / ${volume} rw - ext4 /dev/sdb rw\n`,probe:async()=>{probed=true;return {};}}))
+    .rejects.toThrow('STATE_CHANGED_SINCE_PREVIEW');
+   expect(probed).toBe(false);
+  }finally{await su.end();}
  });
  it('reports and rolls back a 300-profile preparation with injected append latency (not production proof)',async()=>{
   const {o,packets}=await fixture(300);

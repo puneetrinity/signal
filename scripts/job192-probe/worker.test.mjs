@@ -4,7 +4,8 @@ import {mkdtempSync,existsSync,chmodSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {spawnSync} from 'node:child_process';
-import {approvalBundle,approvalHash,run,checkEnvironment,claimApproval,WINDOW_MS} from './worker.mjs';
+import {approvalBundle,approvalHash,run,checkEnvironment,claimApproval,isMountPoint,WINDOW_MS} from './worker.mjs';
+const mounted=path=>async()=>`36 25 0:32 / ${path} rw,relatime shared:1 - ext4 /dev/sdb rw\n`;
 const volume=()=>{const d=mkdtempSync(join(tmpdir(),'job192-vol-'));chmodSync(d,0o700);return d;};
 
 const SVC='22cae129-4438-448e-b644-9e3604c4d766', OTHER='00000000-0000-4000-8000-000000000000';
@@ -13,7 +14,7 @@ const base=b=>({NODE_ENV:'production',LOG_LEVEL:'silent',DATABASE_URL:'postgresq
   ACTIVEGRAPH_URL:'https://memory.example',SIGNAL_SCHEMA_TARGET_ID:'t',RAILWAY_SERVICE_ID:SVC,RAILWAY_DEPLOYMENT_ID:'d1',
   JOB192_RUN_HASH:b.runHash,JOB192_APPROVAL_NONCE:b.nonce,JOB192_APPROVAL_CREATED_AT:String(b.createdAt),
   JOB192_APPROVAL_EXPIRES_AT:String(b.expiresAt),JOB192_APPROVED_HASH:b.approvalHash,RAILWAY_VOLUME_MOUNT_PATH:volume()});
-const refusal=async env=>{try{await run(env);return 'NO_REFUSAL';}catch(e){return e.message;}};
+const refusal=async(env,deps={mountinfo:mounted(env.RAILWAY_VOLUME_MOUNT_PATH)})=>{try{await run(env,deps);return 'NO_REFUSAL';}catch(e){return e.message;}};
 
 test('bundle binds run hash, service, window and nonce; nonces differ',()=>{
   const a=approvalBundle(preview,SVC,1000),b=approvalBundle(preview,SVC,1000);
@@ -69,9 +70,9 @@ test('concurrent runs of one approval: exactly one claims, the other is refused'
 });
 test('restart-safe: a fresh process cannot reuse a claimed approval',async()=>{
   const b=approvalBundle(preview,SVC),env=base(b);
-  await claimApproval(env,b.approvalHash);
+  await claimApproval(env,b.approvalHash,{mountinfo:mounted(env.RAILWAY_VOLUME_MOUNT_PATH)});
   const code=`import {claimApproval} from './scripts/job192-probe/worker.mjs';
-    try{await claimApproval(process.env,process.env.A);console.log('CLAIMED');}catch(e){console.log(e.message);}`;
+    try{await claimApproval(process.env,process.env.A,{mountinfo:async()=>'36 25 0:32 / '+process.env.RAILWAY_VOLUME_MOUNT_PATH+' rw - ext4 /dev/sdb rw\\n'});console.log('CLAIMED');}catch(e){console.log(e.message);}`;
   const r=spawnSync(process.execPath,['--import','tsx','--input-type=module','-e',code],{cwd:process.cwd(),encoding:'utf8',
     env:{...process.env,RAILWAY_VOLUME_MOUNT_PATH:env.RAILWAY_VOLUME_MOUNT_PATH,A:b.approvalHash,NODE_ENV:'production',LOG_LEVEL:'silent'}});
   assert.match(r.stdout,/APPROVAL_ALREADY_USED/,r.stderr);
@@ -83,8 +84,25 @@ test('no durable volume: refused before any database step',async()=>{
 });
 test('a different approval for the same service still claims independently',async()=>{
   const env=base(approvalBundle(preview,SVC)),b2=approvalBundle(preview,SVC);
-  await claimApproval(env,b2.approvalHash);
+  const m={mountinfo:mounted(env.RAILWAY_VOLUME_MOUNT_PATH)};
+  await claimApproval(env,b2.approvalHash,m);
   const b3=approvalBundle(preview,SVC);
-  await assert.doesNotReject(claimApproval(env,b3.approvalHash));
+  await assert.doesNotReject(claimApproval(env,b3.approvalHash,m));
+});
+test('volume variable without an actual mount is refused before any claim or database step',async()=>{
+  const b=approvalBundle(preview,SVC),env=base(b);
+  const notMounted=async()=>'25 1 0:22 / / rw - overlay overlay rw\n36 25 0:32 / /proc rw - proc proc rw\n';
+  assert.equal(await refusal(env,{mountinfo:notMounted}),'DURABLE_VOLUME_NOT_MOUNTED');
+  assert.ok(!existsSync(join(env.RAILWAY_VOLUME_MOUNT_PATH,'job192-ledger',b.approvalHash+'.spent')));
+  assert.equal(await refusal({...env,RAILWAY_VOLUME_MOUNT_PATH:'/'},{mountinfo:notMounted}),'DURABLE_VOLUME_REQUIRED');
+});
+test('mount-point detection: exact path only, octal escapes decoded, real container mountinfo default',async()=>{
+  const info='25 1 0:22 / / rw - overlay overlay rw\n40 25 8:16 / /data rw - ext4 /dev/sdb rw\n41 25 8:17 / /my\\040vol rw - ext4 /dev/sdc rw\n';
+  assert.equal(isMountPoint(info,'/data'),true);assert.equal(isMountPoint(info,'/data/'),true);
+  assert.equal(isMountPoint(info,'/data/sub'),false);assert.equal(isMountPoint(info,'/dat'),false);
+  assert.equal(isMountPoint(info,'/my vol'),true);
+  // Default reader uses this host's real /proc/self/mountinfo: a temporary directory is not a mount point.
+  const b=approvalBundle(preview,SVC),env=base(b);
+  await assert.rejects(claimApproval(env,b.approvalHash),/DURABLE_VOLUME_NOT_MOUNTED/);
 });
 

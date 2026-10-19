@@ -6,7 +6,7 @@
 //           fixed-shape JSON result. Never prints rows, profiles, URLs, credentials or raw errors.
 import pg from 'pg';
 import {resolve,join,isAbsolute} from 'node:path';
-import {mkdir} from 'node:fs/promises';
+import {mkdir,readFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import {randomBytes} from 'node:crypto';
 import {TARGET,validate,digest,requireThat} from './core.mjs';
@@ -85,16 +85,24 @@ export async function postcheck(db,previewResult){
 /** One-use, restart-safe claim on the temporary service's Railway volume (no database write). Reuses the reviewed
  * ledger: exclusive create of <approval>.spent, fsync file and directory. A restart, redeploy or concurrent run of the
  * same approval finds the file and refuses. Claimed before any database or Memory access; never cleared. */
-export async function claimApproval(env,approval){
+/** True only if `path` is itself a mount point (field 5 of /proc/self/mountinfo, octal escapes decoded). */
+export function isMountPoint(mountinfo,path){
+  const unescape=v=>v.replace(/\\([0-7]{3})/g,(_,o)=>String.fromCharCode(parseInt(o,8)));
+  const want=path.replace(/\/+$/,'')||'/';
+  return mountinfo.split('\n').some(line=>{const f=line.split(' ');return f.length>4&&unescape(f[4])===want;});
+}
+export async function claimApproval(env,approval,{mountinfo=()=>readFile('/proc/self/mountinfo','utf8')}={}){
   const volume=env.RAILWAY_VOLUME_MOUNT_PATH;
-  requireThat(typeof volume==='string'&&isAbsolute(volume),'DURABLE_VOLUME_REQUIRED');
+  requireThat(typeof volume==='string'&&isAbsolute(volume)&&volume.replace(/\/+$/,'')!=='','DURABLE_VOLUME_REQUIRED');
+  // The environment variable alone is not proof: the path must be an actual mount in this container.
+  requireThat(isMountPoint(await mountinfo(),volume),'DURABLE_VOLUME_NOT_MOUNTED');
   const directory=join(volume,'job192-ledger');
   await mkdir(directory,{recursive:true,mode:0o700});
   try{await consumeApproval(directory,approval);}
   catch(error){if(error?.code==='EEXIST')throw Error('APPROVAL_ALREADY_USED');throw error;}
 }
 
-export async function run(env){
+export async function run(env,{probe:probeImpl=probe,mountinfo}={}){
   checkEnvironment(env);
   requireThat(/^[a-f0-9]{64}$/.test(env.JOB192_APPROVED_HASH??'')&&/^[a-f0-9]{64}$/.test(env.JOB192_RUN_HASH??'')&&
     /^[a-f0-9]{32}$/.test(env.JOB192_APPROVAL_NONCE??'')&&env.JOB192_APPROVAL_CREATED_AT&&env.JOB192_APPROVAL_EXPIRES_AT&&
@@ -104,7 +112,7 @@ export async function run(env){
   requireThat(now<expiresAt,'APPROVAL_EXPIRED');
   requireThat(approvalHash({runHash:env.JOB192_RUN_HASH,serviceId:env.RAILWAY_SERVICE_ID,createdAt,expiresAt,
     nonce:env.JOB192_APPROVAL_NONCE})===env.JOB192_APPROVED_HASH,'APPROVAL_MISMATCH');
-  await claimApproval(env,env.JOB192_APPROVED_HASH); // consumed even if a later step refuses: no automatic retry
+  await claimApproval(env,env.JOB192_APPROVED_HASH,mountinfo?{mountinfo}:{}); // consumed even if a later step refuses: no automatic retry
   const db=new pg.Client({connectionString:env.DATABASE_URL,connectionTimeoutMillis:5000,
     options:'-c statement_timeout=10000 -c lock_timeout=1000'});
   await db.connect();
@@ -119,7 +127,7 @@ export async function run(env){
     requireThat(coreHash(before)===env.JOB192_RUN_HASH,'STATE_CHANGED_SINCE_PREVIEW');
     const mem0=await memorySnapshot(db);
     requireThat(!mem0.sealed&&mem0.members===0,'WORK_ALREADY_STARTED');
-    const result=await probe(before,{prisma:env.DATABASE_URL},env.ACTIVEGRAPH_URL,async tx=>{
+    const result=await probeImpl(before,{prisma:env.DATABASE_URL},env.ACTIVEGRAPH_URL,async tx=>{
       const rows=await tx.$queryRawUnsafe(`SELECT id FROM job_sourcing_requests WHERE id=$1 AND "tenantId"=$2
         AND status='processing' AND execution_attempt_id=$3 AND processing_lease_id=$4`,
         TARGET.requestId,TARGET.tenantId,before.request.execution_attempt_id,before.request.processing_lease_id);
