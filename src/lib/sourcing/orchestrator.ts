@@ -2921,12 +2921,13 @@ async function runSourcingOrchestratorMeasured(
                 for (const acquisition of [exactAcquisition, spillAcquisition].filter((a): a is AcquiredCrustdataSearch => Boolean(a))) {
                   const owner = { tenantId, sourcingRequestId: requestId, acquisitionReceiptId: acquisition.receiptId,
                     acquisitionGeneration, acquisitionSlot: acquisition.metadata.rungId === 'exact' ? 'exact' as const : 'spill' as const };
-                  const prior = await repository.read(owner);
+                  const { memoryPreparationStage } = await import('./memory-preparation-diagnostics');
+                  const prior = await memoryPreparationStage('read_existing', () => repository.read(owner));
                   if (!prior.sealed) {
-                    const packets = enqueueInput.candidates.filter(item => item.options.acquisitionReceiptId === acquisition.receiptId)
+                    const packets = await memoryPreparationStage('packet_build', () => enqueueInput.candidates.filter(item => item.options.acquisitionReceiptId === acquisition.receiptId)
                       .map(item => prepareMemoryPacket(owner, item.candidate, {
                         ...item.options, acquisitionSlot: owner.acquisitionSlot, acquiredAt: acquisition.acquiredAt,
-                      }));
+                      })));
                     await repository.prepare(owner, packets, { executionAttemptId, processingLeaseId });
                   }
                 }
@@ -2936,7 +2937,9 @@ async function runSourcingOrchestratorMeasured(
               }
               publicMemory.ingestQueued += queued;
               publicMemory.ingestPending += queued;
-            } catch {
+            } catch (error) {
+              const { memoryPreparationFailure } = await import('./memory-preparation-diagnostics');
+              log.warn(memoryPreparationFailure(error), 'Public Memory preparation failed');
               throw new PublicMemoryOutboxError(
                 'Failed to durably queue purchased public profiles',
               );

@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { ImmutableMemoryRepository, awaitMemoryAcquisition, runImmutableMemoryCycle, prepareMemoryPacket, type FrozenMemoryPacket, type MemoryAcquisitionOwner } from '../immutable-memory-ingest';
 import { repairRcPurchaseIngestion } from '../public-memory-ingest-outbox';
+import { memoryPreparationFailure } from '../memory-preparation-diagnostics';
 import type { CandidateForRanking } from '../ranking-new';
 
 const enabled=process.env.RUN_SIGNAL_IMMUTABLE_POSTGRES==='1';
@@ -122,6 +123,27 @@ describe.skipIf(!enabled)('immutable purchased-profile queue: real migrations an
   const {o,packets}=await fixture(0);await seal(o,packets);expect(await call(runtime,o,{action:'complete'})).toBe(true);
   expect((await call(runtime,o,{action:'read'})).memberCount).toBe(0);
  });
+ it('reports and rolls back a 300-profile preparation with injected append latency (not production proof)',async()=>{
+  const {o,packets}=await fixture(300);
+  const original=bridge.db!;
+  bridge.db=new Proxy(original,{get(target,key){
+   if(key==='$transaction')return (fn:(tx:unknown)=>Promise<unknown>,options:{maxWait:number;timeout:number})=>
+    target.$transaction(tx=>fn(new Proxy(tx,{get(client,method){
+     if(method==='$queryRawUnsafe')return async(query:string,...values:unknown[])=>{
+      if(typeof values[1]==='string'&&JSON.parse(values[1]).action==='append')await new Promise(resolve=>setTimeout(resolve,450));
+      return client.$queryRawUnsafe(query,...values);
+     };
+     const value=Reflect.get(client,method);return typeof value==='function'?value.bind(client):value;
+    }})),options);
+   const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;
+  }});
+  let failure:unknown;
+  try{await new ImmutableMemoryRepository().prepare(o,packets,fence);}catch(error){failure=error;}finally{bridge.db=original;}
+  expect(failure).toMatchObject({code:'P2028'});
+  expect(memoryPreparationFailure(failure)).toMatchObject({stage:'append',reason:'transaction_api_error'});
+  expect((await call(runtime,o,{action:'read'})).members).toEqual([]);
+  expect((await owner.query('SELECT memory_prepared_at FROM crustdata_acquisition_receipts WHERE id=$1',[o.acquisitionReceiptId])).rows[0].memory_prepared_at).toBeNull();
+ },20000);
  it('shares stored bytes across queue executor, maintenance repair and restarted inline readback',async()=>{
   const {o,packets}=await fixture();const repository=new ImmutableMemoryRepository();
   await repository.prepare(o,packets,fence);
