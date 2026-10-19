@@ -5,6 +5,8 @@ import { describe, expect, it } from 'vitest';
 const root = process.cwd();
 
 const enforcementContracts = [
+  ['immutable-memory-boundary','src/lib/sourcing/immutable-memory-ingest.ts',
+    ['readMemoryPacket(row.packet, owner)', 'await this.privacy(owner)', 'confirmedMemoryPacketResult(row.packet, result)', 'sendFrozenMemoryPacket(row.packet, deadlineAt)']],
   ['private-flow-eligibility-boundary','src/lib/sourcing/private-resume-flow-client.ts',
     ['privateResumeTenant.parse(tenantId)', 'new SignJWT(', "scopes:'sourcing:candidates:read'","body_hash:hash","redirect:'error'",'result.bodyHash!==hash']],
   ['private-resume-fusion-boundary','src/lib/sourcing/private-resume-fusion.ts',

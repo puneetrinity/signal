@@ -2,6 +2,7 @@
   "formatVersion": 1,
   "system": "discover",
   "surfaces": [
+    {"file":"src/lib/sourcing/immutable-memory-ingest.ts","symbol":"ImmutableMemoryRepository","model":"ApprovedProviderCandidateIngest","direction":"purchase-outbox","reachability":"governed-search-worker-maintenance","scope":"tenant-request-purchase","enforcement":"sealed-bytes-privacy-before-send-own-receipt-ack","testId":"immutable-memory-boundary"},
     {"file":"src/lib/sourcing/private-resume-flow-client.ts","symbol":"checkFlowResumeEligibility","model":"OrganizationCandidate","direction":"flow-read","reachability":"schema-4-only","scope":"signed-tenant-run-request-body","enforcement":"dedicated-rs256-body-hash-no-redirect-bounded-response","testId":"private-flow-eligibility-boundary"},
     {"file":"src/lib/sourcing/private-resume-fusion.ts","symbol":"fusePrivateResumes","model":"OrganizationCandidate","direction":"pure-fusion","reachability":"schema-4-only","scope":"tenant-and-verified-identity","enforcement":"bounded-exact-id-no-fuzzy-identity-ranking-unchanged","testId":"private-resume-fusion-boundary"},
     {"file":"src/lib/sourcing/private-resume-client.ts","symbol":"readPrivateResumes","model":"OrganizationCandidate","direction":"memory-reader","reachability":"not-yet-wired","scope":"organization-only","enforcement":"signed-scope-request-identity-size-deadline-validated","testId":"private-resume-reader-boundary"},

@@ -87,7 +87,7 @@ describe("public Memory ingest outbox enqueue", () => {
     expect(executeRaw).not.toHaveBeenCalled();
   });
 
-  it('repairs the purchase acknowledgement using the original provider URL key without duplicating delivery',async()=>{
+  it('holds historical governed purchases instead of rebuilding their payload or acknowledging them',async()=>{
     vi.stubEnv('RC_SKILLS_ENABLED','true');
     rcProgress.mockResolvedValue({state:'sealed'});
     const url='https://www.linkedin.com/in/Alice';
@@ -97,11 +97,9 @@ describe("public Memory ingest outbox enqueue", () => {
       .mockResolvedValueOnce([{signalCandidateId:url}])
       .mockResolvedValueOnce([{signalCandidateId:url}]);
     const {repairRcPurchaseIngestion}=await import('../public-memory-ingest-outbox');
-    expect(await repairRcPurchaseIngestion('org_1','request-1','11111111-1111-4111-8111-111111111111')).toBe(true);
-    expect(executeRaw.mock.calls.every(call=>String(call[0]).includes('pg_advisory_xact_lock'))).toBe(true);
-    expect(receiptUpdate).toHaveBeenCalledWith(expect.objectContaining({data:expect.objectContaining({
-      memoryIngestMetadata:{version:1,repair:true,profileCount:1,suppressedIdentityHashes:[],acknowledgedCount:1},
-    })}));
+    expect(await repairRcPurchaseIngestion('org_1','request-1','11111111-1111-4111-8111-111111111111')).toBe(false);
+    expect(executeRaw).not.toHaveBeenCalled();
+    expect(receiptUpdate).not.toHaveBeenCalled();
   });
 
   it("deduplicates one identity before the single upsert statement", async () => {

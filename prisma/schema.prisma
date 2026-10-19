@@ -700,6 +700,7 @@ model JobSourcingRequest {
 }
 
 model CrustdataAcquisitionReceipt {
+  memoryRequests PublicMemoryImmutableRequest[]
   rc_purchase_members   rc_purchase_members[]
   id                    String    @id @default(cuid())
   tenantId              String
@@ -718,12 +719,45 @@ model CrustdataAcquisitionReceipt {
   effectMetadata        Json?
   memoryIngestedAt      DateTime? @map("memory_ingested_at")
   memoryIngestMetadata  Json?     @map("memory_ingest_metadata")
+  memoryDeliveryContract Int @default(1) @map("memory_delivery_contract")
+  memoryPreparedAt DateTime? @map("memory_prepared_at") @db.Timestamptz
+  memoryManifestSha256 String? @map("memory_manifest_sha256")
+  memoryMemberCount Int? @map("memory_member_count")
+  memoryWaitUntil DateTime? @map("memory_wait_until") @db.Timestamptz
   updatedAt             DateTime  @updatedAt
 
   sourcingRequest JobSourcingRequest @relation(fields: [sourcingRequestId, tenantId], references: [id, tenantId], onDelete: Cascade)
 
   @@unique([tenantId, sourcingRequestId, acquisitionGeneration, slot], map: "crustdata_receipts_request_generation_slot_key")
+  @@unique([id, tenantId, sourcingRequestId, acquisitionGeneration, slot], map: "memory_acquisition_owner_key")
   @@map("crustdata_acquisition_receipts")
+}
+
+model PublicMemoryImmutableRequest {
+  id String @id
+  tenantId String @map("tenant_id")
+  requestId String @map("request_id")
+  acquisitionId String @map("acquisition_id")
+  generation Int
+  slot String
+  providerId String @map("provider_id")
+  metadata Json
+  requestBody String? @map("request_body")
+  wireSha256 String @map("wire_sha256")
+  state String @default("pending")
+  attempts Int @default(0)
+  nextAttemptAt DateTime @default(dbgenerated("clock_timestamp()")) @map("next_attempt_at") @db.Timestamptz
+  leaseToken String? @map("lease_token") @db.Uuid
+  leaseUntil DateTime? @map("lease_until") @db.Timestamptz
+  result Json?
+  failureCode String? @map("failure_code")
+  acknowledgedAt DateTime? @map("acknowledged_at") @db.Timestamptz
+  createdAt DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz
+  compactedAt DateTime? @map("compacted_at") @db.Timestamptz
+  acquisition CrustdataAcquisitionReceipt @relation(fields:[acquisitionId,tenantId,requestId,generation,slot],references:[id,tenantId,sourcingRequestId,acquisitionGeneration,slot],onDelete:Restrict,onUpdate:NoAction,map:"memory_packet_owner_fk")
+  @@unique([acquisitionId,providerId],map:"memory_packet_member_key")
+  @@index([state,nextAttemptAt,leaseUntil],map:"memory_packet_work_idx")
+  @@map("public_memory_ingest_requests")
 }
 
 model JobSourcingCandidate {

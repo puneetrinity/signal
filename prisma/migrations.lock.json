@@ -133,6 +133,10 @@
     {
       "name": "20261018000000_private_resume_sourcing",
       "sha256": "d46728e7f2fb11feccc4adaf661d3c2c73963a11cd81e5c558100659487464a9"
+    },
+    {
+      "name": "20261019000000_immutable_memory_ingestion",
+      "sha256": "3aa720e0c439afbb4f7a17fbc17d0949491dbfa84a2f435f0261f85bb343bf50"
     }
   ]
 }
