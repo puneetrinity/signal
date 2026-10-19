@@ -112,6 +112,35 @@ describe('RC cached V2 transport, fake HTTP only',()=>{
     await expect(provider.check(url,now+300000)).rejects.toMatchObject({code:'credits_breach',observedCredits:2});
     await expect(provider.fetchSkills(url,now+300000,1)).rejects.toMatchObject({code:'credits_breach',observedCredits:2});
   });
+  it('labels every failure with a fixed diagnostic class and never the body',async()=>{
+    const ok=await response({linkedinUrl:url,skills:['Python']},1).json();
+    const cases:Array<[string,()=>Response|Promise<Response>]>=[
+      ['http_5xx',()=>new Response('<html>bad gateway private@example.invalid</html>',{status:502})],
+      ['http_4xx',()=>new Response('',{status:400})],
+      ['not_json',()=>new Response('<html>gateway private@example.invalid</html>')],
+      ['envelope',()=>new Response(JSON.stringify({...ok,success:false}))],
+      ['quota_missing',()=>new Response(JSON.stringify({...ok,quotas:{}}))],
+      ['skills_shape',()=>new Response(JSON.stringify({...ok,data:{linkedinUrl:url,skills:'Python'}}))],
+      ['oversize',()=>new Response('x',{headers:{'content-length':String(RC_LIMITS.responseBytes+1)}})],
+      ['network',()=>{throw new TypeError('fetch failed private@example.invalid');}],
+      ['timeout',()=>{const e=new Error('timed out');e.name='TimeoutError';throw e;}],
+    ];
+    for(const [detail,reply] of cases){
+      const error=await client(reply).provider.fetchSkills(url,now+300000,1,'direct').catch(e=>e);
+      expect(error,detail).toMatchObject({detail});
+      expect(JSON.stringify({...error,message:error.message}),detail).not.toMatch(/private@|bad gateway|gateway|fake-test-key/);
+    }
+    const checkError=await client(()=>response({exists:'yes'},0)).provider.check(url,now+300000).catch(e=>e);
+    expect(checkError).toMatchObject({code:'invalid_response',possiblePaid:false,detail:'check_shape'});
+  });
+  it('keeps malformed JSON and invalid UTF-8 classified as transport, exactly as before diagnostics',async()=>{
+    for(const body of ['not json',new Uint8Array([0x7b,0xff,0xfe,0x7d])]){
+      const fetchError=await client(()=>new Response(body)).provider.fetchSkills(url,now+300000,1,'direct').catch(e=>e);
+      expect(fetchError).toMatchObject({code:'transport',possiblePaid:true,detail:'not_json',message:'RC_TRANSPORT'});
+      const checkError=await client(()=>new Response(body)).provider.check(url,now+300000).catch(e=>e);
+      expect(checkError).toMatchObject({code:'transport',possiblePaid:false,detail:'not_json'});
+    }
+  });
   it('does not accept a non-loopback test origin',()=>{
     expect(()=>createRcProvider({apiKey:'fake',testOrigin:'https://example.invalid'})).toThrow('RC_TEST_ORIGIN_REFUSED');
   });

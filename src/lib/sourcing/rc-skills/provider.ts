@@ -6,11 +6,14 @@ import { RC_LIMITS } from './config';
 
 export type RcOperation='CHECK'|'FETCH';
 export type RcFailureCode='unauthorized'|'rate_limited'|'restricted'|'transport'|'invalid_response'|'identity_mismatch'|'credits_breach'|'deadline';
+/** Fixed diagnostic class for logs only. Never a body, URL, key, header value or person identifier. */
+export type RcFailureDetail='http_4xx'|'http_5xx'|'http_other'|'oversize'|'no_body'|'not_json'|'envelope'|'quota_missing'
+  |'not_found_shape'|'check_shape'|'skills_shape'|'timeout'|'network';
 /** Deliberately no provider body, URL, key or native transport cause in errors. */
 export class RcProviderError extends Error {
   constructor(readonly code:RcFailureCode, readonly possiblePaid:boolean,
     readonly retryAfterMs:number|null=null, readonly observedCredits:number|null=null,
-    readonly rejectionProof:RcFreeRejection|null=null) {
+    readonly rejectionProof:RcFreeRejection|null=null, readonly detail:RcFailureDetail|null=null) {
     super('RC_'+code.toUpperCase());this.name='RcProviderError';
   }
 }
@@ -24,7 +27,7 @@ function quota(raw:Record<string,unknown>):Quota {
   const limits=[obj(workspace.minuteRateLimit),obj(key.minuteRateLimit)];
   const minimum=(values:unknown[])=>{const numbers=values.map(numeric).filter((v):v is number=>v!==null);return numbers.length?Math.min(...numbers):null;};
   const creditsConsumed=numeric(q.creditsConsumed);
-  if(creditsConsumed===null)throw new RcProviderError('invalid_response',true);
+  if(creditsConsumed===null)throw new RcProviderError('invalid_response',true,null,null,null,'quota_missing');
   const resets=limits.map(v=>time(v.nextReset)).filter((v):v is string=>v!==null);
   return {creditsConsumed,creditsLeft:numeric(obj(workspace.credits).left),
     minuteLimit:minimum(limits.map(v=>v.limit)),minuteLeft:minimum(limits.map(v=>v.left)),
@@ -39,22 +42,26 @@ function correlation(raw:Record<string,unknown>,response:Response):string|null {
 async function boundedJson(response:Response,allowNotFound=false):Promise<Record<string,unknown>> {
   const declared=response.headers.get('content-length');
   if(declared!==null && (/^\d+$/.test(declared)?Number(declared)>RC_LIMITS.responseBytes:true)) {
-    await response.body?.cancel();throw new RcProviderError('invalid_response',true);
+    await response.body?.cancel();throw new RcProviderError('invalid_response',true,null,null,null,'oversize');
   }
-  if(!response.body)throw new RcProviderError('invalid_response',true);
+  if(!response.body)throw new RcProviderError('invalid_response',true,null,null,null,'no_body');
   const reader=response.body.getReader(),chunks:Uint8Array[]=[];let bytes=0;
   try {
     while(true) {
       const next=await reader.read();if(next.done)break;
       bytes+=next.value.byteLength;
-      if(bytes>RC_LIMITS.responseBytes)throw new RcProviderError('invalid_response',true);
+      if(bytes>RC_LIMITS.responseBytes)throw new RcProviderError('invalid_response',true,null,null,null,'oversize');
       chunks.push(next.value);
     }
-    const parsed:unknown=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(chunks)));
+    let parsed:unknown;
+    try{parsed=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(chunks)));}
+    // Preserve the pre-diagnostic behaviour exactly: a decode/parse failure was always
+    // classified as transport (free CHECK retry, FETCH possibly paid); only the detail is new.
+    catch{throw new RcProviderError('transport',true,null,null,null,'not_json');}
     const raw=obj(parsed);
     if(allowNotFound && raw.success===false && raw.error==='REQUEST_ERROR' && raw.data===null)return raw;
     if(raw.success!==true || raw.error!==null || raw.data===null || typeof raw.data!=='object' || Array.isArray(raw.data))
-      throw new RcProviderError('invalid_response',true);
+      throw new RcProviderError('invalid_response',true,null,null,null,'envelope');
     return raw;
   } finally {
     await reader.cancel().catch(()=>undefined);reader.releaseLock();
@@ -95,7 +102,7 @@ export function createRcProvider(options:{
       if(direct && operation==='FETCH' && response.status===404){
         const raw=await boundedJson(response,true),quotas=quota(raw);
         if(quotas.creditsConsumed!==0)throw new RcProviderError('credits_breach',true,null,quotas.creditsConsumed);
-        if(raw.success!==false||raw.error!=='REQUEST_ERROR'||raw.data!==null)throw new RcProviderError('invalid_response',true);
+        if(raw.success!==false||raw.error!=='REQUEST_ERROR'||raw.data!==null)throw new RcProviderError('invalid_response',true,null,null,null,'not_found_shape');
         return {data:{},quota:quotas,correlationHash:correlation(raw,response),upstreamAt:null,notFound:true};
       }
       if(!response.ok) {
@@ -109,7 +116,8 @@ export function createRcProvider(options:{
           const delay=seconds!==null?seconds*1000:Number.isFinite(date)?Math.max(0,date-now()):60_000;
           throw new RcProviderError('rate_limited',paid,Math.min(Math.max(delay,1000),86_400_000));
         }
-        throw new RcProviderError('transport',paid);
+        throw new RcProviderError('transport',paid,null,null,null,
+          response.status>=500&&response.status<600?'http_5xx':response.status>=400&&response.status<500?'http_4xx':'http_other');
       }
       const raw=await boundedJson(response),quotas=quota(raw);
       if(operation==='CHECK' && quotas.creditsConsumed!==0)throw new RcProviderError('credits_breach',true,null,quotas.creditsConsumed);
@@ -117,22 +125,23 @@ export function createRcProvider(options:{
         upstreamAt:time(obj(raw.metadata).updatedAt),notFound:false};
     }catch(error) {
       if(error instanceof RcProviderError) {
-        if(operation==='CHECK'&&error.code!=='credits_breach')throw new RcProviderError(error.code,false,error.retryAfterMs,error.observedCredits);
+        if(operation==='CHECK'&&error.code!=='credits_breach')throw new RcProviderError(error.code,false,error.retryAfterMs,error.observedCredits,null,error.detail);
         throw error;
       }
-      throw new RcProviderError('transport',operation==='FETCH');
+      const timedOut=error instanceof Error&&(error.name==='TimeoutError'||error.name==='AbortError');
+      throw new RcProviderError('transport',operation==='FETCH',null,null,null,timedOut?'timeout':'network');
     }
   }
   return {
     async check(url:string,deadlineAt:number):Promise<CheckResult> {
       const {data,quota,correlationHash}=await request('CHECK',url,deadlineAt);
-      if(typeof data.exists!=='boolean')throw new RcProviderError('invalid_response',false);
+      if(typeof data.exists!=='boolean')throw new RcProviderError('invalid_response',false,null,null,null,'check_shape');
       if(!data.exists)return {outcome:'not_found',upstreamAt:null,quota,correlationHash};
       const upstreamAt=time(data.lastUpdate),age=upstreamAt===null?null:now()-Date.parse(upstreamAt);
       if(age===null||age<0||age>RC_LIMITS.horizonDays*86_400_000)
         return {outcome:'unusable_age',upstreamAt,quota,correlationHash};
       const skillCount=numeric(data.skillCount);
-      if(skillCount===null)throw new RcProviderError('invalid_response',false);
+      if(skillCount===null)throw new RcProviderError('invalid_response',false,null,null,null,'check_shape');
       return {outcome:skillCount===0?'no_skills':'eligible',upstreamAt,quota,correlationHash};
     },
     async fetchSkills(url:string,deadlineAt:number,maximumCredits:number,mode:'legacy'|'direct'='legacy'):Promise<FetchResult> {
@@ -145,7 +154,7 @@ export function createRcProvider(options:{
       catch{throw new RcProviderError('identity_mismatch',true,null,quota.creditsConsumed);}
       if(returned!==normalizeSourcedCandidateLinkedInUrl(url))throw new RcProviderError('identity_mismatch',true,null,quota.creditsConsumed);
       const skills=rcSkillsSchema.safeParse(data.skills);
-      if(!skills.success)throw new RcProviderError('invalid_response',true,null,quota.creditsConsumed);
+      if(!skills.success)throw new RcProviderError('invalid_response',true,null,quota.creditsConsumed,null,'skills_shape');
       // Only explicit allowlisted fields leave this boundary. No names, emails,
       // raw body, profile history, photo, provider IDs or hidden metadata.
       if(mode==='legacy')return {skills:skills.data,quota,correlationHash};
