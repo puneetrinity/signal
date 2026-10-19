@@ -10,6 +10,7 @@ import { createHash } from 'crypto';
 import { z } from 'zod';
 import { generateObject } from 'ai';
 import { createGroqModel } from '@/lib/ai/groq';
+import { GroqFailure, groqFailure, groqFailureFields } from '@/lib/ai/groq-outcome';
 import { getCache, setCache } from '@/lib/redis/cache';
 import redis from '@/lib/redis/client';
 import { createLogger } from '@/lib/logger';
@@ -100,7 +101,7 @@ async function recordFailure(config: SourcingConfig): Promise<void> {
       log.warn({ count, cooldownSec: config.locationCbCooldownSec }, 'Location Groq circuit breaker opened');
     }
   } catch (err) {
-    log.warn({ error: err }, 'Failed to record location circuit breaker failure');
+    log.warn(groqFailureFields(err), 'Failed to record location circuit breaker failure');
   }
 }
 
@@ -151,7 +152,7 @@ async function callGroq(
   config: SourcingConfig,
 ): Promise<GroqLocationResult> {
   const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) throw new Error('GROQ_API_KEY not set');
+  if (!apiKey) throw new GroqFailure('not_configured');
 
   const start = Date.now();
   const { model, modelName } = await createGroqModel(apiKey);
@@ -195,14 +196,13 @@ export async function groqClassifyLocation(
   location: string,
   context: string | null,
   config: SourcingConfig,
-): Promise<GroqLocationResult | null> {
+): Promise<GroqLocationResult> {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) {
-    log.warn('GROQ_API_KEY not set, skipping location classification');
-    return null;
+    throw new GroqFailure('not_configured');
   }
 
-  const { modelName } = await createGroqModel(apiKey);
+  const { modelName } = await createGroqModel(apiKey).catch(error => { throw groqFailure(error); });
   const modelHash = createHash('sha256').update(modelName).digest('hex').slice(0, 8);
   const primaryCacheKey = buildCacheKey(location, null, modelHash);
   const contextualCacheKey = buildCacheKey(location, context, modelHash);
@@ -219,14 +219,15 @@ export async function groqClassifyLocation(
   }
 
   if (await isCircuitOpen()) {
-    log.warn('Location Groq circuit breaker open, skipping');
-    return null;
+    throw new GroqFailure('circuit_open');
   }
 
   const maxAttempts = 1 + config.locationGroqMaxRetries;
   let lastError: unknown;
+  let attempts = 0;
   let breakerFailure = false;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    attempts = attempt;
     try {
       const result = await callGroq(location, context, config);
       log.info(
@@ -238,7 +239,7 @@ export async function groqClassifyLocation(
       lastError = err;
       const classification = classifyGroqError(err);
       breakerFailure = breakerFailure || classification.countTowardsBreaker;
-      log.warn({ error: err, attempt, maxAttempts }, 'Location Groq attempt failed');
+      log.warn({ ...groqFailureFields(groqFailure(err, attempt)), maxAttempts }, 'Location Groq attempt failed');
       if (!classification.retryable || attempt >= maxAttempts) break;
     }
   }
@@ -246,6 +247,5 @@ export async function groqClassifyLocation(
   if (breakerFailure) {
     await recordFailure(config);
   }
-  log.warn({ error: lastError, location }, 'Location Groq classification failed after retries');
-  return null;
+  throw groqFailure(lastError, attempts);
 }

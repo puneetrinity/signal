@@ -17,6 +17,7 @@ import { z } from 'zod';
 import { generateObject } from 'ai';
 import type { ParserProvider, ParsedSearchQuery, ParserProviderType } from './types';
 import { createGroqModel } from '@/lib/ai/groq';
+import { GroqFailure, groqFailure, groqFailureFields } from '@/lib/ai/groq-outcome';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger('GroqParser');
@@ -109,7 +110,7 @@ export const groqParser: ParserProvider = {
     const apiKey = process.env.GROQ_API_KEY;
 
     if (!apiKey) {
-      throw new Error('GROQ_API_KEY is not set in environment variables');
+      throw new GroqFailure('not_configured');
     }
 
     try {
@@ -123,7 +124,7 @@ export const groqParser: ParserProvider = {
       });
 
       const latency = Date.now() - startTime;
-      log.info({ latency, query, role: object.role, count: object.count }, 'Parsed query');
+      log.info({ latency, count: object.count, outcome: 'answered' }, 'Parsed query');
 
       return {
         count: object.count,
@@ -136,10 +137,9 @@ export const groqParser: ParserProvider = {
         roleType: object.roleType,
       };
     } catch (error) {
-      log.error({ err: error }, 'Failed to parse query');
-      throw new Error(
-        `Failed to parse query: ${error instanceof Error ? error.message : 'Unknown error'}`
-      );
+      const failure = groqFailure(error, 1);
+      log.error(groqFailureFields(failure), 'Failed to parse query');
+      throw failure;
     }
   },
 };

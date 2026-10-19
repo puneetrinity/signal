@@ -9,6 +9,7 @@ import { createHash } from 'crypto';
 import { z } from 'zod';
 import { generateObject } from 'ai';
 import { createGroqModel } from '@/lib/ai/groq';
+import { GroqFailure, groqFailure, groqFailureFields } from '@/lib/ai/groq-outcome';
 import { getCache, setCache } from '@/lib/redis/cache';
 import redis from '@/lib/redis/client';
 import { createLogger } from '@/lib/logger';
@@ -97,7 +98,7 @@ async function recordFailure(config: SourcingConfig): Promise<void> {
       log.warn({ count, cooldownSec: config.trackCbCooldownSec }, 'Circuit breaker opened');
     }
   } catch (err) {
-    log.warn({ error: err }, 'Failed to record circuit breaker failure');
+    log.warn(groqFailureFields(err), 'Failed to record circuit breaker failure');
   }
 }
 
@@ -123,7 +124,7 @@ async function callGroq(
   config: SourcingConfig,
 ): Promise<GroqTrackResult> {
   const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) throw new Error('GROQ_API_KEY not set');
+  if (!apiKey) throw new GroqFailure('not_configured');
 
   const start = Date.now();
   const { model, modelName } = await createGroqModel(apiKey);
@@ -179,14 +180,16 @@ export async function groqClassifyTrack(
 
   // Check circuit breaker
   if (await isCircuitOpen()) {
-    throw new Error('Groq circuit breaker open');
+    throw new GroqFailure('circuit_open');
   }
 
   // Attempt with retry
   const maxAttempts = 1 + config.trackGroqMaxRetries;
   let lastError: unknown;
+  let attempts = 0;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    attempts = attempt;
     try {
       const result = await callGroq(jobContext, config);
 
@@ -202,7 +205,7 @@ export async function groqClassifyTrack(
     } catch (err) {
       lastError = err;
       const isTimeout = err instanceof Error && err.message.includes('timeout');
-      log.warn({ error: err, attempt, maxAttempts }, 'Groq attempt failed');
+      log.warn({ ...groqFailureFields(groqFailure(err, attempt)), maxAttempts }, 'Groq attempt failed');
 
       // Only retry on non-timeout failures
       if (isTimeout || attempt >= maxAttempts) break;
@@ -211,5 +214,5 @@ export async function groqClassifyTrack(
 
   // Record failure for circuit breaker
   await recordFailure(config);
-  throw lastError;
+  throw groqFailure(lastError, attempts);
 }

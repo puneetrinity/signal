@@ -9,6 +9,7 @@ import { createLogger } from '@/lib/logger';
 import { getSourcingConfig } from '@/lib/sourcing/config';
 import { PLACEHOLDER_HINTS } from '@/lib/sourcing/hint-sanitizer';
 import { groqClassifyLocation } from './location-groq';
+import { groqFailureFields } from '@/lib/ai/groq-outcome';
 
 const log = createLogger('LocationService');
 
@@ -345,7 +346,7 @@ export async function resolveLocation(
     if (!groq) return det;
     return toResolutionFromGroq(location, groq);
   } catch (err) {
-    log.warn({ error: err, location }, 'Location Groq fallback failed, using deterministic');
+    log.warn(groqFailureFields(err), 'Location Groq fallback failed, using deterministic');
     return det;
   }
 }
@@ -414,7 +415,7 @@ export async function resolveLocationsBatch(
             llmCalled: !groq.cached,
           };
         } catch (err) {
-          log.warn({ error: err, location: entry.location }, 'Batch location Groq failed');
+          log.warn(groqFailureFields(err), 'Batch location Groq failed');
           return { signature: entry.signature, resolution: null, cached: false, llmCalled: false };
         }
       },
