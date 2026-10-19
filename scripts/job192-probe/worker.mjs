@@ -5,11 +5,13 @@
 //           JOB192_APPROVED_HASH and Memory shows no prepared packets; runs probe() once; re-checks; prints a
 //           fixed-shape JSON result. Never prints rows, profiles, URLs, credentials or raw errors.
 import pg from 'pg';
-import {resolve} from 'node:path';
+import {resolve,join,isAbsolute} from 'node:path';
+import {mkdir} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import {randomBytes} from 'node:crypto';
 import {TARGET,validate,digest,requireThat} from './core.mjs';
 import {probe} from './production.mjs';
+import {consumeApproval} from './cli.mjs';
 
 const OWNER={tenantId:TARGET.tenantId,sourcingRequestId:TARGET.requestId,acquisitionReceiptId:TARGET.purchaseId,
   acquisitionGeneration:1,acquisitionSlot:'exact'};
@@ -80,6 +82,18 @@ export async function postcheck(db,previewResult){
     packets:p.packets,rcLookups:p.rcLookups,rcState:p.rcState};
 }
 
+/** One-use, restart-safe claim on the temporary service's Railway volume (no database write). Reuses the reviewed
+ * ledger: exclusive create of <approval>.spent, fsync file and directory. A restart, redeploy or concurrent run of the
+ * same approval finds the file and refuses. Claimed before any database or Memory access; never cleared. */
+export async function claimApproval(env,approval){
+  const volume=env.RAILWAY_VOLUME_MOUNT_PATH;
+  requireThat(typeof volume==='string'&&isAbsolute(volume),'DURABLE_VOLUME_REQUIRED');
+  const directory=join(volume,'job192-ledger');
+  await mkdir(directory,{recursive:true,mode:0o700});
+  try{await consumeApproval(directory,approval);}
+  catch(error){if(error?.code==='EEXIST')throw Error('APPROVAL_ALREADY_USED');throw error;}
+}
+
 export async function run(env){
   checkEnvironment(env);
   requireThat(/^[a-f0-9]{64}$/.test(env.JOB192_APPROVED_HASH??'')&&/^[a-f0-9]{64}$/.test(env.JOB192_RUN_HASH??'')&&
@@ -90,6 +104,7 @@ export async function run(env){
   requireThat(now<expiresAt,'APPROVAL_EXPIRED');
   requireThat(approvalHash({runHash:env.JOB192_RUN_HASH,serviceId:env.RAILWAY_SERVICE_ID,createdAt,expiresAt,
     nonce:env.JOB192_APPROVAL_NONCE})===env.JOB192_APPROVED_HASH,'APPROVAL_MISMATCH');
+  await claimApproval(env,env.JOB192_APPROVED_HASH); // consumed even if a later step refuses: no automatic retry
   const db=new pg.Client({connectionString:env.DATABASE_URL,connectionTimeoutMillis:5000,
     options:'-c statement_timeout=10000 -c lock_timeout=1000'});
   await db.connect();
