@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { ImmutableMemoryRepository } from './immutable-memory-ingest';
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import type { CandidateForRanking } from "./ranking-new";
@@ -368,7 +369,6 @@ export async function repairRcPurchaseIngestion(tenantId:string,requestId:string
       AND j.flow_run_id=${flowRunId}::uuid
       AND c."acquisitionGeneration"=j.acquisition_generation AND c.status='complete' AND c.memory_ingested_at IS NULL
     ORDER BY c.slot LIMIT 2`;
-  const {ImmutableMemoryRepository}=await import('./immutable-memory-ingest');
   const repository=new ImmutableMemoryRepository();
   let allDone=true;
   for(const receipt of receipts){

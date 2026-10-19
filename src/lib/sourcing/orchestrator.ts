@@ -1,4 +1,6 @@
 import { prisma } from '@/lib/prisma';
+import { memoryPreparationStage, memoryPreparationFailure } from './memory-preparation-diagnostics';
+import { ImmutableMemoryRepository, prepareMemoryPacket, awaitMemoryAcquisition } from './immutable-memory-ingest';
 import { timedSourcingFunction } from './stage-timings';
 import { extractLinkedInIdFromUrl } from './discovery';
 import { Prisma } from '@prisma/client';
@@ -2915,13 +2917,11 @@ async function runSourcingOrchestratorMeasured(
               };
               let queued: number;
               if (governedCommand?.protocolVersion === 2) {
-                const { ImmutableMemoryRepository, prepareMemoryPacket } = await import('./immutable-memory-ingest');
                 const repository = new ImmutableMemoryRepository();
                 if (!executionAttemptId || !processingLeaseId) throw Error('MEMORY_EXECUTION_STALE');
                 for (const acquisition of [exactAcquisition, spillAcquisition].filter((a): a is AcquiredCrustdataSearch => Boolean(a))) {
                   const owner = { tenantId, sourcingRequestId: requestId, acquisitionReceiptId: acquisition.receiptId,
                     acquisitionGeneration, acquisitionSlot: acquisition.metadata.rungId === 'exact' ? 'exact' as const : 'spill' as const };
-                  const { memoryPreparationStage } = await import('./memory-preparation-diagnostics');
                   const prior = await memoryPreparationStage('read_existing', () => repository.read(owner));
                   if (!prior.sealed) {
                     const packets = await memoryPreparationStage('packet_build', () => enqueueInput.candidates.filter(item => item.options.acquisitionReceiptId === acquisition.receiptId)
@@ -2938,7 +2938,6 @@ async function runSourcingOrchestratorMeasured(
               publicMemory.ingestQueued += queued;
               publicMemory.ingestPending += queued;
             } catch (error) {
-              const { memoryPreparationFailure } = await import('./memory-preparation-diagnostics');
               log.warn(memoryPreparationFailure(error), 'Public Memory preparation failed');
               throw new PublicMemoryOutboxError(
                 'Failed to durably queue purchased public profiles',
@@ -3135,7 +3134,6 @@ async function runSourcingOrchestratorMeasured(
               );
               const suppressed = new Set<string>();
               const results = governedCommand?.protocolVersion === 2 ? await (async () => {
-                const { ImmutableMemoryRepository, awaitMemoryAcquisition } = await import('./immutable-memory-ingest');
                 const repository = new ImmutableMemoryRepository();
                 const owner = { tenantId, sourcingRequestId: requestId, acquisitionReceiptId: acquisition.receiptId,
                   acquisitionGeneration, acquisitionSlot: acquisition.metadata.rungId === 'exact' ? 'exact' as const : 'spill' as const };

@@ -64,6 +64,10 @@ jobs:
       - run: npm run test:immutable-memory:pg
         env:
           SIGNAL_IMMUTABLE_TEST_ADMIN_URL: postgresql://postgres:local-test-only@127.0.0.1:55489/postgres
+      - name: Real Node 20 tsx module-identity regression (not Vitest)
+        env:
+          SIGNAL_MODULE_TEST_ADMIN_URL: postgresql://postgres:local-test-only@127.0.0.1:55489/postgres
+        run: node scripts/test-worker-module-loading.mjs
       - name: Stop owned PostgreSQL 17
         if: always()
         run: |
