@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto';
 import { memoryPreparationStage as stage } from './memory-preparation-diagnostics';
+// Keep proof issuance and verification in the same static module graph. Node 20
+// + tsx can give dynamic imports a distinct instance (and therefore WeakSet).
+import { createCandidateAdmissionProofs } from '@/lib/candidate-privacy/decision';
+import { requireHealthyCandidatePrivacyContext, assertAdmissionProofCurrent, CANDIDATE_PRIVACY_ADMISSION_LOCK } from '@/lib/candidate-privacy/repository';
 import type { CandidateIngestResult } from './activegraph-client';
 import {
   adaptCrustdataCandidateForMemory,
@@ -239,9 +243,6 @@ export class ImmutableMemoryRepository implements MemoryDeliveryReader {
 
   async prepare(owner: MemoryAcquisitionOwner, packets: readonly FrozenMemoryPacket[], fence: Fence): Promise<Snapshot> {
     const db = await this.db();
-    const { createCandidateAdmissionProofs } = await import('@/lib/candidate-privacy/decision');
-    const { requireHealthyCandidatePrivacyContext, assertAdmissionProofCurrent, CANDIDATE_PRIVACY_ADMISSION_LOCK } =
-      await import('@/lib/candidate-privacy/repository');
     const unique = await stage('manifest', () => memoryPacketManifest(owner, packets).packets);
     const context = await stage('privacy_context', () => requireHealthyCandidatePrivacyContext());
     const proofs = await stage('privacy_proofs', () => createCandidateAdmissionProofs(unique.map(p => ({ key: p.idempotencyKey,
@@ -267,7 +268,6 @@ export class ImmutableMemoryRepository implements MemoryDeliveryReader {
 
   private async privacy(owner: MemoryAcquisitionOwner): Promise<void> {
     const db = await this.db();
-    const { createCandidateAdmissionProofs } = await import('@/lib/candidate-privacy/decision');
     const anchors = await command(db, owner, { action: 'anchors' }) as Array<FrozenMemoryPacket & { id: string; state: string; resolvedId: string | null }>;
     if (!Array.isArray(anchors) || anchors.length > 300) invalid();
     const active = anchors.filter(p => p.state !== 'suppressed');

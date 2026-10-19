@@ -1,4 +1,5 @@
 import { createLogger } from '@/lib/logger';
+import { runImmutableMemoryCycle } from './immutable-memory-ingest';
 import {
   generateTagsFromCandidate,
   ingestCandidateWithResult,
@@ -165,7 +166,6 @@ export async function runPublicMemoryIngestCycle(
   options: PublicMemoryIngestWorkerOptions = {},
 ): Promise<PublicMemoryIngestCycleSummary> {
   if (!options.store) {
-    const { runImmutableMemoryCycle } = await import('./immutable-memory-ingest');
     await runImmutableMemoryCycle();
   }
   const store = options.store ?? new PrismaPublicMemoryOutboxStore();
