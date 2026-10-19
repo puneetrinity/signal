@@ -87,6 +87,32 @@ describe.skipIf(!enabled)('immutable purchased-profile queue: real migrations an
  },120000);
  afterAll(async()=>{vi.unstubAllGlobals();await bridge.db?.$disconnect();await runtime?.end();await owner?.end();if(created)await admin.query(`DROP DATABASE ${database} WITH (FORCE)`);
   if(admin){await admin.query(`DROP ROLE IF EXISTS ${runtimeRole}`);await admin.query(`DROP ROLE IF EXISTS ${ownerRole}`);await admin.end();}},30000);
+ it('fingerprints only migration-34-owned objects: older receipts-table drift is tolerated, owned changes are not',async()=>{
+  const {MEMORY_CATALOG_SQL,MEMORY_CATALOG_SHA256}=await import('../../../../scripts/check-immutable-memory-ingest.mjs');
+  const digest=async()=>(await owner.query(MEMORY_CATALOG_SQL)).rows[0].digest;
+  // Production carries these two CHECKs from migration 20260727; the fresh baseline does not.
+  await owner.query('BEGIN');
+  try{
+   await owner.query(`ALTER TABLE crustdata_acquisition_receipts
+    ADD CONSTRAINT "crustdata_acquisition_receipts_generation_check" CHECK ("acquisitionGeneration" > 0),
+    ADD CONSTRAINT "crustdata_acquisition_receipts_slot_check" CHECK (slot IN ('exact','spill'))`);
+   expect(await digest()).toBe(MEMORY_CATALOG_SHA256);
+  }finally{await owner.query('ROLLBACK');}
+  // A changed memory-owned constraint on the receipts table must still fail verification.
+  await owner.query('BEGIN');
+  try{
+   await owner.query('ALTER TABLE crustdata_acquisition_receipts DROP CONSTRAINT memory_preparation_shape');
+   expect(await digest()).not.toBe(MEMORY_CATALOG_SHA256);
+  }finally{await owner.query('ROLLBACK');}
+  // So must a changed constraint on the new table.
+  await owner.query('BEGIN');
+  try{
+   await owner.query('ALTER TABLE public_memory_ingest_requests DROP CONSTRAINT public_memory_ingest_requests_attempts_check');
+   await owner.query('ALTER TABLE public_memory_ingest_requests ADD CONSTRAINT public_memory_ingest_requests_attempts_check CHECK (attempts >= 0 AND attempts <= 9)');
+   expect(await digest()).not.toBe(MEMORY_CATALOG_SHA256);
+  }finally{await owner.query('ROLLBACK');}
+  expect(await digest()).toBe(MEMORY_CATALOG_SHA256);
+ });
  it('denies direct runtime access and private trigger execution',async()=>{
   for(const sql of ['SELECT * FROM public_memory_ingest_requests','DELETE FROM public_memory_ingest_requests','TRUNCATE public_memory_ingest_requests'])
    await expect(runtime.query(sql)).rejects.toMatchObject({code:'42501'});
