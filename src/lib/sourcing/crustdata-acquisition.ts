@@ -626,6 +626,7 @@ async function acquireCrustdataSearchForRequestMeasured(
         await repository.call('grantTransition',[input.tenantId,binding.flowRunId,input.slot,transition('issued')]);
         const stored=await prisma.$transaction(async tx=>{
           const row=await tx.crustdataAcquisitionReceipt.create({data:{tenantId:input.tenantId,sourcingRequestId:input.sourcingRequestId,
+            memoryDeliveryContract:binding.protocolVersion===2?2:1,
             acquisitionGeneration:1,slot:input.slot,status:'started',requestFingerprint:reservation.requestFingerprint,
             requestInput:toJsonValue(reservation.requestInput),requestMetadata:toJsonValue(reservation.requestMetadata)}});
           await tx.$queryRawUnsafe('SELECT public.signal_sourcing_grant_transition($1,$2::uuid,$3,$4::jsonb)',
@@ -774,6 +775,7 @@ export async function releaseAbandonedCrustdataReceiptPayloads(
       sourcingRequestId,
       acquisitionGeneration,
       status: "complete",
+      OR: [{ memoryDeliveryContract: 1 }, { memoryIngestedAt: { not: null } }],
     },
     data: {
       status: "released",

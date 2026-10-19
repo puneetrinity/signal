@@ -36,6 +36,11 @@ try {
 
   const mutations = [
     async () => {
+      const original = await readFile(sourceClientPath);
+      await writeFile(sourceClientPath, original.toString('utf8').replace('body: requestBody,', 'body: JSON.stringify(payload),'));
+      return { paths: [[sourceClientPath, original]] };
+    },
+    async () => {
       const original = await readFile(manifestPath);
       const manifest = JSON.parse(original.toString('utf8'));
       manifest.surfaces = manifest.surfaces.filter(

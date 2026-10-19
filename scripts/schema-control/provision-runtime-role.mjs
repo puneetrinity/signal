@@ -7,6 +7,7 @@ import {GOVERNED_TABLES,GOVERNED_FUNCTIONS,assertGovernedSourcingCatalog} from '
 import {RANKING_TABLES,RANKING_FUNCTIONS,RANKING_PRIVATE_FUNCTIONS,assertRankingCatalog} from '../check-rubric-ranking.mjs';
 import {RC_TABLES,RC_FUNCTIONS,RC_OWNER_FUNCTIONS,assertRcCatalog} from '../check-rc-skills.mjs';
 import {PRIVATE_RESUME_TABLES,PRIVATE_RESUME_FUNCTIONS,PRIVATE_RESUME_OWNER_FUNCTIONS,assertPrivateResumeAccess} from '../check-private-resume.mjs';
+import {MEMORY_TABLES,MEMORY_FUNCTIONS,MEMORY_PRIVATE_FUNCTIONS,assertImmutableMemoryCatalog} from '../check-immutable-memory-ingest.mjs';
 
 const identity = resolveIdentityEnvironment();
 const directUrl = requireValue(process.env, 'DIRECT_URL');
@@ -61,18 +62,19 @@ try {
     await tx.$executeRawUnsafe(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${RUNTIME_ROLE}`);
     await tx.$executeRawUnsafe(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO ${RUNTIME_ROLE}`);
     await tx.$executeRawUnsafe(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO ${RUNTIME_ROLE}`);
-    for(const table of [...GOVERNED_TABLES,...RANKING_TABLES,...RC_TABLES,...PRIVATE_RESUME_TABLES]) {
+    for(const table of [...GOVERNED_TABLES,...RANKING_TABLES,...RC_TABLES,...PRIVATE_RESUME_TABLES,...MEMORY_TABLES]) {
       await tx.$executeRawUnsafe(`REVOKE ALL PRIVILEGES ON public.${table} FROM ${RUNTIME_ROLE},PUBLIC`);
       const columns=await tx.$queryRawUnsafe("SELECT attname FROM pg_attribute WHERE attrelid=to_regclass($1) AND attnum>0 AND NOT attisdropped ORDER BY attnum",'public.'+table);
       const names=columns.map(row=>quoteIdentifier(row.attname)).join(',');
       await tx.$executeRawUnsafe(`REVOKE SELECT(${names}),INSERT(${names}),UPDATE(${names}),REFERENCES(${names}) ON public.${table} FROM ${RUNTIME_ROLE},PUBLIC`);
     }
-    for(const signature of [...GOVERNED_FUNCTIONS,...RANKING_FUNCTIONS,...RC_FUNCTIONS,...PRIVATE_RESUME_FUNCTIONS]) {
+    for(const signature of [...GOVERNED_FUNCTIONS,...RANKING_FUNCTIONS,...RC_FUNCTIONS,...PRIVATE_RESUME_FUNCTIONS,...MEMORY_FUNCTIONS]) {
       await tx.$executeRawUnsafe(`REVOKE ALL ON FUNCTION public.${signature} FROM ${RUNTIME_ROLE},PUBLIC`);
       await tx.$executeRawUnsafe(`GRANT EXECUTE ON FUNCTION public.${signature} TO ${RUNTIME_ROLE}`);
     }
     await assertGovernedSourcingCatalog(tx,{role:RUNTIME_ROLE});
-    for(const signature of [...RANKING_PRIVATE_FUNCTIONS,...RC_OWNER_FUNCTIONS,...PRIVATE_RESUME_OWNER_FUNCTIONS])await tx.$executeRawUnsafe(`REVOKE ALL ON FUNCTION public.${signature} FROM ${RUNTIME_ROLE},PUBLIC`);
+    for(const signature of [...RANKING_PRIVATE_FUNCTIONS,...RC_OWNER_FUNCTIONS,...PRIVATE_RESUME_OWNER_FUNCTIONS,...MEMORY_PRIVATE_FUNCTIONS])await tx.$executeRawUnsafe(`REVOKE ALL ON FUNCTION public.${signature} FROM ${RUNTIME_ROLE},PUBLIC`);
+    await assertImmutableMemoryCatalog(tx,{role:RUNTIME_ROLE});
     await assertRankingCatalog(tx,{role:RUNTIME_ROLE});
     await assertRcCatalog(tx,{role:RUNTIME_ROLE});
     await assertPrivateResumeAccess(tx,{role:RUNTIME_ROLE});

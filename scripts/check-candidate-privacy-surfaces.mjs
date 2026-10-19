@@ -278,10 +278,10 @@ export async function evaluateCandidatePrivacySurfaces(root) {
     'utf8',
   );
   const sourceIngestStart = sourceClient.indexOf(
-    'export async function ingestCandidateWithResult(',
+    'async function sendPreparedCandidateToMemory(',
   );
   const sourceIngestEnd = sourceClient.indexOf(
-    'export async function ingestCandidate(',
+    'export const ingestCandidateBatchWithResults',
     sourceIngestStart,
   );
   const sourceIngest = sourceClient.slice(sourceIngestStart, sourceIngestEnd);
@@ -301,6 +301,11 @@ export async function evaluateCandidatePrivacySurfaces(root) {
     offenders.push(
       'approved-provider ingest lost dedicated signer/privacy-before-send/new-route authority',
     );
+  }
+  if ((sourceClient.match(/\/sourced-candidates\/ingest`/g)??[]).length!==1 ||
+      /export async function ingestCandidate(?:Batch)?\(/.test(sourceClient) ||
+      !sourceIngest.includes('body: requestBody')) {
+    offenders.push('approved-provider ingest must have one immutable-body transport');
   }
   const privacyConfig = await readFile(
     resolve(root, 'src/lib/candidate-privacy/config.ts'),

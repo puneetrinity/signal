@@ -99,6 +99,7 @@ import {
   addExpectedGlobalIdentityReceipt,
   buildExpectedGlobalIdentityReceipts,
   candidatePublicIdentityKey,
+  candidatePublicIdentityKeys,
   expectedGlobalCandidateIdForCandidate,
 } from './public-memory-identity';
 import { persistSourcingCandidatesForRequest } from './sourcing-candidate-persistence';
@@ -2190,7 +2191,10 @@ async function runSourcingOrchestratorMeasured(
               ORDER BY pid
               LIMIT ${config.excludeKnownMax}
             `;
-            return rows
+            const immutableRows = governedCommand?.protocolVersion===2
+              ? await prisma.$queryRawUnsafe<{pid:string}[]>('SELECT pid FROM public.signal_memory_ingest_lag_ids($1::text[],$2::timestamptz,$3::integer)',marketKeys,cutoff,config.excludeKnownMax)
+              : [];
+            return [...rows,...immutableRows]
               .map((row) => Number(row.pid))
               .filter(
                 (personId) =>
@@ -2875,7 +2879,7 @@ async function runSourcingOrchestratorMeasured(
             }
             try {
               await assertCurrentExecution();
-              const queued = await enqueuePublicMemoryIngestOutbox({
+              const enqueueInput = {
                 tenantId,
                 sourcingRequestId: requestId,
                 repairMissingOnly: process.env.RC_SKILLS_ENABLED==='true' && governedCommand?.protocolVersion===2,
@@ -2896,7 +2900,7 @@ async function runSourcingOrchestratorMeasured(
                       profileObservedAt: acquisition.acquiredAt,
                       acquisitionGeneration,
                       acquisitionReceiptId: acquisition.receiptId,
-                      acquisitionSlot: candidate.acquisitionRung === 'exact' ? 'exact' : 'spill',
+                      acquisitionSlot: candidate.acquisitionRung === 'exact' ? 'exact' as const : 'spill' as const,
                       expectedGlobalCandidateId: expectedGlobalCandidateIdForCandidate(
                         candidate,
                         publicGlobalIdByIdentity,
@@ -2908,7 +2912,28 @@ async function runSourcingOrchestratorMeasured(
                     ),
                   };
                 }),
-              });
+              };
+              let queued: number;
+              if (governedCommand?.protocolVersion === 2) {
+                const { ImmutableMemoryRepository, prepareMemoryPacket } = await import('./immutable-memory-ingest');
+                const repository = new ImmutableMemoryRepository();
+                if (!executionAttemptId || !processingLeaseId) throw Error('MEMORY_EXECUTION_STALE');
+                for (const acquisition of [exactAcquisition, spillAcquisition].filter((a): a is AcquiredCrustdataSearch => Boolean(a))) {
+                  const owner = { tenantId, sourcingRequestId: requestId, acquisitionReceiptId: acquisition.receiptId,
+                    acquisitionGeneration, acquisitionSlot: acquisition.metadata.rungId === 'exact' ? 'exact' as const : 'spill' as const };
+                  const prior = await repository.read(owner);
+                  if (!prior.sealed) {
+                    const packets = enqueueInput.candidates.filter(item => item.options.acquisitionReceiptId === acquisition.receiptId)
+                      .map(item => prepareMemoryPacket(owner, item.candidate, {
+                        ...item.options, acquisitionSlot: owner.acquisitionSlot, acquiredAt: acquisition.acquiredAt,
+                      }));
+                    await repository.prepare(owner, packets, { executionAttemptId, processingLeaseId });
+                  }
+                }
+                queued = enqueueInput.candidates.length;
+              } else {
+                queued = await enqueuePublicMemoryIngestOutbox(enqueueInput);
+              }
               publicMemory.ingestQueued += queued;
               publicMemory.ingestPending += queued;
             } catch {
@@ -3092,7 +3117,7 @@ async function runSourcingOrchestratorMeasured(
                 acquisitionGeneration,
                 acquisition.metadata.rungId === 'exact' ? 'exact' : 'spill',
               );
-              if (currentReceipt?.memoryIngestedAt) return true;
+              if (currentReceipt?.memoryIngestedAt && governedCommand?.protocolVersion !== 2) return true;
 
               await assertCurrentExecution();
               const publicOptionsByCandidateId = new Map(
@@ -3105,7 +3130,29 @@ async function runSourcingOrchestratorMeasured(
                   },
                 ]),
               );
-              const results = await ingestCandidateBatchWithResults(
+              const suppressed = new Set<string>();
+              const results = governedCommand?.protocolVersion === 2 ? await (async () => {
+                const { ImmutableMemoryRepository, awaitMemoryAcquisition } = await import('./immutable-memory-ingest');
+                const repository = new ImmutableMemoryRepository();
+                const owner = { tenantId, sourcingRequestId: requestId, acquisitionReceiptId: acquisition.receiptId,
+                  acquisitionGeneration, acquisitionSlot: acquisition.metadata.rungId === 'exact' ? 'exact' as const : 'spill' as const };
+                const snapshot = await repository.read(owner);
+                if (!snapshot.sealed || !snapshot.deadlineAt) throw Error('memory_preparation_required');
+                // Read already-settled receipts after restart even when the send window ended;
+                // pending work never gets a fresh dispatch window.
+                const settled = snapshot.members.every(member => ['succeeded','suppressed'].includes(member.state));
+                const reader = settled ? { read: async () => snapshot, drain: async () => { throw Error('memory_dispatch_window_closed'); } } : repository;
+                const members = await awaitMemoryAcquisition(owner, reader,
+                  settled ? Date.now()+5000 : Date.parse(snapshot.deadlineAt), { assertExecution: assertCurrentExecution });
+                if (!await repository.finish(owner)) throw Error('memory_ingest_failed');
+                publicMemory.ingestPending = Math.max(0, publicMemory.ingestPending-members.length);
+                publicMemory.ingestConfirmed += members.filter(member=>member.state==='succeeded').length;
+                const resultsById = new Map(members.map(member => {
+                  if (member.state === 'suppressed') suppressed.add(member.packet.providerRecordId);
+                  return [member.packet.providerRecordId, member.result];
+                }));
+                return profiles.map(profile => resultsById.get(String(profile.crustdata?.crustdata_person_id)) ?? null);
+              })() : await ingestCandidateBatchWithResults(
                 tenantId,
                 profiles,
                 requestId,
@@ -3131,6 +3178,16 @@ async function runSourcingOrchestratorMeasured(
               for (let index = 0; index < profiles.length; index += 1) {
                 const candidate = profiles[index];
                 const result = results[index];
+                const isSuppressed = suppressed.has(String(candidate.crustdata?.crustdata_person_id));
+                if (isSuppressed || result?.resolutionStatus === 'conflict_review_required') {
+                  // A stored expected anchor is not proof after Memory reports a
+                  // merge/split conflict. Remove every alias before linking/RC.
+                  for (const key of candidatePublicIdentityKeys(candidate)) {
+                    publicGlobalIdByIdentity.delete(key);
+                    conflictedPublicIdentityKeys.add(key);
+                  }
+                  if (isSuppressed) continue;
+                }
                 const expectedGlobalCandidateId =
                   expectedGlobalCandidateIdForCandidate(
                     candidate,
@@ -3146,14 +3203,14 @@ async function runSourcingOrchestratorMeasured(
                     `Memory did not durably confirm ${candidate.id} from the ${acquisition.metadata.rungId} receipt`,
                   );
                 }
-                if(process.env.RC_SKILLS_ENABLED==='true'&&governedCommand?.protocolVersion===2&&result.globalCandidateId){
+                if(process.env.RC_SKILLS_ENABLED==='true'&&governedCommand?.protocolVersion===2&&result!.globalCandidateId){
                   const slug=extractLinkedInIdFromUrl(candidate.linkedinUrl);
                   if(!slug)throw Error('RC_IDENTITY_CONFLICT');
                   addExpectedGlobalIdentityReceipt({expectedByIdentity:publicGlobalIdByIdentity,
-                    conflictedIdentityKeys:conflictedPublicIdentityKeys},`li:${slug.toLowerCase()}`,result.globalCandidateId);
+                    conflictedIdentityKeys:conflictedPublicIdentityKeys},`li:${slug.toLowerCase()}`,result!.globalCandidateId!);
                 }
               }
-              await markCrustdataReceiptMemoryIngested(
+              if (governedCommand?.protocolVersion !== 2) await markCrustdataReceiptMemoryIngested(
                 tenantId,
                 acquisition.receiptId,
                 {
@@ -3330,7 +3387,7 @@ async function runSourcingOrchestratorMeasured(
                 );
               }
             }
-            await attachLocalCandidatesToPublicMemoryOutbox(
+            if (governedCommand?.protocolVersion !== 2) await attachLocalCandidatesToPublicMemoryOutbox(
               tenantId,
               mappedForRanking.flatMap((candidate) => {
                 const linkedinId = extractLinkedInIdFromUrl(
@@ -3509,7 +3566,8 @@ async function runSourcingOrchestratorMeasured(
                   const candidateIds=[...governedEvidenceById.keys(),...governedWithheldById.keys()];
                   const links=await prisma.candidateGlobalLink.findMany({where:{tenantId,candidateId:{in:candidateIds}},
                     select:{candidateId:true,globalCandidateId:true,candidate:{select:{linkedinUrl:true,identityKind:true}}}});
-                  const identities=rcPublicIdentities(links.flatMap(link=>link.candidate.identityKind==='linkedin'&&link.candidate.linkedinUrl?[{
+                  const identities=rcPublicIdentities(links.flatMap(link=>link.candidate.identityKind==='linkedin'&&link.candidate.linkedinUrl&&
+                    !conflictedPublicIdentityKeys.has(`li:${extractLinkedInIdFromUrl(link.candidate.linkedinUrl)?.toLowerCase()}`)?[{
                     candidateId:link.candidateId,globalCandidateId:link.globalCandidateId,url:link.candidate.linkedinUrl}]:[]));
                   const receipts=await prisma.crustdataAcquisitionReceipt.findMany({where:{tenantId,sourcingRequestId:requestId,
                     acquisitionGeneration,status:'complete'},select:{id:true}});
@@ -3555,33 +3613,20 @@ async function runSourcingOrchestratorMeasured(
             };
             console.log(`✅ [ORCHESTRATOR] MAPPED ${discovered.length} CANDIDATES FROM CRUSTDATA`);
           } else {
+            const settleEmpty = async (acquisition: AcquiredCrustdataSearch) => {
+              // Protocol 2 takes the preparation branch above even for zero profiles.
+              return markCrustdataReceiptMemoryIngested(tenantId,acquisition.receiptId,
+                {candidateCount:0,profileObservedAt:acquisition.acquiredAt.toISOString(),acquisitionGeneration});
+            };
             const exactMemoryIngestApplied =
-              await markCrustdataReceiptMemoryIngested(
-                tenantId,
-                exactAcquisition.receiptId,
-                {
-                  candidateCount: 0,
-                  profileObservedAt:
-                    exactAcquisition.acquiredAt.toISOString(),
-                  acquisitionGeneration,
-                },
-              );
+              await settleEmpty(exactAcquisition);
             if (crustdataAcquisition?.exact) {
               crustdataAcquisition.exact.memoryIngestReused =
                 !exactMemoryIngestApplied;
             }
             if (spillAcquisition) {
               const spillMemoryIngestApplied =
-                await markCrustdataReceiptMemoryIngested(
-                  tenantId,
-                  spillAcquisition.receiptId,
-                  {
-                    candidateCount: 0,
-                    profileObservedAt:
-                      spillAcquisition.acquiredAt.toISOString(),
-                    acquisitionGeneration,
-                  },
-                );
+                await settleEmpty(spillAcquisition);
               if (crustdataAcquisition?.spill) {
                 crustdataAcquisition.spill.memoryIngestReused =
                   !spillMemoryIngestApplied;

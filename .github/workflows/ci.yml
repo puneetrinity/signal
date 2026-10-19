@@ -61,6 +61,9 @@ jobs:
       - run: npm run test:rubric-ranking:pg
       - run: npm run test:rc-skills:pg
       - run: npm run test:rc-skills:process
+      - run: npm run test:immutable-memory:pg
+        env:
+          SIGNAL_IMMUTABLE_TEST_ADMIN_URL: postgresql://postgres:local-test-only@127.0.0.1:55489/postgres
       - name: Stop owned PostgreSQL 17
         if: always()
         run: |

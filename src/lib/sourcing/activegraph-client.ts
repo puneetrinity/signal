@@ -17,9 +17,10 @@ import {
   createCandidateAdmissionProofs,
   requireNewCandidateAllowed,
 } from '@/lib/candidate-privacy/decision';
-import { requireHealthyCandidatePrivacyContext } from '@/lib/candidate-privacy/repository';
+import { requireHealthyCandidatePrivacyContext, CandidatePrivacyRestrictedError } from '@/lib/candidate-privacy/repository';
 import { fetchMemorySearch, SearchRetrievalError } from './search-retrieval';
 import { createHash } from 'node:crypto';
+import { readMemoryPacket, type FrozenMemoryPacket } from './immutable-memory-ingest';
 
 export interface StrictMemorySearchOptions { timeoutMs: number }
 
@@ -35,7 +36,6 @@ function searchTiming(surface: 'public_v1' | 'tenant_private_v1' | 'legacy_v0', 
     },
   };
 }
-
 /** A complete privacy response may exclude a person, not every other match.
  * Proof creation checks one high-water context across all internal batches.
  * Transport/missing/unknown decisions still throw and make the lane unavailable.
@@ -103,7 +103,7 @@ function fetchWithTimeout(
     () => controller.abort(),
     Math.max(1, timeoutMs),
   );
-  return fetch(url, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
+  return fetch(url, { ...init, signal: init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal }).finally(() => clearTimeout(timer));
 }
 
 export interface ActiveGraphSearchResult {
@@ -1306,6 +1306,27 @@ export async function ingestCandidateWithResult(
       errorCode: 'invalid_adapter_input',
     };
   }
+  return sendPreparedCandidateToMemory(tenantId, candidate.id, payload, JSON.stringify(payload), requestId);
+}
+
+/** The immutable route validates stored bytes but never rebuilds the payload. */
+export async function sendFrozenMemoryPacket(packet: FrozenMemoryPacket, deadlineAt: number): Promise<CandidateIngestResult> {
+  const payload = readMemoryPacket(packet, packet);
+  if (!Number.isFinite(deadlineAt) || Date.now() >= deadlineAt) throw Error('memory_wait_expired');
+  const controller = new AbortController();
+  // This timer remains active through body consumption, not just HTTP headers.
+  const timer = setTimeout(() => controller.abort(), Math.min(5000, deadlineAt-Date.now()));
+  try {
+    return await sendPreparedCandidateToMemory(packet.tenantId, packet.signalCandidateId, payload, packet.requestBody, packet.sourcingRequestId, controller.signal);
+  } finally { clearTimeout(timer); }
+}
+
+async function sendPreparedCandidateToMemory(
+  tenantId: string, signalCandidateId: string, payload: ApprovedProviderCandidateIngestRequest,
+  requestBody: string, requestId?: string, signal?: AbortSignal,
+): Promise<CandidateIngestResult> {
+  const candidate = { id: signalCandidateId };
+  const options = { expectedGlobalCandidateId: payload.expected_global_candidate_id, acquisitionSlot: payload.acquisition_slot };
   // Last-moment admission is deliberately after all local adaptation and
   // immediately before token creation/network disclosure.
   try {
@@ -1315,7 +1336,7 @@ export async function ingestCandidateWithResult(
       signalCandidateId: candidate.id,
       globalCandidateId: options.expectedGlobalCandidateId,
     });
-  } catch {
+  } catch (error) {
     return {
       success: false,
       signalCandidateId: candidate.id,
@@ -1323,7 +1344,7 @@ export async function ingestCandidateWithResult(
       globalCandidateId: null,
       sourceRecordId: null,
       resolutionStatus: null,
-      errorCode: 'privacy_restricted',
+      errorCode: signal && !(error instanceof CandidatePrivacyRestrictedError) ? 'privacy_unavailable' : 'privacy_restricted',
     };
   }
   let token: string;
@@ -1342,6 +1363,7 @@ export async function ingestCandidateWithResult(
   }
   let response: Response;
   try {
+    signal?.throwIfAborted();
     response = await fetchWithTimeout(
       `${ACTIVEGRAPH_URL}/sourced-candidates/ingest`,
       {
@@ -1351,7 +1373,8 @@ export async function ingestCandidateWithResult(
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify(payload),
+        body: requestBody,
+        signal,
       },
       5_000,
     );
@@ -1458,26 +1481,6 @@ export async function ingestCandidateWithResult(
   };
 }
 
-/**
- * Backward-compatible boolean wrapper used by the current async ingest path.
- */
-export async function ingestCandidate(
-  tenantId: string,
-  candidate: IngestableCandidate,
-  tags: string[],
-  requestId?: string,
-  options: CandidateIngestOptions = {},
-): Promise<boolean> {
-  const result = await ingestCandidateWithResult(
-    tenantId,
-    candidate,
-    tags,
-    requestId,
-    options,
-  );
-  return result.success;
-}
-
 export const ingestCandidateBatchWithResults = timedSourcingFunction('memory_ingestion', ingestCandidateBatchWithResultsMeasured);
 async function ingestCandidateBatchWithResultsMeasured(
   tenantId: string,
@@ -1522,28 +1525,4 @@ async function ingestCandidateBatchWithResultsMeasured(
     allResults.push(...results);
   }
   return allResults;
-}
-
-/**
- * Ingest a batch of candidates with bounded concurrency (chunks of 10).
- * Individual failures are logged by ingestCandidateWithResult; returns the
- * historical success-count contract.
- */
-export async function ingestCandidateBatch(
-  tenantId: string,
-  candidates: IngestableCandidate[],
-  requestId?: string,
-  chunkSize = 10,
-  optionsForCandidate?: (
-    candidate: IngestableCandidate,
-  ) => CandidateIngestOptions,
-): Promise<number> {
-  const results = await ingestCandidateBatchWithResults(
-    tenantId,
-    candidates,
-    requestId,
-    chunkSize,
-    optionsForCandidate,
-  );
-  return results.filter((result) => result.success).length;
 }

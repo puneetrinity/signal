@@ -164,6 +164,10 @@ async function processRow({
 export async function runPublicMemoryIngestCycle(
   options: PublicMemoryIngestWorkerOptions = {},
 ): Promise<PublicMemoryIngestCycleSummary> {
+  if (!options.store) {
+    const { runImmutableMemoryCycle } = await import('./immutable-memory-ingest');
+    await runImmutableMemoryCycle();
+  }
   const store = options.store ?? new PrismaPublicMemoryOutboxStore();
   const batchSize = options.batchSize ?? 20;
   const concurrency = Math.max(1, options.concurrency ?? 5);

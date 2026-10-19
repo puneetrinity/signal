@@ -20,6 +20,7 @@
     "check:rc-skills": "node scripts/check-rc-skills.mjs",
     "test:rc-skills": "vitest run --maxWorkers=1 --minWorkers=1 --no-file-parallelism src/lib/sourcing/rc-skills/__tests__ --exclude '**/*postgres.integration.test.ts'",
     "test:rc-skills:pg": "vitest run --maxWorkers=1 --minWorkers=1 --no-file-parallelism src/lib/sourcing/rc-skills/__tests__/rc-postgres.integration.test.ts",
+    "test:immutable-memory:pg": "RUN_SIGNAL_IMMUTABLE_POSTGRES=1 vitest run --maxWorkers=1 --minWorkers=1 --no-file-parallelism src/lib/sourcing/__tests__/immutable-memory-ingest-postgres.integration.test.ts",
     "test:rc-skills:process": "NODE_ENV=test node --import tsx scripts/test-rc-skills-process.mjs",
     "worker:rc-maintenance": "node scripts/rc-skills-maintenance.mjs",
     "test:rubric-ranking": "vitest run --maxWorkers=1 --minWorkers=1 --no-file-parallelism src/lib/sourcing/rubric/__tests__ --exclude '**/*postgres.integration.test.ts'",

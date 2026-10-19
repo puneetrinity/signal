@@ -7,6 +7,8 @@ export async function main(args=process.argv.slice(2)){
  if(process.env.RC_SKILLS_ENABLED!=='true'){
   console.log(JSON.stringify({event:'rc_watchdog_disabled',version:1}));return;
  }
+ // Maintenance is a Memory sender too: refuse an incompatible schema/ACL before work.
+ await import('./schema-control/schema-ready.mjs');
  // Install the existing loader once for both ESM and transitive CJS imports.
  // Per-import scoped loaders can disagree on nested TypeScript dependencies.
  await import('tsx');
@@ -44,8 +46,9 @@ export async function main(args=process.argv.slice(2)){
      const skills=await drainRcOutbox({tenantId:run.tenantId,flowRunId:run.flowRunId,repository,memory,limit:25});
      return purchased&&!skills.pending;
     }});
-    // Existing idempotent Memory ingest transport only; never Crustdata/RC.
-    if(result.deliveriesAttempted)await runPublicMemoryIngestCycle({batchSize:25,concurrency:2});
+    // The same immutable packet executor as inline sourcing and the queue.
+    // Preparation is search-owned; maintenance never reconstructs a request.
+    await runPublicMemoryIngestCycle({batchSize:25,concurrency:2});
     if(cleanupDue)lastCleanup=started;
     console.log(JSON.stringify({event:'rc_maintenance_cycle',version:1,at:new Date().toISOString(),...result,resumed}));
     if(resumed.failed && args.includes('--once'))process.exitCode=1;
