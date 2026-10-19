@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { memoryPreparationStage as stage } from './memory-preparation-diagnostics';
 import type { CandidateIngestResult } from './activegraph-client';
 import {
   adaptCrustdataCandidateForMemory,
@@ -241,25 +242,27 @@ export class ImmutableMemoryRepository implements MemoryDeliveryReader {
     const { createCandidateAdmissionProofs } = await import('@/lib/candidate-privacy/decision');
     const { requireHealthyCandidatePrivacyContext, assertAdmissionProofCurrent, CANDIDATE_PRIVACY_ADMISSION_LOCK } =
       await import('@/lib/candidate-privacy/repository');
-    const unique = memoryPacketManifest(owner, packets).packets;
-    const context = await requireHealthyCandidatePrivacyContext();
-    const proofs = await createCandidateAdmissionProofs(unique.map(p => ({ key: p.idempotencyKey,
-      linkedinUrl: p.linkedinUrl, globalCandidateId: p.expectedGlobalCandidateId })));
-    await db.$transaction(async tx => {
-      await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', CANDIDATE_PRIVACY_ADMISSION_LOCK);
+    const unique = await stage('manifest', () => memoryPacketManifest(owner, packets).packets);
+    const context = await stage('privacy_context', () => requireHealthyCandidatePrivacyContext());
+    const proofs = await stage('privacy_proofs', () => createCandidateAdmissionProofs(unique.map(p => ({ key: p.idempotencyKey,
+      linkedinUrl: p.linkedinUrl, globalCandidateId: p.expectedGlobalCandidateId }))));
+    await stage('transaction', () => db.$transaction(async tx => {
+      await stage('privacy_lock', () => tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', CANDIDATE_PRIVACY_ADMISSION_LOCK));
+      await stage('privacy_recheck', async () => {
       const current = await requireHealthyCandidatePrivacyContext(tx);
       if (current.generation !== context.generation || current.cursor !== context.cursor) throw Error('candidate_privacy_conflict');
       const first = proofs.values().next().value;
       if (first) await assertAdmissionProofCurrent(tx, first);
       // All proofs were just issued by one high-water-checked batch, above.
       for (const proof of proofs.values()) if (proof.generation !== current.generation || proof.cursor !== current.cursor) throw Error('candidate_privacy_conflict');
+      });
       for (let i = 0; i < unique.length; i += 25) {
-        await command(tx, owner, { action: 'append', ...fence,
-          packets: unique.slice(i, i + 25).map(p => ({ ...p, initialSuppressed: !proofs.has(p.idempotencyKey) })) });
+        await stage('append', () => command(tx, owner, { action: 'append', ...fence,
+          packets: unique.slice(i, i + 25).map(p => ({ ...p, initialSuppressed: !proofs.has(p.idempotencyKey) })) }));
       }
-      await command(tx, owner, { action: 'seal', ...fence });
-    }, { maxWait: 2000, timeout: 5000 });
-    return this.read(owner);
+      await stage('seal', () => command(tx, owner, { action: 'seal', ...fence }));
+    }, { maxWait: 2000, timeout: 5000 }));
+    return stage('readback', () => this.read(owner));
   }
 
   private async privacy(owner: MemoryAcquisitionOwner): Promise<void> {
