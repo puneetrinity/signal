@@ -35,9 +35,9 @@ describe.skipIf(!enabled)('immutable purchased-profile queue: real migrations an
  const globalId='11111111-1111-4111-8111-111111111111';
  const call=async(db:Client,o:MemoryAcquisitionOwner,c:unknown)=>(await db.query(
   'SELECT public.signal_memory_ingest($1::jsonb,$2::jsonb) result',[JSON.stringify(o),JSON.stringify(c)])).rows[0].result;
- async function fixture(count=1,contract=2){
-  const id=randomUUID();
-  const o:MemoryAcquisitionOwner={tenantId:'org_32',sourcingRequestId:id,acquisitionReceiptId:`receipt-${id}`,acquisitionGeneration:1,acquisitionSlot:'exact'};
+ async function fixture(count=1,contract=2,target?:{requestId:string;purchaseId:string}){
+  const id=target?.requestId??randomUUID();
+  const o:MemoryAcquisitionOwner={tenantId:'org_32',sourcingRequestId:id,acquisitionReceiptId:target?.purchaseId??`receipt-${id}`,acquisitionGeneration:1,acquisitionSlot:'exact'};
   await owner.query(`INSERT INTO job_sourcing_requests(id,"tenantId","externalJobId","jobContextHash","jobContext","callbackUrl",status,protocol_version,execution_attempt_id,processing_lease_id,flow_run_id,artifact_hash)
     VALUES($1::text,'org_32',$1::text,$1::text,'{}','https://example.invalid/callback','processing',2,$2,$3,$1::text::uuid,repeat('a',64))`,[id,fence.executionAttemptId,fence.processingLeaseId]);
   await owner.query(`INSERT INTO crustdata_acquisition_receipts(id,"tenantId","sourcingRequestId","acquisitionGeneration",slot,status,"requestFingerprint","requestInput","requestMetadata",result,"updatedAt",memory_delivery_contract)
@@ -122,6 +122,20 @@ describe.skipIf(!enabled)('immutable purchased-profile queue: real migrations an
  it('seals an empty acquisition before acknowledging it',async()=>{
   const {o,packets}=await fixture(0);await seal(o,packets);expect(await call(runtime,o,{action:'complete'})).toBe(true);
   expect((await call(runtime,o,{action:'read'})).memberCount).toBe(0);
+ });
+ it('job192 diagnostic wrapper executes real preparation but cannot commit any packet or seal',async()=>{
+  const {TARGET,rollbackPrisma}=await import('../../../../scripts/job192-probe/core.mjs');
+  const {o,packets}=await fixture(300,2,TARGET);
+  const original=bridge.db!;
+  const wrapper=rollbackPrisma(original);
+  bridge.db=wrapper.client as unknown as PrismaClient;
+  try{
+   await expect(new ImmutableMemoryRepository().prepare(o,packets,fence)).rejects.toBe(wrapper.sentinel);
+  }finally{bridge.db=original;}
+  expect(wrapper.completed).toBe(true);expect(wrapper.transactions).toBe(1);
+  const snapshot=await call(runtime,o,{action:'read'});
+  expect(snapshot.sealed).toBe(false);expect(snapshot.members).toEqual([]);
+  expect((await owner.query('SELECT memory_prepared_at,memory_member_count FROM crustdata_acquisition_receipts WHERE id=$1',[o.acquisitionReceiptId])).rows[0]).toEqual({memory_prepared_at:null,memory_member_count:null});
  });
  it('reports and rolls back a 300-profile preparation with injected append latency (not production proof)',async()=>{
   const {o,packets}=await fixture(300);
