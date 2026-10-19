@@ -91,6 +91,8 @@ export async function run(env){
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
   run(process.env).then(r=>process.stdout.write('JOB192_PROBE_RESULT '+JSON.stringify(r)+'\n')).catch(e=>{
     const code=typeof e?.message==='string'&&/^[A-Z][A-Z0-9_]{2,63}$/.test(e.message)?e.message:'UNCLASSIFIED';
-    process.stdout.write('JOB192_PROBE_REFUSED '+JSON.stringify({code})+'\n');process.exitCode=1;
-  }).finally(()=>setTimeout(()=>process.exit(process.exitCode??0),500));
+    process.stdout.write('JOB192_PROBE_REFUSED '+JSON.stringify({code})+'\n');
+  // Always exit 0: the outcome is in the line above. A non-zero exit would trigger the shared railway.toml
+  // ON_FAILURE restart policy and break the one-shot guarantee.
+  }).finally(()=>setTimeout(()=>process.exit(0),500));
 }
