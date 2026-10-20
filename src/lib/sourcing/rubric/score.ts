@@ -1,6 +1,6 @@
 import { byteCompare, rankingContractSchema, type Criterion, type RankingContract } from './contracts';
 import { evidenceFor, evidenceSchema, selectEmployment, type CanonicalEvidence, type EvidenceFact } from './evidence';
-import { calculateExperience, experienceEligibility, experienceDisplay, DAYS_PER_YEAR, type ExperienceRange, type ExperienceEligibility } from './experience';
+import { calculateExperience, experienceEligibility, experienceDisplay, isInternship, DAYS_PER_YEAR, type EmploymentInterval, type ExperienceRange, type ExperienceEligibility } from './experience';
 import { atomicSkill, automaticallyMapped, canonicalDegree, canonicalLanguage, canonicalLocation, functionFamily, normalize, normalizedTitle, predicateKey, seniority, languageRequirement, educationRequirement, certificationRequirement, CEFR_LEVELS } from './taxonomy';
 import { localMatch } from './lexical';
 import { approvedSkillNames, normalizeSkillName } from './skill-alternatives';
@@ -116,12 +116,18 @@ function scoreWithContract(contract:RankingContract,rawEvidence:CanonicalEvidenc
     const c=[...candidates].sort((a,b)=>weightFor(b)-weightFor(a)||byteCompare(a.id,b.id))[0];
     const weight=weightFor(c),mapped=automaticallyMapped(c);
     let state:AssessmentState='unknown',positive:string[]=[],refs:string[]=[];
+    const relevant=c.subject==='relevant_work'&&mapped&&c.requirement.kind==='text'?
+      assessRelevantWorkSources(c.requirement.value,relevantWorkSources(evidence,c.evidenceKinds,asOf),asOf):null;
     if(c.subject==='experience_years'&&range) {
       if(['measured','bounded'].includes(experience.status)&&experience.lowerDays!==null&&experience.upperDays!==null) {
         const lo=experience.lowerDays/DAYS_PER_YEAR,hi=experience.upperDays/DAYS_PER_YEAR;
         state=lo>=range.minimum&&hi<=(range.maximum??Infinity)?'met':hi<range.minimum||lo>(range.maximum??Infinity)?'not_met':'unknown';
         if(state==='met') positive=['recorded employment'];refs=[employment.ref];
       }
+    } else if(relevant) {
+      state=relevant.state;
+      if(state==='met') positive=relevant.titles;
+      refs=[relevant.ref];
     } else ({state,positive,refs}=assess(c,evidence,asOf,normalizeSkill));
     const orderedCriteria=[...candidates].sort((a,b)=>byteCompare(a.id,b.id));
     assessments.push({criterionIds:orderedCriteria.map(x=>x.id),labels:orderedCriteria.map(x=>x.label),subject:c.subject,state,mapped,weight,
@@ -132,6 +138,93 @@ function scoreWithContract(contract:RankingContract,rawEvidence:CanonicalEvidenc
   return {candidateId:evidence.candidateId,eligibility,experience:{...experience,display:experienceDisplay(experience,range)},
     N:assessments.reduce((sum,a)=>sum+a.points,0),D:assessments.reduce((sum,a)=>sum+a.weight,0),
     L:assessments.reduce((sum,a)=>sum+a.localPoints,0),assessments};
+}
+export type RequiredDuration={kind:'none'}|{kind:'years';years:number}|{kind:'unsupported'};
+/**
+ * Duration asked for by a relevant-work requirement. Only one plain number with "years"/"yrs" (optionally "+") is
+ * understood. Written numbers, ranges, several numbers or implausible values are "unsupported" and must never be
+ * read as "no duration" (that would silently weaken the approved criterion).
+ */
+export function requiredDuration(text:string):RequiredDuration {
+  // Other time units ("60 months") and upper limits ("at most 5 years") are not parsed: they are unsupported, never
+  // treated as no duration or as a minimum.
+  if(/\b(?:months?|mos?|weeks?|wks?|days?|decades?)\b/i.test(text)) return {kind:'unsupported'};
+  if(!/\b(?:years?|yrs?)\b/i.test(text)) return {kind:'none'};
+  if(/\b(?:at\s+most|up\s+to|no\s+more\s+than|not\s+more\s+than|less\s+than|fewer\s+than|under|below|maximum|max)\b|<|≤/i.test(text)) return {kind:'unsupported'};
+  const numbers=text.match(/\d+(?:\.\d+)?/g)??[];
+  const range=/\d\s*(?:-|–|—|to)\s*\d/i.test(text);
+  const m=/(?:^|[^\d.])(\d{1,2})\s*\+?\s*(?:years?|yrs?)\b/i.exec(text);
+  const years=m?Number(m[1]):NaN;
+  if(numbers.length!==1||range||!m||!Number.isInteger(years)||years<1||years>40) return {kind:'unsupported'};
+  return {kind:'years',years};
+}
+/** Back-compat helper used by tests: years when understood, otherwise null. */
+export function requiredYears(text:string):number|null {
+  const d=requiredDuration(text);return d.kind==='years'?d.years:null;
+}
+type WorkResult={state:AssessmentState;titles:string[]};
+/** One employment source, judged on its own dated roles (locked rules, see the finding doc). */
+function assessWorkSource(family:string,years:number,intervals:readonly EmploymentInterval[],asOf:string):WorkResult {
+  const roles=intervals.filter(r=>!isInternship(r));
+  const matching=roles.filter(r=>typeof r.title==='string'&&functionFamily(r.title)===family);
+  const titles=[...new Set(matching.map(r=>normalize(r.title!)))].sort();
+  const minimumDays=years*DAYS_PER_YEAR;
+  const measured=(e:ReturnType<typeof calculateExperience>)=>['measured','bounded'].includes(e.status)&&e.lowerDays!==null&&e.upperDays!==null;
+  // Lower bound: only matching roles whose own dates are usable; an undated role never discards dated ones.
+  const datedMatching=matching.filter(r=>measured(calculateExperience([r],asOf)));
+  const lower=datedMatching.length?calculateExperience(datedMatching,asOf):null;
+  if(lower&&measured(lower)&&lower.lowerDays!>=minimumDays) return {state:'met',titles};
+  if(!roles.length) return {state:'unknown',titles};
+  const possible=roles.filter(r=>typeof r.title!=='string'||functionFamily(r.title)===family||functionFamily(r.title)===null);
+  if(!possible.length) return measured(calculateExperience(roles,asOf))?{state:'not_met',titles}:{state:'unknown',titles};
+  const upper=calculateExperience(possible,asOf);
+  return measured(upper)&&upper.upperDays!<minimumDays?{state:'not_met',titles}:{state:'unknown',titles};
+}
+/**
+ * Employment sources this criterion may use, in precedence order (candidate-provided résumé, then profile), with the
+ * same allowed evidence kinds and observation cutoff as experience selection, but WITHOUT requiring the whole source
+ * to be fully dated (relevant work only needs its dated matching roles).
+ */
+export function relevantWorkSources(evidence:CanonicalEvidence,allowed:readonly string[],asOf:string):{intervals:EmploymentInterval[];ref:string}[] {
+  if(evidence.version==='rubric-evidence-v1')
+    return allowed.includes('profile_evidence')&&evidence.employment.length?[{intervals:evidence.employment,ref:'employment'}]:[];
+  const out:{intervals:EmploymentInterval[];ref:string}[]=[];
+  for(const kind of ['candidate_provided','profile_evidence']) {
+    const source=evidence.employmentSources.find(s=>s.kind===kind&&allowed.includes(s.kind)&&Date.parse(s.observedAt)<=Date.parse(asOf));
+    if(source&&source.intervals.length) out.push({intervals:source.intervals,ref:kind==='candidate_provided'?'resume.employment':'profile.employment'});
+  }
+  return out;
+}
+/**
+ * Relevant work = dated employment in roles whose title is in the required role family. Across sources, in the same
+ * precedence as experience (résumé, then profile): the first source that decides (met / not_met) is used; otherwise
+ * unknown. Missing evidence is "unknown", never "not_met". Returns null when this rule does not
+ * apply (no resolvable family, or a family-only requirement with no matching role) so the previous path is used.
+ */
+export function assessRelevantWorkSources(required:string,sources:readonly {intervals:EmploymentInterval[];ref:string}[],asOf:string):(WorkResult&{ref:string})|null {
+  const family=functionFamily(required);
+  if(family===null) return null;
+  const duration=requiredDuration(required);
+  if(duration.kind==='unsupported') return {state:'unknown',titles:[],ref:sources[0]?.ref??'employment'};
+  if(duration.kind==='none') {
+    for(const s of sources) {
+      const titles=[...new Set(s.intervals.filter(r=>!isInternship(r)&&typeof r.title==='string'&&functionFamily(r.title)===family).map(r=>normalize(r.title!)))].sort();
+      if(titles.length) return {state:'met',titles,ref:s.ref};
+    }
+    return null;
+  }
+  // Same preference as experience selection (résumé before profile): the first source that can decide (met or
+  // not_met) is used; a source whose dates cannot decide falls through instead of hiding usable evidence.
+  for(const s of sources) {
+    const r=assessWorkSource(family,duration.years,s.intervals,asOf);
+    if(r.state!=='unknown') return {...r,ref:s.ref};
+  }
+  return {state:'unknown',titles:[],ref:sources[0]?.ref??'employment'};
+}
+/** Single-source convenience (tests, v1). */
+export function assessRelevantWork(required:string,intervals:readonly EmploymentInterval[],asOf:string):WorkResult|null {
+  const r=assessRelevantWorkSources(required,intervals.length?[{intervals:[...intervals],ref:'employment'}]:[],asOf);
+  return r&&{state:r.state,titles:r.titles};
 }
 export type RankedEvidence=ReturnType<typeof scoreEvidence>;
 export const eligible=(value:ExperienceEligibility)=>['in_range','wider','unconstrained'].includes(value);
