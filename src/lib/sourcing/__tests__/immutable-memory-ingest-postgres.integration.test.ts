@@ -74,10 +74,15 @@ describe.skipIf(!enabled)('immutable purchased-profile queue: real migrations an
   const root=process.cwd();const baseline=JSON.parse(await readFile(resolve(root,'prisma/baseline/manifest.json'),'utf8'));
   await owner.query(await readFile(resolve(root,baseline.baselinePath),'utf8'));
   const migrations=(await readdir(resolve(root,'prisma/migrations'))).filter(n=>/^\d{14}_/.test(n)&&n>baseline.baselineMigrationThrough).sort();
-  for(const name of migrations){await owner.query('BEGIN');try{await owner.query(await readFile(resolve(root,'prisma/migrations',name,'migration.sql'),'utf8'));await owner.query('COMMIT');}catch(e){await owner.query('ROLLBACK');throw e;}}
+  for(const name of migrations){
+   if(name==='20261020010000_memory_wait_progress')console.info('PROGRESS_PREDECESSORS',(await owner.query(
+    "SELECT oid::regprocedure::text signature,md5(prosrc) digest FROM pg_proc WHERE oid IN ('signal_rc_maintain(jsonb)'::regprocedure,'signal_rc_read(text,uuid)'::regprocedure,'signal_memory_ingest(jsonb,jsonb)'::regprocedure) ORDER BY 1")).rows);
+   await owner.query('BEGIN');try{await owner.query(await readFile(resolve(root,'prisma/migrations',name,'migration.sql'),'utf8'));await owner.query('COMMIT');}catch(e){await owner.query('ROLLBACK');throw e;}}
   const {MEMORY_CATALOG_SQL,MEMORY_CATALOG_SHA256}=await import('../../../../scripts/check-immutable-memory-ingest.mjs');
   const catalog=(await owner.query(MEMORY_CATALOG_SQL)).rows[0].digest;
   expect(catalog).toBe(MEMORY_CATALOG_SHA256);console.info('MEMORY_CATALOG',catalog);
+  const {RC_CATALOG_SQL,RC_CATALOG_SHA256}=await import('../../../../scripts/check-rc-skills.mjs');
+  expect((await owner.query(RC_CATALOG_SQL)).rows[0].digest).toBe(RC_CATALOG_SHA256);
   await owner.query(`GRANT USAGE ON SCHEMA public TO ${runtimeRole}`);
   await owner.query(`GRANT SELECT ON job_sourcing_requests,crustdata_acquisition_receipts TO ${runtimeRole}`);
   await owner.query(`GRANT EXECUTE ON FUNCTION signal_memory_ingest(jsonb,jsonb) TO ${runtimeRole}`);
@@ -90,6 +95,106 @@ describe.skipIf(!enabled)('immutable purchased-profile queue: real migrations an
   if(admin){await admin.query(`DROP ROLE IF EXISTS ${runtimeRole}`);await admin.query(`DROP ROLE IF EXISTS ${ownerRole}`);await admin.end();}},30000);
  const exclusion=(providerRecordId:string)=>({index:Number(providerRecordId)-1,providerRecordId,
   candidateFingerprint:'e'.repeat(64),reason:'linkedin_invalid'});
+ it('keeps 300 slow acknowledgements alive across watchdog ticks and restart, but not heartbeat-only hangs',async()=>{
+  const {o,packets}=await fixture(300), policy=randomUUID(), runId=randomUUID();
+  await owner.query(`INSERT INTO governed_sourcing_tenants(tenant_id,enabled_at,policy_hash,organization_ref,callback_url)
+   VALUES('org_32',clock_timestamp(),repeat('a',64),'32','https://example.invalid/callback') ON CONFLICT DO NOTHING`);
+  await owner.query(`INSERT INTO governed_sourcing_bindings(tenant_id,flow_run_id,request_id,artifact_hash,organization_ref,external_job_id,command)
+   VALUES('org_32',$1::text::uuid,$1::text,repeat('a',64),'32','synthetic','{}')`,[o.sourcingRequestId]);
+  await owner.query(`INSERT INTO rc_rate_policies(id,policy_hash,enabled) VALUES($1,$2,false)`,[policy,policy.replaceAll('-','').repeat(2)]);
+  await owner.query(`INSERT INTO rc_sourcing_runs(id,tenant_id,flow_run_id,request_id,generation,policy_id,brief_hash,state,
+   execution_attempt_id,processing_lease_id,rc_available,protocol_mode)
+   VALUES($1,'org_32',$2::text::uuid,$2::text,1,$3,repeat('a',64),'admitted',$4,$5,false,2)`,
+   [runId,o.sourcingRequestId,policy,fence.executionAttemptId,fence.processingLeaseId]);
+  const signatures=['signal_memory_ingest(jsonb,jsonb)','signal_rc_maintain(jsonb)','signal_rc_read(text,uuid)'];
+  const definitions=await Promise.all(signatures.map(async s=>(await owner.query('SELECT pg_get_functiondef($1::regprocedure) d',[s])).rows[0].d as string));
+  // Virtual database clock, not a replacement watchdog or sender. Every production
+  // routine and row/lease check still runs; 10 minutes need not cost 10 wall minutes.
+  await owner.query(`CREATE FUNCTION lifecycle_test_clock() RETURNS timestamptz LANGUAGE sql STABLE AS
+   $$ SELECT current_setting('test.lifecycle_at')::timestamptz $$`);
+  const start=Date.now();
+  let seconds=0;
+  async function clock(seconds:number){
+   for(const db of [owner,runtime])await db.query("SELECT set_config('test.lifecycle_at',$1,false)",[new Date(start+seconds*1000).toISOString()]);
+  }
+  async function tick(){
+   await owner.query("SELECT signal_rc_maintain('{\"version\":1,\"action\":\"tick\"}')");
+   return (await owner.query('SELECT state FROM rc_sourcing_runs WHERE id=$1',[runId])).rows[0].state;
+  }
+  async function heartbeat(){
+   await runtime.query(`SELECT signal_rc_maintain($1::jsonb)`,[JSON.stringify({version:1,action:'heartbeat',
+    tenantId:'org_32',flowRunId:o.sourcingRequestId,...fence})]);
+  }
+  await owner.query(`GRANT EXECUTE ON FUNCTION signal_rc_maintain(jsonb),signal_rc_read(text,uuid),lifecycle_test_clock() TO ${runtimeRole}`);
+  try{
+   for(const d of definitions)await owner.query(d.replaceAll('clock_timestamp()','public.lifecycle_test_clock()'));
+   await clock(0);
+   const sealed=await seal(o,packets);
+   expect(Date.parse(sealed.deadlineAt)-start).toBe(900000);
+   seconds=1;await clock(seconds);
+   let batches=0;
+   const members=await awaitMemoryAcquisition(o,{
+    read:async()=>call(runtime,o,{action:'read'}),
+    drain:async()=>{
+     if(batches===10){
+      // Mutation witness: the old watchdog stalls the same progressing run.
+      await owner.query('BEGIN');
+      try{
+       await owner.query(definitions[1].replaceAll('clock_timestamp()','public.lifecycle_test_clock()')
+        .replace('public.signal_memory_rc_progress(rc_sourcing_runs)','last_progress_at'));
+       expect(await tick()).toBe('stalled');
+      }finally{await owner.query('ROLLBACK');}
+     }
+     const claimed=await call(runtime,o,{action:'claim',limit:10});
+     expect(claimed).toHaveLength(10);
+     for(const row of claimed)await call(runtime,o,{action:'ack',id:row.id,leaseToken:row.leaseToken,result:result(row.packet)});
+     // Duplicate acknowledgement is not new progress.
+     expect(await call(runtime,o,{action:'ack',id:claimed[0].id,leaseToken:claimed[0].leaseToken,result:result(claimed[0].packet)})).toBe(false);
+     const progress=(await runtime.query('SELECT signal_rc_read($1,$2) result',['org_32',o.sourcingRequestId])).rows[0].result;
+     expect(progress.progress.state).not.toBe('stalled');
+     batches++;
+    },
+   },Date.parse(sealed.deadlineAt),{
+    now:()=>start+seconds*1000,
+    sleep:async()=>{seconds+=20;await clock(seconds);},
+    assertExecution:async()=>{await heartbeat();expect(await tick()).toBe('admitted');},
+   });
+   expect(batches).toBe(30);expect(members).toHaveLength(300);expect(seconds).toBe(601);
+   expect((await new ImmutableMemoryRepository().read(o)).members.every(m=>m.state==='succeeded')).toBe(true);
+   expect(await call(runtime,o,{action:'complete'})).toBe(true);
+   expect((await owner.query('SELECT paid_lookups FROM rc_sourcing_runs WHERE id=$1',[runId])).rows[0].paid_lookups).toBe(0);
+   expect((await owner.query('SELECT count(*)::int n FROM crustdata_acquisition_receipts WHERE "sourcingRequestId"=$1',[o.sourcingRequestId])).rows[0].n).toBe(1);
+   expect((await call(runtime,o,{action:'seal',...fence})).deadlineAt).toBe(sealed.deadlineAt);
+   // No acknowledgement from a foreign/stale execution, generation or phase can
+   // keep this run alive. Exercise the private helper without giving runtime access.
+   for(const patch of [
+    {tenant_id:'org_99'},{request_id:randomUUID()},{generation:2},
+    {execution_attempt_id:'old'},{processing_lease_id:'old'},{baseline:{}},
+    {state:'prepared'},{protocol_mode:1},
+   ]){
+    const row=(await owner.query(`SELECT public.signal_memory_rc_progress(
+     jsonb_populate_record(NULL::rc_sourcing_runs,to_jsonb(r)||$2::jsonb))=r.last_progress_at AS ignored
+     FROM rc_sourcing_runs r WHERE id=$1`,[runId,JSON.stringify(patch)])).rows[0];
+    expect(row.ignored).toBe(true);
+   }
+   await expect(runtime.query('SELECT public.signal_memory_rc_progress(NULL::rc_sourcing_runs)')).rejects.toThrow(/permission denied/);
+   await owner.query('BEGIN');
+   try{
+    await owner.query("UPDATE governed_sourcing_bindings SET cancellation='{}' WHERE request_id=$1",[o.sourcingRequestId]);
+    expect((await owner.query('SELECT signal_memory_rc_progress(r)=last_progress_at AS ignored FROM rc_sourcing_runs r WHERE id=$1',[runId])).rows[0].ignored).toBe(true);
+   }finally{await owner.query('ROLLBACK');}
+   // A live but idle worker cannot keep a run alive after real progress stops.
+   await clock(710);await heartbeat();expect(await tick()).toBe('stalled');
+   // Heartbeat expiry wins even when progress is recent.
+   await owner.query(`UPDATE rc_sourcing_runs SET state='admitted',stalled_at=NULL,
+    last_progress_at=public.lifecycle_test_clock(),heartbeat_at=public.lifecycle_test_clock()-interval '91 seconds' WHERE id=$1`,[runId]);
+   expect(await tick()).toBe('stalled');
+  }finally{
+   for(const d of definitions)await owner.query(d);
+   await owner.query("UPDATE public_memory_ingest_requests SET state='blocked',failure_code='unexpected' WHERE acquisition_id=$1 AND state IN ('pending','leased','retry_wait')",[o.acquisitionReceiptId]);
+   await owner.query('DROP FUNCTION lifecycle_test_clock()');
+  }
+ },30000);
  it('seals 299 packets plus one recorded exclusion, survives restart, and never sends the excluded member',async()=>{
   const {o,packets}=await fixture(300);
   const repository=new ImmutableMemoryRepository();

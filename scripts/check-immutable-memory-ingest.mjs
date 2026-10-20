@@ -1,7 +1,7 @@
 export const MEMORY_TABLES=['public_memory_ingest_requests'];
 export const MEMORY_FUNCTIONS=['signal_memory_ingest(jsonb,jsonb)','signal_memory_ingest_lag_ids(text[],timestamp with time zone,integer)','signal_memory_ingest_work(text,text,integer)'];
-export const MEMORY_PRIVATE_FUNCTIONS=['signal_memory_packet_guard()','signal_memory_acquisition_guard()','signal_memory_legacy_guard()'];
-export const MEMORY_CATALOG_SHA256='4f06cce683189d72c82e4581dbc405f885ef9379ac5a473da946b6a6e874381d';
+export const MEMORY_PRIVATE_FUNCTIONS=['signal_memory_packet_guard()','signal_memory_acquisition_guard()','signal_memory_legacy_guard()','signal_memory_rc_progress(public.rc_sourcing_runs)'];
+export const MEMORY_CATALOG_SHA256='0085b49f1217e3e0fa2da63d04b86767252c367bc59b610a46edbc5fae22176d';
 export const MEMORY_CATALOG_SQL=`WITH relations AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname IN ('public_memory_ingest_requests','crustdata_acquisition_receipts') AND c.relkind IN ('r','p')
 ), owned_constraints AS (
