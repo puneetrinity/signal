@@ -137,6 +137,10 @@
     {
       "name": "20261019000000_immutable_memory_ingestion",
       "sha256": "3aa720e0c439afbb4f7a17fbc17d0949491dbfa84a2f435f0261f85bb343bf50"
+    },
+    {
+      "name": "20261020000000_memory_candidate_exclusions",
+      "sha256": "9bfada5341aa47433f4ef581f6661f1b8b8708ec79eee638e64e0e05ff9b6831"
     }
   ]
 }

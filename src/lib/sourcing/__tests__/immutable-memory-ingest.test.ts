@@ -8,6 +8,7 @@ import { MEMORY_PACKET_LIMITS, memoryPacketManifest, prepareMemoryPacket, readMe
   type FrozenMemoryPacket, type MemoryAcquisitionOwner, type MemoryDeliveryMember } from '../immutable-memory-ingest';
 import type { CandidateIngestResult } from '../activegraph-client';
 import type { CandidateForRanking } from '../ranking-new';
+import { partitionMemoryCandidates } from '../memory-candidate-validation';
 
 describe('orchestrator RC kill switch regression', () => {
   // Execute the actual two production blocks, not a copied flag predicate.
@@ -88,6 +89,72 @@ function person(index = 1): CandidateForRanking & { linkedinUrl: string; name: s
     },
   } as unknown as CandidateForRanking & { linkedinUrl: string; name: string };
 }
+
+describe('candidate-local Memory preparation isolation', () => {
+  const context = () => ({ owner, options: { acquiredAt: at, profileObservedAt: at,
+    acquisitionReceiptId: owner.acquisitionReceiptId, acquisitionGeneration: 1,
+    acquisitionSlot: 'exact' as const } });
+
+  it('keeps 299 valid profiles when one of 300 has an unsupported LinkedIn handle; retries are identical', () => {
+    const candidates = Array.from({length: 300}, (_, i) => person(i + 1));
+    candidates[33].linkedinUrl = 'https://linkedin.com/in/synthetic+invalid';
+    const original = JSON.stringify(candidates);
+    const first = partitionMemoryCandidates(candidates, context);
+    const retry = partitionMemoryCandidates(candidates, context);
+    expect(first.accepted).toHaveLength(299);
+    expect(first.excluded).toEqual([{index: 33, providerRecordId: '100034', candidateFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+      reason: 'linkedin_invalid'}]);
+    expect(first.accepted).not.toContain(candidates[33]);
+    expect(retry).toEqual(first);
+    expect(JSON.stringify(candidates)).toBe(original);
+    expect(JSON.stringify(first.excluded)).not.toContain('synthetic');
+    // The accepted-only manifest is valid; excluded records are not fake Memory successes.
+    const manifest = memoryPacketManifest(owner, first.accepted.map(c =>
+      prepareMemoryPacket(owner, c, context().options)));
+    expect(manifest.memberCount).toBe(299);
+  });
+
+  it('isolates oversized candidate fields without hiding the other candidates', () => {
+    const bad = person(2);
+    bad.crustdata!.basic_profile!.name = 'x'.repeat(1000);
+    const result = partitionMemoryCandidates([person(1), bad, person(3)], context);
+    expect(result.accepted).toHaveLength(2);
+    expect(result.excluded[0].reason).toBe('profile_field_too_large');
+  });
+
+  it('handles all rejected candidates and an empty input without a replacement purchase', () => {
+    const bad = person(1); bad.linkedinUrl = 'https://example.com/not-linkedin';
+    expect(partitionMemoryCandidates([bad], context).accepted).toEqual([]);
+    expect(memoryPacketManifest(owner, []).memberCount).toBe(0);
+    expect(partitionMemoryCandidates([], context)).toEqual({accepted: [], excluded: []});
+  });
+
+  it('does not suppress ownership or acquisition configuration failures', () => {
+    expect(() => partitionMemoryCandidates([person()], () => ({
+      ...context(), owner: {...owner, tenantId: 'foreign'},
+    }))).toThrow('memory_packet_integrity');
+    expect(() => partitionMemoryCandidates([person()], () => ({
+      ...context(), options: {...context().options, acquiredAt: new Date('invalid')},
+    }))).toThrow('sourced_candidate_acquired_at_invalid');
+  });
+
+  it.each(['candidate_privacy_unavailable', 'candidate_privacy_conflict', 'database_unavailable', 'unknown'])(
+    'never catches run-level context failure %s', message => {
+      const failure = new Error(message);
+      expect(() => partitionMemoryCandidates([person()], () => { throw failure; })).toThrow(failure);
+    });
+
+  it('the real orchestrator filters before identity lookup, packet preparation, ranking and RC', () => {
+    const source = readFileSync(new URL('../orchestrator.ts', import.meta.url), 'utf8');
+    const start = source.indexOf('const validation = partitionMemoryCandidates');
+    expect(start).toBeGreaterThan(0);
+    const rest = source.slice(start);
+    expect(rest.indexOf('mappedForRanking = validation.accepted')).toBeLessThan(rest.indexOf('resolvePublicIdentities('));
+    expect(rest.indexOf('mappedForRanking = validation.accepted')).toBeLessThan(rest.indexOf('prepareMemoryPacket('));
+    expect(rest).toContain('const combinedRaw = [...poolForRanking, ...mappedForRanking]');
+    expect(rest).toContain('const exactProfiles = mappedForRanking.filter(');
+  });
+});
 function packet(index = 1, expectedGlobalCandidateId?: string): FrozenMemoryPacket {
   return prepareMemoryPacket(owner, person(index), { ...owner, acquiredAt: at,
     profileObservedAt: at, expectedGlobalCandidateId, publicCandidateRoleFamily: 'backend' });

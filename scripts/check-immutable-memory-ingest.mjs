@@ -1,7 +1,7 @@
 export const MEMORY_TABLES=['public_memory_ingest_requests'];
 export const MEMORY_FUNCTIONS=['signal_memory_ingest(jsonb,jsonb)','signal_memory_ingest_lag_ids(text[],timestamp with time zone,integer)','signal_memory_ingest_work(text,text,integer)'];
 export const MEMORY_PRIVATE_FUNCTIONS=['signal_memory_packet_guard()','signal_memory_acquisition_guard()','signal_memory_legacy_guard()'];
-export const MEMORY_CATALOG_SHA256='a40ab0ff62efd89d5c1e31e3f2606dc678065ec93f0f1d72cd0b169737ca330f';
+export const MEMORY_CATALOG_SHA256='4f06cce683189d72c82e4581dbc405f885ef9379ac5a473da946b6a6e874381d';
 export const MEMORY_CATALOG_SQL=`WITH relations AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname IN ('public_memory_ingest_requests','crustdata_acquisition_receipts') AND c.relkind IN ('r','p')
 ), owned_constraints AS (
@@ -9,7 +9,7 @@ export const MEMORY_CATALOG_SQL=`WITH relations AS (
  -- Older receipts-table objects (e.g. production's generation/slot CHECKs that the fresh baseline
  -- lacks) are outside this fingerprint; schema-control drift checks cover them.
  SELECT c.* FROM pg_constraint c JOIN relations r ON r.oid=c.conrelid WHERE r.relname='public_memory_ingest_requests'
-  OR c.conname IN ('memory_preparation_shape','memory_acquisition_owner_key','crustdata_acquisition_receipts_memory_delivery_contract_check')
+  OR c.conname IN ('memory_exclusions_shape','memory_preparation_shape','memory_acquisition_owner_key','crustdata_acquisition_receipts_memory_delivery_contract_check')
 ), functions AS (
  SELECT p.* FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname LIKE 'signal_memory_%'
 ), facts AS (SELECT jsonb_build_object(

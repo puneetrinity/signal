@@ -288,6 +288,9 @@ try {
   const searchMigration = '20261014000000_rc_search_correction';
   const privateMigration = '20261018000000_private_resume_sourcing';
   const immutableMigration = '20261019000000_immutable_memory_ingestion';
+  const exclusionsMigration = '20261020000000_memory_candidate_exclusions';
+  assert(historicalLock.migrations.at(-1).name === exclusionsMigration, 'Unexpected exclusions tail');
+  historicalLock.migrations.pop();
   assert(historicalLock.migrations.at(-1).name === immutableMigration, 'Unexpected immutable Memory tail');
   historicalLock.migrations.pop();
   const privateLock = structuredClone(historicalLock);
@@ -328,6 +331,8 @@ try {
   const [packetRows] = await admin.$queryRawUnsafe('SELECT count(*)::integer count FROM public.public_memory_ingest_requests');
   assert(packetRows.count===0,'Historical rehearsal requires empty immutable packet table');
   await admin.$executeRawUnsafe('DROP TRIGGER memory_acquisition_guard ON public.crustdata_acquisition_receipts');
+  await admin.$executeRawUnsafe('ALTER TABLE public.crustdata_acquisition_receipts DROP COLUMN memory_exclusions');
+  await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1',exclusionsMigration);
   await admin.$executeRawUnsafe('DROP TRIGGER memory_legacy_guard ON public.public_memory_ingest_outbox');
   await admin.$executeRawUnsafe('DROP TABLE public.public_memory_ingest_requests');
   for(const signature of ['signal_memory_ingest(jsonb,jsonb)','signal_memory_packet_guard()','signal_memory_acquisition_guard()','signal_memory_legacy_guard()','signal_memory_ingest_lag_ids(text[],timestamp with time zone,integer)','signal_memory_ingest_work(text,text,integer)'])
@@ -478,7 +483,7 @@ try {
     SIGNAL_SCHEMA_CONTROL_TEST_ROOT:historicalRoot,SIGNAL_SCHEMA_DISPOSABLE_SINGLE_CREDENTIAL:'1'}),
     '32-to-33 private resume sourcing release');
   await requireSuccess(await runNode('scripts/schema-control/migrate-release.mjs', releaseEnvironment),
-    '33-to-34 immutable Memory ingestion release');
+    '33-to-35 immutable Memory ingestion and exclusions release');
   await requireSuccess(
     await runNode('scripts/schema-control/provision-runtime-role.mjs', {
       ...commonIdentity, DIRECT_URL: adminUrl,

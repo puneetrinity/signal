@@ -5,6 +5,7 @@ import { memoryPreparationStage as stage } from './memory-preparation-diagnostic
 import { createCandidateAdmissionProofs } from '@/lib/candidate-privacy/decision';
 import { requireHealthyCandidatePrivacyContext, assertAdmissionProofCurrent, CANDIDATE_PRIVACY_ADMISSION_LOCK } from '@/lib/candidate-privacy/repository';
 import type { CandidateIngestResult } from './activegraph-client';
+import type { CandidateExclusion } from './memory-candidate-validation';
 import {
   adaptCrustdataCandidateForMemory,
   computeSourcedCandidateIdempotencyKey,
@@ -241,7 +242,8 @@ async function command(db: SqlClient, owner: MemoryAcquisitionOwner, value: Reco
 export class ImmutableMemoryRepository implements MemoryDeliveryReader {
   private async db() { return (await import('@/lib/prisma')).prisma; }
 
-  async prepare(owner: MemoryAcquisitionOwner, packets: readonly FrozenMemoryPacket[], fence: Fence): Promise<Snapshot> {
+  async prepare(owner: MemoryAcquisitionOwner, packets: readonly FrozenMemoryPacket[], fence: Fence,
+    exclusions: readonly CandidateExclusion[] = []): Promise<Snapshot> {
     const db = await this.db();
     const unique = await stage('manifest', () => memoryPacketManifest(owner, packets).packets);
     const context = await stage('privacy_context', () => requireHealthyCandidatePrivacyContext());
@@ -261,7 +263,7 @@ export class ImmutableMemoryRepository implements MemoryDeliveryReader {
         await stage('append', () => command(tx, owner, { action: 'append', ...fence,
           packets: unique.slice(i, i + 25).map(p => ({ ...p, initialSuppressed: !proofs.has(p.idempotencyKey) })) }));
       }
-      await stage('seal', () => command(tx, owner, { action: 'seal', ...fence }));
+      await stage('seal', () => command(tx, owner, { action: 'seal', ...fence, exclusions }));
     }, { maxWait: 2000, timeout: 5000 }));
     return stage('readback', () => this.read(owner));
   }
