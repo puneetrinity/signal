@@ -101,6 +101,24 @@ async function main() {
     forged.push(foreign.CandidatePrivacyAdmissionProof.issue({ requestRef: randomUUID(), generation: BigInt(57), cursor: BigInt(39), decision: 'allow' }));
     for (const value of forged) await assert.rejects(assertAdmissionProofCurrent(prisma, value), /candidate_privacy_conflict/);
     console.log('PASS genuine proof / forged, copied, foreign proof rejection');
+    const mixed = await fixture();
+    const { partitionMemoryCandidates }: typeof import('../src/lib/sourcing/memory-candidate-validation') =
+      require('../src/lib/sourcing/memory-candidate-validation');
+    const synthetic = mixed.packets.map((p, i) => ({
+      id: i === 299 ? 'https://linkedin.com/in/synthetic+invalid' : p.signalCandidateId,
+      crustdata: { crustdata_person_id: i + 1, basic_profile: {name: 'Synthetic'} },
+    } as CandidateForRanking));
+    const mixedAt = new Date();
+    const options = {...mixed.acquisition, acquiredAt: mixedAt, profileObservedAt: mixedAt, expectedGlobalCandidateId: null};
+    const partition = partitionMemoryCandidates(synthetic, () => ({owner: mixed.acquisition, options}));
+    assert.equal(partition.excluded.length, 1);
+    const mixedResult = await repository.prepare(mixed.acquisition,
+      partition.accepted.map(c => prepareMemoryPacket(mixed.acquisition, c, options)), mixed.fence, partition.excluded);
+    assert.equal(mixedResult.members.length, 299);
+    assert.equal(mixedResult.sealed, true);
+    assert.equal((await owner.query('SELECT jsonb_array_length(memory_exclusions) n FROM crustdata_acquisition_receipts WHERE id=$1',
+      [mixed.acquisition.acquisitionReceiptId])).rows[0].n, 1);
+    console.log('PASS real Node20 loader / 299 accepted + 1 durable exclusion / no provider calls');
     const second = await fixture(); snapshots = 0; changeState = true;
     let failure: unknown;
     try { await repository.prepare(second.acquisition, second.packets, second.fence); } catch (error) { failure = error; }

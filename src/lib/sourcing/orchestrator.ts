@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/prisma';
 import { memoryPreparationStage, memoryPreparationFailure } from './memory-preparation-diagnostics';
 import { ImmutableMemoryRepository, prepareMemoryPacket, awaitMemoryAcquisition } from './immutable-memory-ingest';
+import { partitionMemoryCandidates, type CandidateExclusion } from './memory-candidate-validation';
 import { timedSourcingFunction } from './stage-timings';
 import { extractLinkedInIdFromUrl } from './discovery';
 import { Prisma } from '@prisma/client';
@@ -2654,7 +2655,9 @@ async function runSourcingOrchestratorMeasured(
             // Actual Crustdata /person/search uses NESTED schema (basic_profile, social_handles,
             // experience.employment_details). Flat schema fields are checked first as a fallback
             // so this code works even if the endpoint changes.
-            const mappedForRanking = crustProfiles.map((p: any) => {
+            const exclusionsByReceipt = new Map<string, CandidateExclusion[]>();
+            const excludedPurchaseIdentities = new Set<string>();
+            let mappedForRanking = crustProfiles.map((p: any) => {
               // ── URL ──────────────────────────────────────────────────────────
               // Prefer the clean slug; flat schema has flagship_profile_url, nested uses social_handles.
               const url = p.flagship_profile_url
@@ -2804,7 +2807,6 @@ async function runSourcingOrchestratorMeasured(
                 locationHint: location,
                 crustdata: p,
               });
-
               return {
                 // ── CandidateForRanking fields ──────────────────────────
                 id: url,
@@ -2836,11 +2838,42 @@ async function runSourcingOrchestratorMeasured(
                 // receives the original job requirements.
                 acquisitionRung: acquisitionRungByProfile.get(p) ?? 'exact',
               };
-            }).filter(
-              (candidate: any) =>
-                extractLinkedInIdFromUrl(candidate.linkedinUrl) !== null,
-            );
-            if (mappedForRanking.length !== crustProfiles.length) {
+            });
+            if (governedCommand?.protocolVersion === 2) {
+              const validation = partitionMemoryCandidates(mappedForRanking, (candidate) => {
+                const acquisition = candidate.acquisitionRung === 'exact' ? exactAcquisition : spillAcquisition;
+                if (!acquisition) throw Error('MEMORY_EXECUTION_STALE');
+                const slot = candidate.acquisitionRung === 'exact' ? 'exact' as const : 'spill' as const;
+                return {
+                  owner: { tenantId, sourcingRequestId: requestId, acquisitionReceiptId: acquisition.receiptId,
+                    acquisitionGeneration, acquisitionSlot: slot },
+                  options: { publicMarket: candidate.publicMarket,
+                    publicCandidateRoleFamily: candidate.publicCandidateRoleFamily,
+                    profileObservedAt: acquisition.acquiredAt, acquiredAt: acquisition.acquiredAt,
+                    acquisitionGeneration, acquisitionReceiptId: acquisition.receiptId, acquisitionSlot: slot },
+                };
+              });
+              for (const exclusion of validation.excluded) {
+                const candidate = mappedForRanking[exclusion.index];
+                for (const key of candidatePublicIdentityKeys(candidate)) excludedPurchaseIdentities.add(key);
+                const acquisition = candidate.acquisitionRung === 'exact' ? exactAcquisition : spillAcquisition;
+                if (!acquisition) throw Error('MEMORY_EXECUTION_STALE');
+                const list = exclusionsByReceipt.get(acquisition.receiptId) ?? [];
+                list.push(exclusion);
+                exclusionsByReceipt.set(acquisition.receiptId, list);
+              }
+              mappedForRanking = validation.accepted;
+              if (validation.excluded.length) {
+                log.warn({ requestId, purchasedCount: crustProfiles.length,
+                  acceptedCount: validation.accepted.length, excludedCount: validation.excluded.length,
+                  exclusions: validation.excluded }, 'Purchased profiles excluded before Memory preparation');
+              }
+            } else {
+              mappedForRanking = mappedForRanking.filter(
+                (candidate: any) => extractLinkedInIdFromUrl(candidate.linkedinUrl) !== null,
+              );
+            }
+            if (governedCommand?.protocolVersion !== 2 && mappedForRanking.length !== crustProfiles.length) {
               throw new CrustdataAcquisitionSafetyError(
                 'memory_ingest_failed',
                 `Only ${mappedForRanking.length}/${crustProfiles.length} paid profiles had a durable public identity`,
@@ -2928,7 +2961,8 @@ async function runSourcingOrchestratorMeasured(
                       .map(item => prepareMemoryPacket(owner, item.candidate, {
                         ...item.options, acquisitionSlot: owner.acquisitionSlot, acquiredAt: acquisition.acquiredAt,
                       })));
-                    await repository.prepare(owner, packets, { executionAttemptId, processingLeaseId });
+                    await repository.prepare(owner, packets, { executionAttemptId, processingLeaseId },
+                      exclusionsByReceipt.get(acquisition.receiptId) ?? []);
                   }
                 }
                 queued = enqueueInput.candidates.length;
@@ -2965,6 +2999,8 @@ async function runSourcingOrchestratorMeasured(
             const combinedRaw = [...poolForRanking, ...mappedForRanking];
             const seenIdentity = new Set<string>();
             const combinedForRanking = combinedRaw.filter((c: any) => {
+              // A pool alias must not reintroduce a rejected purchased profile into RC/ranking.
+              if (candidatePublicIdentityKeys(c).some(key => excludedPurchaseIdentities.has(key))) return false;
               const key = candidatePublicIdentityKey(c);
               if (seenIdentity.has(key)) return false;
               seenIdentity.add(key);

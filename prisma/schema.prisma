@@ -724,6 +724,7 @@ model CrustdataAcquisitionReceipt {
   memoryManifestSha256 String? @map("memory_manifest_sha256")
   memoryMemberCount Int? @map("memory_member_count")
   memoryWaitUntil DateTime? @map("memory_wait_until") @db.Timestamptz
+  memoryExclusions Json @default("[]") @map("memory_exclusions")
   updatedAt             DateTime  @updatedAt
 
   sourcingRequest JobSourcingRequest @relation(fields: [sourcingRequestId, tenantId], references: [id, tenantId], onDelete: Cascade)

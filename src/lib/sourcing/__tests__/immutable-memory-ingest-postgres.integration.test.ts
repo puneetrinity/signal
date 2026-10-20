@@ -88,6 +88,44 @@ describe.skipIf(!enabled)('immutable purchased-profile queue: real migrations an
  },120000);
  afterAll(async()=>{vi.unstubAllGlobals();await bridge.db?.$disconnect();await runtime?.end();await owner?.end();if(created)await admin.query(`DROP DATABASE ${database} WITH (FORCE)`);
   if(admin){await admin.query(`DROP ROLE IF EXISTS ${runtimeRole}`);await admin.query(`DROP ROLE IF EXISTS ${ownerRole}`);await admin.end();}},30000);
+ const exclusion=(providerRecordId:string)=>({index:Number(providerRecordId)-1,providerRecordId,
+  candidateFingerprint:'e'.repeat(64),reason:'linkedin_invalid'});
+ it('seals 299 packets plus one recorded exclusion, survives restart, and never sends the excluded member',async()=>{
+  const {o,packets}=await fixture(300);
+  const repository=new ImmutableMemoryRepository();
+  const snapshot=await repository.prepare(o,packets.slice(0,299),fence,[exclusion('300')]);
+  expect(snapshot.members).toHaveLength(299);
+  expect(snapshot.sealed).toBe(true);
+  const saved=(await owner.query('SELECT memory_exclusions FROM crustdata_acquisition_receipts WHERE id=$1',[o.acquisitionReceiptId])).rows[0];
+  expect(saved.memory_exclusions).toEqual([exclusion('300')]);
+  const restart=await new ImmutableMemoryRepository().read(o);
+  expect(restart.members.some(m=>m.packet.providerRecordId==='300')).toBe(false);
+  expect(await call(runtime,o,{action:'seal',...fence,exclusions:[exclusion('300')]})).toMatchObject({sealed:true});
+  await expect(call(runtime,o,{action:'seal',...fence,exclusions:[]})).rejects.toThrow('MEMORY_EXCLUSIONS_CONFLICT');
+  await expect(owner.query("UPDATE crustdata_acquisition_receipts SET memory_exclusions='[]' WHERE id=$1",[o.acquisitionReceiptId]))
+   .rejects.toThrow('MEMORY_EXCLUSIONS_IMMUTABLE');
+  // Do not leave this synthetic purchase in the global work selector used by later tests.
+  await owner.query("UPDATE public_memory_ingest_requests SET state='blocked',failure_code='unexpected' WHERE acquisition_id=$1 AND state='pending'",[o.acquisitionReceiptId]);
+ },30000);
+ it('refuses missing, foreign, duplicate and overlapping exclusion records',async()=>{
+  const {o,packets}=await fixture(2);
+  await call(runtime,o,{action:'append',...fence,packets:[packets[0]]});
+  await expect(call(runtime,o,{action:'seal',...fence})).rejects.toThrow('MEMORY_MEMBERS_INCOMPLETE');
+  for(const exclusions of [[exclusion('3')],[exclusion('2'),exclusion('2')],[exclusion('1')],
+   [{...exclusion('2'),reason:'privacy_unavailable'}]]) {
+   await expect(call(runtime,o,{action:'seal',...fence,exclusions})).rejects.toThrow('MEMORY_EXCLUSIONS_INVALID');
+  }
+  const saved=(await owner.query('SELECT memory_exclusions,memory_prepared_at FROM crustdata_acquisition_receipts WHERE id=$1',[o.acquisitionReceiptId])).rows[0];
+  expect(saved).toEqual({memory_exclusions:[],memory_prepared_at:null});
+  await owner.query("UPDATE public_memory_ingest_requests SET state='blocked',failure_code='unexpected' WHERE acquisition_id=$1 AND state='pending'",[o.acquisitionReceiptId]);
+ });
+ it('accounts for an all-excluded purchase without fabricating a Memory success',async()=>{
+  const {o}=await fixture(2);
+  const snapshot=await new ImmutableMemoryRepository().prepare(o,[],fence,[exclusion('1'),exclusion('2')]);
+  expect(snapshot.sealed).toBe(true);expect(snapshot.members).toEqual([]);
+  expect(await call(runtime,o,{action:'complete'})).toBe(true);
+  expect((await owner.query('SELECT memory_exclusions FROM crustdata_acquisition_receipts WHERE id=$1',[o.acquisitionReceiptId])).rows[0].memory_exclusions).toHaveLength(2);
+ });
  it('fingerprints only migration-34-owned objects: older receipts-table drift is tolerated, owned changes are not',async()=>{
   const {MEMORY_CATALOG_SQL,MEMORY_CATALOG_SHA256}=await import('../../../../scripts/check-immutable-memory-ingest.mjs');
   const digest=async()=>(await owner.query(MEMORY_CATALOG_SQL)).rows[0].digest;
