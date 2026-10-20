@@ -1,5 +1,6 @@
 import { createLogger } from '@/lib/logger';
 import { runImmutableMemoryCycle } from './immutable-memory-ingest';
+import { memoryDeliveryFailure } from './memory-delivery-diagnostics';
 import {
   generateTagsFromCandidate,
   ingestCandidateWithResult,
@@ -239,9 +240,9 @@ export function startPublicMemoryIngestWorker({
       if (summary.claimed > 0) {
         log.info(summary, 'Public Memory outbox cycle completed');
       }
-    } catch {
+    } catch (error) {
       log.error(
-        { errorCode: 'outbox_cycle_failed' },
+        { errorCode: 'outbox_cycle_failed', reason: memoryDeliveryFailure(error) },
         'Public Memory outbox cycle failed',
       );
     } finally {

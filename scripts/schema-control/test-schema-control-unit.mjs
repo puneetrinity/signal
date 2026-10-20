@@ -13,12 +13,13 @@ function assert(condition, message) {
 }
 
 const migrations = await loadMigrationLock();
-assert(migrations.length === 35, `Expected 35 locked migrations, found ${migrations.length}`);
+assert(migrations.length === 36, `Expected 36 locked migrations, found ${migrations.length}`);
 const expectedTail = ['20261008000000_rubric_evidence_isolation','20261009000000_rc_skills',
   '20261009010000_approved_skill_alternatives','20261011000000_rc_clock_tolerance',
   '20261012000000_ranking_lock_work','20261013000000_rc_prepare_transport',
   '20261014000000_rc_search_correction','20261018000000_private_resume_sourcing',
-  '20261019000000_immutable_memory_ingestion','20261020000000_memory_candidate_exclusions'];
+  '20261019000000_immutable_memory_ingestion','20261020000000_memory_candidate_exclusions',
+  '20261020010000_memory_wait_progress'];
 assert(JSON.stringify(migrations.slice(-expectedTail.length).map(m=>m.name))===JSON.stringify(expectedTail),
   'Expected preserved migration order and immutable Memory tail');
 const validRows = migrations.map((entry, index) => ({

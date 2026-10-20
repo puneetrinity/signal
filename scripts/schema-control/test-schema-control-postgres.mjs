@@ -289,6 +289,9 @@ try {
   const privateMigration = '20261018000000_private_resume_sourcing';
   const immutableMigration = '20261019000000_immutable_memory_ingestion';
   const exclusionsMigration = '20261020000000_memory_candidate_exclusions';
+  const progressMigration = '20261020010000_memory_wait_progress';
+  assert(historicalLock.migrations.at(-1).name === progressMigration, 'Unexpected Memory progress tail');
+  historicalLock.migrations.pop();
   assert(historicalLock.migrations.at(-1).name === exclusionsMigration, 'Unexpected exclusions tail');
   historicalLock.migrations.pop();
   assert(historicalLock.migrations.at(-1).name === immutableMigration, 'Unexpected immutable Memory tail');
@@ -332,6 +335,8 @@ try {
   assert(packetRows.count===0,'Historical rehearsal requires empty immutable packet table');
   await admin.$executeRawUnsafe('DROP TRIGGER memory_acquisition_guard ON public.crustdata_acquisition_receipts');
   await admin.$executeRawUnsafe('ALTER TABLE public.crustdata_acquisition_receipts DROP COLUMN memory_exclusions');
+  await admin.$executeRawUnsafe('DROP FUNCTION public.signal_memory_rc_progress(public.rc_sourcing_runs)');
+  await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1',progressMigration);
   await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1',exclusionsMigration);
   await admin.$executeRawUnsafe('DROP TRIGGER memory_legacy_guard ON public.public_memory_ingest_outbox');
   await admin.$executeRawUnsafe('DROP TABLE public.public_memory_ingest_requests');
@@ -483,7 +488,7 @@ try {
     SIGNAL_SCHEMA_CONTROL_TEST_ROOT:historicalRoot,SIGNAL_SCHEMA_DISPOSABLE_SINGLE_CREDENTIAL:'1'}),
     '32-to-33 private resume sourcing release');
   await requireSuccess(await runNode('scripts/schema-control/migrate-release.mjs', releaseEnvironment),
-    '33-to-35 immutable Memory ingestion and exclusions release');
+    '33-to-36 immutable Memory ingestion, exclusions and progress release');
   await requireSuccess(
     await runNode('scripts/schema-control/provision-runtime-role.mjs', {
       ...commonIdentity, DIRECT_URL: adminUrl,

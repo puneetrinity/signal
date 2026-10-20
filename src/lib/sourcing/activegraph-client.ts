@@ -21,6 +21,7 @@ import { requireHealthyCandidatePrivacyContext, CandidatePrivacyRestrictedError 
 import { fetchMemorySearch, SearchRetrievalError } from './search-retrieval';
 import { createHash } from 'node:crypto';
 import { readMemoryPacket, type FrozenMemoryPacket } from './immutable-memory-ingest';
+import { memoryDeliveryFailure } from './memory-delivery-diagnostics';
 
 export interface StrictMemorySearchOptions { timeoutMs: number }
 
@@ -100,7 +101,7 @@ function fetchWithTimeout(
 ): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(
-    () => controller.abort(),
+    () => controller.abort(new DOMException('Request deadline exceeded', 'TimeoutError')),
     Math.max(1, timeoutMs),
   );
   return fetch(url, { ...init, signal: init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal }).finally(() => clearTimeout(timer));
@@ -1362,6 +1363,7 @@ async function sendPreparedCandidateToMemory(
     };
   }
   let response: Response;
+  const ingestStartedAt = performance.now();
   try {
     signal?.throwIfAborted();
     response = await fetchWithTimeout(
@@ -1378,9 +1380,10 @@ async function sendPreparedCandidateToMemory(
       },
       5_000,
     );
-  } catch {
+  } catch (error) {
     log.error(
-      { requestId, acquisitionSlot: options.acquisitionSlot },
+      { requestId, acquisitionSlot: options.acquisitionSlot,
+        reason: memoryDeliveryFailure(error), elapsedMs: Math.round(performance.now()-ingestStartedAt) },
       'ActiveGraph candidate ingest unreachable',
     );
     return {
@@ -1393,6 +1396,8 @@ async function sendPreparedCandidateToMemory(
       errorCode: 'transport',
     };
   }
+  log.info({ requestId, acquisitionSlot: options.acquisitionSlot, status: response.status,
+    elapsedMs: Math.round(performance.now()-ingestStartedAt) }, 'Memory ingest response headers');
 
   if (!response.ok) {
     log.error(
