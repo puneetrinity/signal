@@ -131,8 +131,9 @@ export async function createCandidateAdmissionProofs(
 export async function requireNewCandidateAllowed(
   anchor: CandidatePrivacyAdmissionAnchor,
   client?: CandidatePrivacyMemoryClient,
+  deadlineAt?: number,
 ): Promise<CandidatePrivacyAdmissionProof> {
-  const proof = (await createCandidateAdmissionProofs([anchor], client)).get(
+  const proof = (await createCandidateAdmissionProofs([anchor], client, deadlineAt)).get(
     anchor.key,
   );
   if (!proof) {

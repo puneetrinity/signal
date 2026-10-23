@@ -41,6 +41,32 @@ describe('immutable transport (real serializer/transport, fake network only)',()
   const attempt=sendFrozenMemoryPacket(packet(),Date.now()+50);await vi.advanceTimersByTimeAsync(101);await attempt;
   expect(fetch).not.toHaveBeenCalled();
  });
+ it('starts the storage budget only after privacy allows the send',async()=>{
+  // Privacy takes 4.5s; the old shared 5s timer would leave 0.5s for storage.
+  mocks.privacy.mockImplementation(()=>new Promise(resolve=>setTimeout(resolve,4500)));
+  let signal:AbortSignal|undefined;
+  vi.stubGlobal('fetch',vi.fn(async(_url,init:RequestInit)=>{signal=init.signal!;
+   await new Promise(resolve=>setTimeout(resolve,2000));return new Response('',{status:409});}));
+  const attempt=sendFrozenMemoryPacket(packet(),Date.now()+30_000);
+  await vi.advanceTimersByTimeAsync(4500+2000+1);
+  expect((await attempt).errorCode).toBe('http_409');
+  expect(signal?.aborted).toBe(false);
+ });
+ it('gives privacy its own bounded budget inside the overall deadline',async()=>{
+  const fetch=vi.fn();vi.stubGlobal('fetch',fetch);
+  const now=Date.now();
+  expect((await sendFrozenMemoryPacket(packet(),now+30_000)).success).toBe(false);
+  expect(mocks.privacy.mock.calls[0][2]).toBe(now+5000);
+  mocks.privacy.mockClear();
+  await sendFrozenMemoryPacket(packet(),now+1200);
+  expect(mocks.privacy.mock.calls[0][2]).toBe(now+1200);
+ });
+ it('refuses disclosure when the privacy check times out',async()=>{
+  const fetch=vi.fn();vi.stubGlobal('fetch',fetch);
+  mocks.privacy.mockRejectedValue(new Error('candidate_privacy_unavailable'));
+  expect((await sendFrozenMemoryPacket(packet(),Date.now()+30_000)).errorCode).toBe('privacy_unavailable');
+  expect(fetch).not.toHaveBeenCalled();expect(mocks.sign).not.toHaveBeenCalled();
+ });
  it('keeps the abort timer through slow response-body consumption',async()=>{
   vi.stubGlobal('fetch',vi.fn(async(_url,init:RequestInit)=>new Response(new ReadableStream({
    start(controller){init.signal!.addEventListener('abort',()=>controller.error(new Error('aborted')),{once:true});}

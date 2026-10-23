@@ -156,7 +156,10 @@ export type MemoryDeliveryMember = Readonly<{
 /** SQL must return members for this exact sealed purchase, never a person-wide
  * queue receipt. A caller cannot infer completion from a parent timestamp. */
 export interface MemoryDeliveryReader {
-  read(owner: MemoryAcquisitionOwner): Promise<{
+  /** By default a read first reconciles privacy for every unsuppressed member,
+   * including already-acknowledged ones. Polling reads pass `privacy: 'skip'`:
+   * each send keeps its own fresh check, and the handoff read reconciles. */
+  read(owner: MemoryAcquisitionOwner, options?: { privacy?: 'reconcile' | 'skip' }): Promise<{
     sealed: boolean;
     manifestSha256: string | null;
     members: readonly MemoryDeliveryMember[];
@@ -192,11 +195,9 @@ export async function awaitMemoryAcquisition(
   if (!Number.isFinite(deadlineAt)) invalid();
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
-  while (now() < deadlineAt) {
-    await options.assertExecution();
-    if (now() >= deadlineAt) break;
-    const snapshot = await reader.read(owner);
-    if (now() >= deadlineAt) break;
+  const settled = (members: readonly MemoryDeliveryMember[]) =>
+    members.every(member => member.state === 'succeeded' || member.state === 'suppressed');
+  const validate = (snapshot: Awaited<ReturnType<MemoryDeliveryReader['read']>>, blockedIsFatal: boolean) => {
     if (!snapshot.sealed) throw new Error('memory_preparation_required');
     for (const member of snapshot.members) {
       if (member.state !== 'suppressed') readMemoryPacket(member.packet, owner);
@@ -206,17 +207,37 @@ export async function awaitMemoryAcquisition(
     }
     if (memoryManifestHash(snapshot.members.map(member=>member.packet)) !== snapshot.manifestSha256 ||
         new Set(snapshot.members.map(member=>member.packet.providerRecordId)).size !== snapshot.members.length) invalid();
-    if (snapshot.members.some(member => member.state === 'blocked')) {
+    if (blockedIsFatal && snapshot.members.some(member => member.state === 'blocked')) {
       throw new Error('memory_ingest_needs_review');
     }
     for (const member of snapshot.members) {
       if (member.state === 'succeeded' && !confirmedMemoryPacketResult(member.packet, member.result)) invalid();
     }
-    if (snapshot.members.every(member => member.state === 'succeeded' || member.state === 'suppressed')) {
-      // Fresh execution check also fences the readback-to-RC handoff.
-      await options.assertExecution();
+  };
+  while (now() < deadlineAt) {
+    await options.assertExecution();
+    if (now() >= deadlineAt) break;
+    // Polling does not re-prove the whole purchase: every send re-checks its
+    // own candidate immediately before disclosure.
+    const snapshot = await reader.read(owner, { privacy: 'skip' });
+    if (now() >= deadlineAt) break;
+    // A blocked member is not fatal until privacy has been reconciled: a
+    // withdrawn candidate is suppressed, not left to fail the whole search.
+    validate(snapshot, false);
+    if (settled(snapshot.members) || snapshot.members.some(member => member.state === 'blocked')) {
+      // Full privacy reconciliation before handoff (including members already
+      // acknowledged that may since have been withdrawn) or before failing on
+      // a blocked member.
+      const reconciled = await reader.read(owner, { privacy: 'reconcile' });
       if (now() >= deadlineAt) break;
-      return snapshot.members;
+      validate(reconciled, true);
+      if (settled(reconciled.members)) {
+        // Fresh execution check also fences the readback-to-RC handoff. It
+        // proves ownership only; privacy was reconciled just above.
+        await options.assertExecution();
+        if (now() >= deadlineAt) break;
+        return reconciled.members;
+      }
     }
     await reader.drain(owner, deadlineAt);
     if (now() >= deadlineAt) break;
@@ -278,8 +299,8 @@ export class ImmutableMemoryRepository implements MemoryDeliveryReader {
     for (const p of active) if (!proofs.has(p.id)) await command(db, owner, { action: 'suppress_member', id: p.id });
   }
 
-  async read(owner: MemoryAcquisitionOwner): Promise<Snapshot> {
-    await this.privacy(owner);
+  async read(owner: MemoryAcquisitionOwner, options: { privacy?: 'reconcile' | 'skip' } = {}): Promise<Snapshot> {
+    if (options.privacy !== 'skip') await this.privacy(owner);
     const result = await command(await this.db(), owner, { action: 'read' }) as Snapshot;
     if (!result || typeof result.sealed !== 'boolean' || !Array.isArray(result.members) || result.members.length > 300) invalid();
     return result;
@@ -287,8 +308,9 @@ export class ImmutableMemoryRepository implements MemoryDeliveryReader {
 
   async drain(owner: MemoryAcquisitionOwner, deadlineAt: number): Promise<void> {
     if (Date.now() >= deadlineAt) return;
-    await this.privacy(owner);
-    if (Date.now() >= deadlineAt) return;
+    // No whole-purchase privacy pass here: each claimed packet gets a fresh
+    // privacy check immediately before it is sent (sendFrozenMemoryPacket), and
+    // a withdrawn or review member is suppressed by that check.
     const db = await this.db();
     const rows = await command(db, owner, { action: 'claim', limit: 10 }) as ClaimedPacket[];
     if (!Array.isArray(rows) || rows.length > 10) invalid();
@@ -296,7 +318,7 @@ export class ImmutableMemoryRepository implements MemoryDeliveryReader {
     await Promise.all(rows.map(async row => {
       try {
         readMemoryPacket(row.packet, owner);
-        // Transport has its own last-moment privacy check and 5-second limit.
+        // Transport has its own last-moment privacy check; privacy and storage have separate limits.
         if (Date.now() >= deadlineAt) throw Error('memory_wait_expired');
         const result = await sendFrozenMemoryPacket(row.packet, deadlineAt);
         if (confirmedMemoryPacketResult(row.packet, result)) {
