@@ -1310,44 +1310,89 @@ export async function ingestCandidateWithResult(
   return sendPreparedCandidateToMemory(tenantId, candidate.id, payload, JSON.stringify(payload), requestId);
 }
 
+/** Separate budgets: the last-moment privacy check and the Memory storage
+ * request each get their own limit, both inside the caller's overall deadline.
+ * The storage timer starts only after privacy has allowed the send, so a slow
+ * privacy reply can no longer consume the storage budget. A privacy timeout
+ * refuses disclosure (retryable `privacy_unavailable`); it never skips the check. */
+export const FROZEN_PACKET_PRIVACY_BUDGET_MS = 5_000;
+export const FROZEN_PACKET_STORAGE_BUDGET_MS = 5_000;
+
 /** The immutable route validates stored bytes but never rebuilds the payload. */
 export async function sendFrozenMemoryPacket(packet: FrozenMemoryPacket, deadlineAt: number): Promise<CandidateIngestResult> {
   const payload = readMemoryPacket(packet, packet);
   if (!Number.isFinite(deadlineAt) || Date.now() >= deadlineAt) throw Error('memory_wait_expired');
-  const controller = new AbortController();
-  // This timer remains active through body consumption, not just HTTP headers.
-  const timer = setTimeout(() => controller.abort(), Math.min(5000, deadlineAt-Date.now()));
-  try {
-    return await sendPreparedCandidateToMemory(packet.tenantId, packet.signalCandidateId, payload, packet.requestBody, packet.sourcingRequestId, controller.signal);
-  } finally { clearTimeout(timer); }
+  return sendPreparedCandidateToMemory(packet.tenantId, packet.signalCandidateId, payload, packet.requestBody,
+    packet.sourcingRequestId, { deadlineAt });
 }
 
 async function sendPreparedCandidateToMemory(
   tenantId: string, signalCandidateId: string, payload: ApprovedProviderCandidateIngestRequest,
-  requestBody: string, requestId?: string, signal?: AbortSignal,
+  requestBody: string, requestId?: string, delivery?: { deadlineAt: number },
 ): Promise<CandidateIngestResult> {
   const candidate = { id: signalCandidateId };
   const options = { expectedGlobalCandidateId: payload.expected_global_candidate_id, acquisitionSlot: payload.acquisition_slot };
+  const unavailable = (errorCode: 'privacy_unavailable' | 'privacy_restricted'): CandidateIngestResult => ({
+    success: false,
+    signalCandidateId: candidate.id,
+    memoryCandidateId: null,
+    globalCandidateId: null,
+    sourceRecordId: null,
+    resolutionStatus: null,
+    errorCode,
+  });
   // Last-moment admission is deliberately after all local adaptation and
   // immediately before token creation/network disclosure.
+  const privacyStartedAt = performance.now();
   try {
     await requireNewCandidateAllowed({
       key: candidate.id,
       linkedinUrl: payload.linkedin_url,
       signalCandidateId: candidate.id,
       globalCandidateId: options.expectedGlobalCandidateId,
-    });
+    }, undefined, delivery ? Math.min(delivery.deadlineAt, Date.now() + FROZEN_PACKET_PRIVACY_BUDGET_MS) : undefined);
   } catch (error) {
-    return {
-      success: false,
-      signalCandidateId: candidate.id,
-      memoryCandidateId: null,
-      globalCandidateId: null,
-      sourceRecordId: null,
-      resolutionStatus: null,
-      errorCode: signal && !(error instanceof CandidatePrivacyRestrictedError) ? 'privacy_unavailable' : 'privacy_restricted',
-    };
+    const code = delivery && !(error instanceof CandidatePrivacyRestrictedError) ? 'privacy_unavailable' : 'privacy_restricted';
+    if (delivery) logFrozenAttempt(requestId, options.acquisitionSlot, privacyStartedAt, null, code);
+    return unavailable(code);
   }
+  if (!delivery) return deliverAdmittedCandidate(tenantId, candidate, payload, requestBody, requestId, options);
+  // The overall deadline still wins; an expired window never starts storage.
+  const remaining = delivery.deadlineAt - Date.now();
+  if (!Number.isFinite(remaining) || remaining <= 0) {
+    logFrozenAttempt(requestId, options.acquisitionSlot, privacyStartedAt, null, 'privacy_unavailable');
+    return unavailable('privacy_unavailable');
+  }
+  const storageStartedAt = performance.now();
+  const controller = new AbortController();
+  // This timer remains active through body consumption, not just HTTP headers.
+  const timer = setTimeout(() => controller.abort(), Math.min(FROZEN_PACKET_STORAGE_BUDGET_MS, remaining));
+  let result: CandidateIngestResult | undefined;
+  try {
+    result = await deliverAdmittedCandidate(tenantId, candidate, payload, requestBody, requestId, options, controller.signal);
+    return result;
+  } finally {
+    clearTimeout(timer);
+    logFrozenAttempt(requestId, options.acquisitionSlot, privacyStartedAt, storageStartedAt,
+      result ? (result.errorCode ?? 'ok') : 'unexpected');
+  }
+}
+
+/** Timing only: no profile, identity, contact or token data is logged. */
+function logFrozenAttempt(requestId: string | undefined, acquisitionSlot: string, privacyStartedAt: number,
+  storageStartedAt: number | null, outcome: string): void {
+  const end = performance.now();
+  log.info({ requestId, acquisitionSlot, outcome,
+    privacyMs: Math.round((storageStartedAt ?? end) - privacyStartedAt),
+    storageMs: storageStartedAt === null ? null : Math.round(end - storageStartedAt) }, 'Memory ingest attempt timing');
+}
+
+/** Runs only after `sendPreparedCandidateToMemory` has passed privacy admission. */
+async function deliverAdmittedCandidate(
+  tenantId: string, candidate: { id: string }, payload: ApprovedProviderCandidateIngestRequest,
+  requestBody: string, requestId: string | undefined,
+  options: { expectedGlobalCandidateId?: string | null; acquisitionSlot: string }, signal?: AbortSignal,
+): Promise<CandidateIngestResult> {
   let token: string;
   try {
     token = await signSourcedCandidateIngestJWT(tenantId, requestId);

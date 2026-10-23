@@ -5,7 +5,8 @@ import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 import { MEMORY_PACKET_LIMITS, memoryPacketManifest, prepareMemoryPacket, readMemoryPacket,
   awaitMemoryAcquisition, confirmedMemoryPacketResult,
-  type FrozenMemoryPacket, type MemoryAcquisitionOwner, type MemoryDeliveryMember } from '../immutable-memory-ingest';
+  type FrozenMemoryPacket, type MemoryAcquisitionOwner, type MemoryDeliveryMember,
+  type MemoryDeliveryReader } from '../immutable-memory-ingest';
 import type { CandidateIngestResult } from '../activegraph-client';
 import type { CandidateForRanking } from '../ranking-new';
 import { partitionMemoryCandidates } from '../memory-candidate-validation';
@@ -268,7 +269,7 @@ describe('receipt-scoped ACK readback coordinator (repository stand-in, not SQL 
     let clock = 1000;
     const value = packet(1, expected);
     let members: MemoryDeliveryMember[] = [{ packet: value, state: 'leased', result: null }];
-    const reader = { read: vi.fn(async () => ({ sealed: true,
+    const reader = { read: vi.fn<MemoryDeliveryReader['read']>(async () => ({ sealed: true,
       manifestSha256: memoryPacketManifest(owner, [value]).manifestSha256, members })),
       drain: vi.fn(async () => {}) };
     const options = { now: () => clock, sleep: vi.fn(async (ms: number) => { clock += ms; }),
@@ -282,6 +283,51 @@ describe('receipt-scoped ACK readback coordinator (repository stand-in, not SQL 
     expect(rows[0].result?.globalCandidateId).toBe(expected);
     expect(t.reader.drain).not.toHaveBeenCalled();
     expect(t.options.assertExecution).toHaveBeenCalledTimes(2);
+  });
+  it('polls without whole-purchase privacy and reconciles privacy once before handoff', async () => {
+    const t = setup();
+    t.reader.drain.mockImplementation(async () => {
+      t.set([{ packet: t.value, state: 'succeeded', result: accepted(t.value) }]);
+    });
+    await awaitMemoryAcquisition(owner, t.reader, 2000, t.options);
+    const modes = t.reader.read.mock.calls.map(call => call[1]);
+    expect(modes).toEqual([{ privacy: 'skip' }, { privacy: 'skip' }, { privacy: 'reconcile' }]);
+    // Ownership is re-fenced after the privacy reconciliation, at handoff.
+    const reconcileOrder = t.reader.read.mock.invocationCallOrder[2];
+    expect(Math.max(...t.options.assertExecution.mock.invocationCallOrder)).toBeGreaterThan(reconcileOrder);
+  });
+  it('returns the reconciled snapshot when an acknowledged member was withdrawn since', async () => {
+    const t = setup(); t.set([{ packet: t.value, state: 'succeeded', result: accepted(t.value) }]);
+    t.reader.read.mockImplementation(async (_owner: MemoryAcquisitionOwner, mode?: { privacy?: 'reconcile' | 'skip' }) => ({
+      sealed: true, manifestSha256: memoryPacketManifest(owner, [t.value]).manifestSha256,
+      members: mode?.privacy === 'reconcile'
+        ? [{ packet: t.value, state: 'suppressed' as const, result: null }]
+        : [{ packet: t.value, state: 'succeeded' as const, result: accepted(t.value) }] }));
+    const rows = await awaitMemoryAcquisition(owner, t.reader, 2000, t.options);
+    expect(rows[0].state).toBe('suppressed');
+    expect(rows[0].result).toBeNull();
+  });
+  it('suppresses a withdrawn blocked member through reconciliation instead of failing the search', async () => {
+    const t = setup();
+    const other = packet(2, expected);
+    const manifest = memoryPacketManifest(owner, [t.value, other]).manifestSha256;
+    t.reader.read.mockImplementation(async (_owner: MemoryAcquisitionOwner, mode?: { privacy?: 'reconcile' | 'skip' }) => ({
+      sealed: true, manifestSha256: manifest,
+      members: [
+        mode?.privacy === 'reconcile'
+          ? { packet: t.value, state: 'suppressed' as const, result: null }
+          : { packet: t.value, state: 'blocked' as const, result: null },
+        { packet: other, state: 'succeeded' as const, result: accepted(other) },
+      ] }));
+    const rows = await awaitMemoryAcquisition(owner, t.reader, 2000, t.options);
+    expect(rows.map(row => row.state)).toEqual(['suppressed', 'succeeded']);
+    expect(t.reader.drain).not.toHaveBeenCalled();
+  });
+  it('still fails on a blocked member that privacy continues to allow', async () => {
+    const t = setup(); t.set([{ packet: t.value, state: 'blocked', result: null }]);
+    await expect(awaitMemoryAcquisition(owner, t.reader, 2000, t.options)).rejects.toThrow('memory_ingest_needs_review');
+    expect(t.reader.read.mock.calls.map(call => call[1])).toEqual([{ privacy: 'skip' }, { privacy: 'reconcile' }]);
+    expect(t.reader.drain).not.toHaveBeenCalled();
   });
   it('waits/readbacks when another process holds the lease, without adapting', async () => {
     const t = setup();
