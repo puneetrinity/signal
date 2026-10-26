@@ -290,6 +290,9 @@ try {
   const immutableMigration = '20261019000000_immutable_memory_ingestion';
   const exclusionsMigration = '20261020000000_memory_candidate_exclusions';
   const progressMigration = '20261020010000_memory_wait_progress';
+  const locationMigration = '20261026000000_private_resume_location';
+  assert(historicalLock.migrations.at(-1).name === locationMigration, 'Unexpected resume location tail');
+  historicalLock.migrations.pop();
   assert(historicalLock.migrations.at(-1).name === progressMigration, 'Unexpected Memory progress tail');
   historicalLock.migrations.pop();
   assert(historicalLock.migrations.at(-1).name === exclusionsMigration, 'Unexpected exclusions tail');
@@ -336,6 +339,7 @@ try {
   await admin.$executeRawUnsafe('DROP TRIGGER memory_acquisition_guard ON public.crustdata_acquisition_receipts');
   await admin.$executeRawUnsafe('ALTER TABLE public.crustdata_acquisition_receipts DROP COLUMN memory_exclusions');
   await admin.$executeRawUnsafe('DROP FUNCTION public.signal_memory_rc_progress(public.rc_sourcing_runs)');
+  await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1',locationMigration);
   await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1',progressMigration);
   await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1',exclusionsMigration);
   await admin.$executeRawUnsafe('DROP TRIGGER memory_legacy_guard ON public.public_memory_ingest_outbox');

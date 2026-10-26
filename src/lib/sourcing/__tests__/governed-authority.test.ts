@@ -3,11 +3,14 @@ const previewLogged=vi.hoisted(()=>({warn:vi.fn()}));
 vi.mock('@/lib/logger',()=>({createLogger:()=>({warn:previewLogged.warn,info:vi.fn(),error:vi.fn(),debug:vi.fn()}),default:{}}));
 import {NextRequest,NextResponse} from 'next/server';
 const routeMocks=vi.hoisted(()=>({auth:vi.fn(),scope:vi.fn(),privacy:vi.fn(),enqueue:vi.fn()}));
-const resultMocks=vi.hoisted(()=>({candidates:vi.fn(),identities:vi.fn()}));
+const resultMocks=vi.hoisted(()=>({candidates:vi.fn(),identities:vi.fn(),queryRaw:vi.fn(),links:vi.fn(),revalidate:vi.fn(),applicants:vi.fn()}));
 const workerMocks=vi.hoisted(()=>({update:vi.fn(),find:vi.fn(),published:vi.fn(),count:vi.fn(),receipts:vi.fn(),execute:vi.fn(),orchestrate:vi.fn(),callback:vi.fn()}));
 vi.mock('@/lib/prisma',()=>({prisma:{jobSourcingRequest:{updateMany:workerMocks.update,findUniqueOrThrow:workerMocks.find,findFirst:workerMocks.published,count:workerMocks.count},
   jobSourcingCandidate:{findMany:resultMocks.candidates},identityCandidate:{findMany:resultMocks.identities},confirmedIdentity:{findMany:resultMocks.identities},
-  crustdataAcquisitionReceipt:{findMany:workerMocks.receipts},$executeRaw:workerMocks.execute}}));
+  crustdataAcquisitionReceipt:{findMany:workerMocks.receipts},$executeRaw:workerMocks.execute,
+  $queryRaw:resultMocks.queryRaw,candidateGlobalLink:{findMany:resultMocks.links}}}));
+vi.mock('../private-resume-lane',async importOriginal=>({...await importOriginal<typeof import('../private-resume-lane')>(),
+  revalidateResumeIdentities:resultMocks.revalidate,publicApplicantIds:resultMocks.applicants}));
 vi.mock('../orchestrator',()=>({runSourcingOrchestrator:workerMocks.orchestrate}));
 vi.mock('../callback',()=>({deliverCallback:workerMocks.callback}));
 vi.mock('@/lib/auth/service-jwt',()=>({verifyServiceJWT:routeMocks.auth}));
@@ -129,6 +132,60 @@ describe('actual governed results route',()=>{
     expect(body.governed.orderedSignalIds).toEqual(['visible']);expect(body.data[0].ranking.ordinal).toBe(2);
     expect(JSON.stringify(body)).not.toContain('blocked');expect(body.resultCount).toBe(1);
     expect(calls.mock.calls.map(([op])=>op)).toEqual(['delivery','boundCommand']);
+  });
+  describe('previous-applicant résumé location',()=>{
+    const applicant=(n:number)=>({candidateId:`2000000${n}-0000-4000-8000-000000000001`,referenceId:id,applicationId:100+n,applicationJobId:188,
+      resumeVersionId:id,sourceId:id,generationId:id,sourceHash:hash});
+    const card=(candidateId:string,rank:number,identityKind:string)=>({candidateId,rank,fitScore:null,sourceType:'pool',
+      candidate:{id:candidateId,identityKind,locationHint:null,intelligenceSnapshots:[],enrichmentSessions:[],searchMeta:null}});
+    const rankingContract=createRankingContract(id,hash,{schemaVersion:4,compilerVersion:4,taxonomyVersion:4,criteria:[{
+      id,label:'Python',class:'must_have',subject:'skill',requirement:{kind:'accepted_skills',primary:'Python',alternatives:[]},
+      use:'assessment',evidenceKinds:['candidate_provided','profile_evidence'],provenance:{kind:'recruiter_edit'}}]});
+    function arrange(locations:unknown,allowed=[1,2]) {
+      workerMocks.published.mockResolvedValue({...row(),candidates:[card('app-1',1,'organization_candidate'),
+        card('app-2',2,'organization_candidate'),card('public-3',3,'linkedin')]});
+      resultMocks.candidates.mockResolvedValue([{candidateId:'app-1'},{candidateId:'app-2'},{candidateId:'public-3'}]);
+      vi.spyOn(GovernedRepository.prototype,'call').mockImplementation(async op=>op==='boundCommand'
+        ?{...command,protocolVersion:2,rankingContract}:{protocolVersion:2,flowRunId:id,artifactHash:hash,executionAttemptId:id,revision:1,
+        orderedSignalIds:['app-1','app-2','public-3'],rankingRevision:id,rankingHash:hash,contractHash:hash});
+      vi.spyOn(RankingRepository.prototype,'read').mockResolvedValue({protocolVersion:2,flowRunId:id,revisionId:id,outputHash:hash,contractHash:hash,
+        asOf:'2026-10-01T00:00:00.000Z',items:[{candidateId:'app-1',ordinal:1},{candidateId:'app-2',ordinal:2},{candidateId:'public-3',ordinal:3}]} as never);
+      resultMocks.queryRaw.mockReset().mockImplementation(async (strings:TemplateStringsArray)=>strings.join('').includes('signal_private_ranking_locations')
+        ?[{result:locations}]:[{result:[{candidateId:'app-1',identity:applicant(1)},{candidateId:'app-2',identity:applicant(2)}]}]);
+      resultMocks.revalidate.mockReset().mockResolvedValue(allowed.map(applicant));
+      resultMocks.links.mockReset().mockResolvedValue([]);resultMocks.applicants.mockReset().mockResolvedValue(new Set());
+    }
+    type Card={candidate:{id:string;resumeLocation?:unknown}};
+    const byId=(body:{data:Card[]})=>Object.fromEntries(body.data.map(d=>[d.candidate.id,d.candidate]));
+    it('returns structured résumé city and country for previous applicants only',async()=>{
+      arrange([{candidateId:'app-1',location:{city:'Bengaluru',country:'India'}},{candidateId:'app-2',location:{city:null,country:'India'}}]);
+      const response=await get(),body=await response.json();expect(response.status).toBe(200);
+      const cards=byId(body);
+      expect(cards['app-1'].resumeLocation).toEqual({version:1,provenance:'resume',city:'Bengaluru',country:'India'});
+      expect(cards['app-2'].resumeLocation).toEqual({version:1,provenance:'resume',city:null,country:'India'});
+      expect(cards['public-3']).not.toHaveProperty('resumeLocation');
+    });
+    it('keeps an unknown location unknown and never guesses one',async()=>{
+      arrange([]);
+      const cards=byId(await (await get()).json());
+      expect(cards['app-1'].resumeLocation).toEqual({version:1,provenance:'resume',city:null,country:null});
+    });
+    it('never returns a withdrawn applicant or their location, and ignores stray location rows',async()=>{
+      arrange([{candidateId:'app-1',location:{city:'Bengaluru',country:'India'}},{candidateId:'app-2',location:{city:'Pune',country:'India'}},
+        {candidateId:'public-3',location:{city:'Delhi',country:'India'}}],[1]);
+      const body=await (await get()).json(),cards=byId(body);
+      expect(cards['app-2']).toBeUndefined();expect(JSON.stringify(body)).not.toContain('Pune');
+      expect(cards['public-3']).not.toHaveProperty('resumeLocation');expect(JSON.stringify(body)).not.toContain('Delhi');
+    });
+    it('does not read locations when no previous applicant is admitted',async()=>{
+      arrange([],[]);
+      expect((await get()).status).toBe(200);
+      expect(resultMocks.queryRaw.mock.calls.some(([s])=>(s as TemplateStringsArray).join('').includes('signal_private_ranking_locations'))).toBe(false);
+    });
+    it('fails closed with 503 on a malformed location response',async()=>{
+      arrange([{candidateId:'app-1',location:{city:'',country:'India'}}]);
+      expect((await get()).status).toBe(503);
+    });
   });
   it('leaves protocol1 on its original delivery path with no ranking or bound-command read',async()=>{
     workerMocks.published.mockResolvedValue(row('complete',1));resultMocks.candidates.mockResolvedValue([]);

@@ -145,6 +145,10 @@
     {
       "name": "20261020010000_memory_wait_progress",
       "sha256": "c00e5e70841a1ac9d7197b3b50bdf49d863c7351ed1286f1048da8deb1eef3a3"
+    },
+    {
+      "name": "20261026000000_private_resume_location",
+      "sha256": "0afec2f09f1f7db9db1b7edfcbbb6e4bec384f87c6229825ff8f5362c67d2abc"
     }
   ]
 }

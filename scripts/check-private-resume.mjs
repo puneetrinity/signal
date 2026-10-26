@@ -3,9 +3,10 @@ export const PRIVATE_RESUME_FUNCTIONS = [
   'signal_private_candidate_materialize(text,jsonb)',
   'signal_private_contact_allowed(text,text)',
   'signal_private_ranking_sources(text,uuid,uuid)',
+  'signal_private_ranking_locations(text,uuid,uuid)',
 ];
 export const PRIVATE_RESUME_OWNER_FUNCTIONS = ['signal_private_identity_immutable()','signal_private_evidence_bound(text,jsonb)'];
-export const PRIVATE_RESUME_CATALOG_SHA256='6b077b11e8d789a5a596948ccbad989f05a09fa60edea9d0b4fd810973d3588b';
+export const PRIVATE_RESUME_CATALOG_SHA256='db70ea38b28b4ed1a34b45494cabe5de842d3756738bd6d0a3837ebe9c517aa1';
 export const PRIVATE_RESUME_CATALOG_SQL=`WITH relations AS (
  SELECT * FROM pg_class WHERE oid='public.private_candidate_sources'::regclass
 ), functions AS (
@@ -36,13 +37,14 @@ export async function assertPrivateResumeAccess(tx, { role, allowOwner = false }
   const [shape] = await tx.$queryRawUnsafe(`SELECT
     (SELECT relrowsecurity AND relforcerowsecurity FROM pg_class
       WHERE oid=to_regclass('public.private_candidate_sources'))
-    AND (SELECT count(*)=3 AND bool_and(p.prosecdef
+    AND (SELECT count(*)=4 AND bool_and(p.prosecdef
       AND p.proowner=(SELECT relowner FROM pg_class WHERE oid='public.candidates'::regclass)
       AND p.proconfig @> ARRAY['search_path=pg_catalog, public','statement_timeout=3s','lock_timeout=1s'])
       FROM pg_proc p WHERE p.oid=ANY(ARRAY[
         to_regprocedure('public.signal_private_candidate_materialize(text,jsonb)'),
         to_regprocedure('public.signal_private_contact_allowed(text,text)'),
-        to_regprocedure('public.signal_private_ranking_sources(text,uuid,uuid)')])) AS ok`);
+        to_regprocedure('public.signal_private_ranking_sources(text,uuid,uuid)'),
+        to_regprocedure('public.signal_private_ranking_locations(text,uuid,uuid)')])) AS ok`);
   if (shape?.ok !== true) throw Error('Private resume schema mismatch');
   if (allowOwner) return;
   const [rights] = await tx.$queryRawUnsafe(`SELECT
