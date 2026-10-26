@@ -365,13 +365,21 @@ describe.skipIf(!enabled)('ranking atomic database publication',()=>{
   await db.query("INSERT INTO candidate_privacy_projection(tenant_id,candidate_id,generation,decision,evaluated_cursor) VALUES($1,$2,1,'allow',0)",[tenant,candidateId]);
   await db.query("UPDATE candidate_privacy_sync_state SET status='healthy',active_generation=1,expected_candidates=1,projected_candidates=1,last_success_at=clock_timestamp() WHERE consumer_name='discover'");
   const evidence=evidenceSchema.parse({candidateId,organizationRef:'28',version:'rubric-evidence-v2',employment:[],employmentSources:[],resumeIdentity:identity,
-   facts:[{field:'skill',value:'Python',ref:'resume.skill',kind:'candidate_provided',scope:'organization',organizationRef:'28',sourceVersion:hash,observedAt:'2026-01-01T00:00:00.000Z'}]});
+   facts:[{field:'skill',value:'Python',ref:'resume.skill',kind:'candidate_provided',scope:'organization',organizationRef:'28',sourceVersion:hash,observedAt:'2026-01-01T00:00:00.000Z'},
+    {field:'city',value:'Bengaluru',ref:'resume.city',kind:'candidate_provided',scope:'organization',organizationRef:'28',sourceVersion:hash,observedAt:'2026-01-01T00:00:00.000Z'},
+    {field:'country',value:'India',ref:'resume.country',kind:'candidate_provided',scope:'organization',organizationRef:'28',sourceVersion:hash,observedAt:'2026-01-01T00:00:00.000Z'},
+    // A linked public profile's location is never returned as the résumé location.
+    {field:'city',value:'Agra',ref:'basic_profile.location.city',kind:'profile_evidence',scope:'public',organizationRef:null,sourceVersion:hash,observedAt:'2026-01-01T00:00:00.000Z'}]});
   expect(await one("SELECT signal_ranking_transport_record('evidence',$1) result",[canonical(evidence)])).toEqual(evidence);
   const repo=new RankingRepository(async(sql,args)=>(await db.query(sql,args)).rows);
   const result=await repo.publish({tenantId:tenant,flowRunId:flow,contract:ranking,executionAttemptId:bound.executionAttemptId,
    processingLeaseId,evidence:[evidence],sourceTypes:new Map([[candidateId,'pool' as const]])});
   expect(result.items).toHaveLength(1);expect(result.items[0]).toMatchObject({candidateId,N:3,D:3});
   expect(await one('SELECT signal_private_ranking_sources($1,$2,$3) result',[tenant,flow,result.revisionId])).toEqual([{candidateId,identity}]);
+  expect(await one('SELECT signal_private_ranking_locations($1,$2,$3) result',[tenant,flow,result.revisionId]))
+   .toEqual([{candidateId,location:{city:'Bengaluru',country:'India'}}]);
+  // Another organisation cannot read this run's applicant locations.
+  await refusal(()=>one('SELECT signal_private_ranking_locations($1,$2,$3) result',['org_29',flow,result.revisionId]),'PRIVATE_RANKING_UNAVAILABLE');
   expect(await one('SELECT signal_private_contact_allowed($1,$2) result',[tenant,candidateId])).toBe(false);
  });
  it('compact claim returns only sealed metadata; replacement recovery returns the identical stored pool',async()=>{

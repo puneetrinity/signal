@@ -82,8 +82,8 @@ async function assertBootstrapShape() {
       FROM "_prisma_migrations"
     `);
     assert(tableCount === 38, `Expected 38 tables, found ${tableCount}`);
-    assert(migrationCount === 36, `Expected 36 migrations, found ${migrationCount}`);
-    assert(finishedCount === 36, 'Every baseline migration must be finished');
+    assert(migrationCount === 37, `Expected 37 migrations, found ${migrationCount}`);
+    assert(finishedCount === 37, 'Every baseline migration must be finished');
   });
 
   await runPrisma(

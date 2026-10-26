@@ -169,6 +169,8 @@ export async function GET(
 
   let candidates = (sourcingRequest as any).candidates || [];
   const resumeOriginById=new Map<string,PrivateResumeIdentity>();
+  // Candidate-provided résumé location for privacy-admitted previous applicants only.
+  const resumeLocationById=new Map<string,{city:string|null;country:string|null}>();
   let governed:any;
   let ranking:RankingRead|undefined;
   if(sourcingRequest.flowRunId && sourcingRequest.protocolVersion===2) {
@@ -204,6 +206,15 @@ export async function GET(
             Date.now()+9000,undefined,ranking.revisionId);
           const allowedIds=new Set(allowed.map(identity=>identity.candidateId));
           for(const source of requested)if(allowedIds.has(source.identity.candidateId))resumeOriginById.set(source.candidateId,source.identity);
+          if(resumeOriginById.size) {
+            const located=await prisma.$queryRaw<Array<{result:unknown}>>`
+              SELECT public.signal_private_ranking_locations(${tenantId},${command.flowRunId}::uuid,${ranking.revisionId}::uuid) AS result`;
+            if(located.length!==1)throw Error('PRIVATE_RANKING_UNAVAILABLE');
+            const place=z.string().min(1).max(200).nullable();
+            const locations=z.array(z.object({candidateId:z.string().min(1).max(200),
+              location:z.object({city:place,country:place}).strict()}).strict()).max(100).parse(located[0].result);
+            for(const item of locations)if(resumeOriginById.has(item.candidateId))resumeLocationById.set(item.candidateId,item.location);
+          }
           candidates=candidates.filter((candidate:any)=>candidate.candidate.identityKind==='linkedin'
             || resumeOriginById.has(candidate.candidateId));
           const links=await prisma.candidateGlobalLink.findMany({where:{tenantId,
@@ -512,6 +523,8 @@ export async function GET(
         id: sc.candidate.id,
         ...(resumeOriginById.has(sc.candidateId)?{candidateOrigin:{version:1,kind:'organization_candidate',
           ...resumeOriginById.get(sc.candidateId)}}:{}),
+        ...(resumeOriginById.has(sc.candidateId)?{resumeLocation:{version:1,provenance:'resume',
+          ...(resumeLocationById.get(sc.candidateId)??{city:null,country:null})}}:{}),
         name: sc.candidate.nameHint,
         linkedinUrl: sc.candidate.linkedinUrl,
         headline: sc.candidate.headlineHint,
