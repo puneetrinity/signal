@@ -288,7 +288,7 @@ export class RcRepository {
  }
  async failure(identity:RcWorkerIdentity,attemptsMade:number,maxAttempts:number){
   worker.parse(identity);z.number().int().nonnegative().parse(attemptsMade);z.number().int().positive().parse(maxAttempts);
-  return z.object({version:z.literal(1),state:z.enum(['cancelled','retry','stalled'])}).strict().parse(
+  return z.object({version:z.literal(1),state:z.enum(['cancelled','retry','stalled','terminal'])}).strict().parse(
    await this.call('maintain',[{version:1,action:'failure',...identity,attemptsMade,maxAttempts}]));
  }
  async claimExecution(input:{tenantId:string;requestId:string;generation:number;executionAttemptId:string;processingLeaseId:string;resumeToken:string|null}){

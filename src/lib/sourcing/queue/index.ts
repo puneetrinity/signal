@@ -25,6 +25,13 @@ import type {GovernedSource} from '../governed-contracts';
 import {z} from 'zod';
 
 const log = createLogger('SourcingQueue');
+/** A bounded code for logs: never a message, which can carry provider text. */
+function safeErrorCode(err:unknown):string{
+  const code=(err as {code?:unknown})?.code;
+  if(typeof code==='string'&&/^[A-Za-z0-9_.:-]{1,80}$/.test(code))return code;
+  const name=err instanceof Error?err.name:typeof err;
+  return /^[A-Za-z0-9_]{1,80}$/.test(name)?name:'unknown';
+}
 
 export * from './producer';
 import { getRedisConnection, getSourcingQueue, SOURCING_QUEUE_NAME } from './producer';
@@ -396,7 +403,14 @@ async function processSourcingJobMeasured(
             return {requestId,status:'failed',candidateCount:0,durationMs,error:'GOVERNED_CANCELLED_NO_DISPATCH'};
           }
           if(recovery.state==='retry')throw err;
-          throw Error('RC_RECOVERY_PENDING');
+          if(recovery.state!=='terminal'){
+            log.warn({requestId,errorCode:safeErrorCode(err)},'RC run needs operator recovery');
+            throw Error('RC_RECOVERY_PENDING');
+          }
+          // The purchase outcome is uncertain and RC never dispatched: no
+          // resume can progress it and no purchase may be repeated. RC is
+          // closed; fall through to the durable failure and Flow callback.
+          log.warn({requestId,errorCode:safeErrorCode(err)},'RC run closed: acquisition unrecoverable');
         }
       }
       // Retry only recovery of an already completed purchase, never a new
