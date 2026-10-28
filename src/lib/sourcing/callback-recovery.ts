@@ -1,10 +1,17 @@
 /**
- * Recovery for governed failure callbacks.
+ * Recovery for governed terminal callbacks (failed and complete).
  *
- * Flow refunds a search when Discover reports it failed, so a failure callback
- * must eventually reach Flow even across deployments and outages. This path:
- * - selects only governed failed searches finished since the configured floor
- *   (historical callbacks are never resent, completions are out of scope);
+ * Flow refunds a search when Discover reports it failed (Part A) or complete
+ * with nothing delivered (Part B). When Flow cannot record that refund yet it
+ * answers 503, so the terminal callback must eventually reach Flow again, even
+ * across deployments and outages. This path:
+ * - selects only governed (`flowRunId` set) failed or complete searches finished
+ *   since the configured floor, whose callback Flow has not acknowledged
+ *   (historical callbacks are never resent; the old unbounded stale loop stays
+ *   unused);
+ * - resends each search's own terminal status (`failed` or `complete`) and
+ *   published count; Flow re-reads what was actually delivered and never trusts
+ *   the count to decide a refund;
  * - resends with the original execution identity and fence, and stops once
  *   Flow acknowledges (deliverCallback marks the request `delivered`);
  * - backs off per request, retries least-attempted first so a repeatedly
@@ -38,9 +45,9 @@ export function recoveryBackoffMs(attempts: number): number {
   return Math.min(BACKOFF_CAP_MS, 60_000 * 2 ** Math.max(0, attempts - 1));
 }
 
-export function buildFailureRecoveryWhere(notBefore: Date, now: Date, maxAttempts = RECOVERY_MAX_ATTEMPTS): Prisma.JobSourcingRequestWhereInput {
+export function buildTerminalRecoveryWhere(notBefore: Date, now: Date, maxAttempts = RECOVERY_MAX_ATTEMPTS): Prisma.JobSourcingRequestWhereInput {
   return {
-    status: 'failed',
+    status: { in: ['failed', 'complete'] },
     flowRunId: { not: null },
     callbackStatus: { in: ['failed', 'pending'] },
     completedAt: { gte: notBefore, lt: new Date(now.getTime() - RECOVERY_MIN_AGE_MS) },
@@ -53,7 +60,7 @@ export function buildFailureRecoveryWhere(notBefore: Date, now: Date, maxAttempt
 
 type Delivery = typeof deliverCallback;
 
-export async function redeliverFailedCallbacks(opts: {
+export async function redeliverTerminalCallbacks(opts: {
   notBefore: Date;
   limit?: number;
   maxAttempts?: number;
@@ -65,7 +72,7 @@ export async function redeliverFailedCallbacks(opts: {
   const maxAttempts = opts.maxAttempts ?? RECOVERY_MAX_ATTEMPTS;
   const deliver = opts.deliver ?? deliverCallback;
   const due = await prisma.jobSourcingRequest.findMany({
-    where: buildFailureRecoveryWhere(opts.notBefore, now(), maxAttempts),
+    where: buildTerminalRecoveryWhere(opts.notBefore, now(), maxAttempts),
     orderBy: [{ callbackRedeliveryAttempts: 'asc' }, { completedAt: 'asc' }],
     take: limit,
   });
@@ -81,8 +88,8 @@ export async function redeliverFailedCallbacks(opts: {
       // Identifiers only. The pending callback is the durable obligation; this log
       // line and the review flag are the operator alert (low priority, no email).
       // releaseCallbackReview() returns it to automatic recovery.
-      log.error({ requestId: req.id, tenantId: req.tenantId, attempts, code: 'CALLBACK_REDELIVERY_EXHAUSTED' },
-        '[callback-review-required] failure callback needs operator review');
+      log.error({ requestId: req.id, tenantId: req.tenantId, status: req.status, attempts, code: 'CALLBACK_REDELIVERY_EXHAUSTED' },
+        '[callback-review-required] terminal callback needs operator review');
     }
   };
   for (const req of due) {
@@ -110,7 +117,9 @@ export async function redeliverFailedCallbacks(opts: {
       externalJobId: req.externalJobId,
       acquisitionGeneration: req.acquisitionGeneration,
       executionAttemptId: req.executionAttemptId ?? undefined,
-      status: 'failed',
+      // The original terminal status, never a new one: a complete search is
+      // resent as complete (Flow re-syncs what it actually delivered).
+      status: req.status === 'complete' ? 'complete' : 'failed',
       candidateCount: req.resultCount ?? 0,
     };
     let ok = false;
@@ -126,15 +135,15 @@ export async function redeliverFailedCallbacks(opts: {
     failed++;
     if (attempts >= maxAttempts) await flagForReview(req, attempts);
   }
-  if (attempted > 0) log.info({ attempted, succeeded, failed, review }, 'Failure callback recovery cycle complete');
+  if (attempted > 0) log.info({ attempted, succeeded, failed, review }, 'Terminal callback recovery cycle complete');
   return { attempted, succeeded, failed, review };
 }
 
-/** Operator action after review: return a flagged failure callback to automatic
+/** Operator action after review: return a flagged terminal callback to automatic
  * recovery with a fresh retry budget. Never touches a delivered callback. */
 export async function releaseCallbackReview(input: { requestId: string; tenantId: string }): Promise<boolean> {
   const released = await prisma.jobSourcingRequest.updateMany({
-    where: { id: input.requestId, tenantId: input.tenantId, status: 'failed', flowRunId: { not: null },
+    where: { id: input.requestId, tenantId: input.tenantId, status: { in: ['failed', 'complete'] }, flowRunId: { not: null },
       callbackReviewRequiredAt: { not: null }, callbackStatus: { in: ['failed', 'pending'] } },
     data: { callbackReviewRequiredAt: null, callbackRedeliveryAttempts: 0, callbackNextRedeliveryAt: null },
   });

@@ -12,7 +12,7 @@
 
 import http from 'http';
 import { startSourcingWorker, cleanupSourcingQueue, getSourcingQueueStats } from './queue';
-import { redeliverFailedCallbacks, parseRedeliveryNotBefore } from './callback-recovery';
+import { redeliverTerminalCallbacks, parseRedeliveryNotBefore } from './callback-recovery';
 import { createLogger } from '@/lib/logger';
 import {
   startPublicMemoryIngestWorker,
@@ -145,7 +145,7 @@ async function runCallbackRedeliveryCycle(): Promise<void> {
 
   callbackRedeliveryRunning = true;
   try {
-    const summary = await redeliverFailedCallbacks({
+    const summary = await redeliverTerminalCallbacks({
       limit: CALLBACK_REDELIVERY_BATCH_SIZE,
       notBefore: CALLBACK_REDELIVERY_NOT_BEFORE!,
     });

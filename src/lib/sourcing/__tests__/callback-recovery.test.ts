@@ -46,8 +46,8 @@ vi.mock("@/lib/prisma", () => ({
 vi.mock("../callback", () => ({ deliverCallback: vi.fn() }));
 
 import {
-  buildFailureRecoveryWhere, parseRedeliveryNotBefore, recoveryBackoffMs,
-  redeliverFailedCallbacks, releaseCallbackReview,
+  buildTerminalRecoveryWhere, parseRedeliveryNotBefore, recoveryBackoffMs,
+  redeliverTerminalCallbacks, releaseCallbackReview,
 } from "../callback-recovery";
 
 const floor = new Date("2026-10-27T08:00:00.000Z");
@@ -64,21 +64,50 @@ function request(id: string, over: Row = {}): Row {
 }
 beforeEach(() => { rows.length = 0; clock = new Date("2026-10-27T10:00:00.000Z"); });
 
-describe("failure-callback recovery", () => {
-  it("selects only governed failures since the floor, never completions or older callbacks", async () => {
+describe("terminal-callback recovery", () => {
+  it("selects governed failed and complete searches since the floor, nothing else", async () => {
     rows.push(request("eligible"), request("complete", { status: "complete" }), request("ungoverned", { flowRunId: null }),
-      request("historical", { completedAt: new Date("2026-10-27T07:59:59.000Z") }), request("delivered", { callbackStatus: "delivered" }),
+      request("ungoverned-complete", { status: "complete", flowRunId: null }),
+      request("historical", { completedAt: new Date("2026-10-27T07:59:59.000Z") }),
+      request("historical-complete", { status: "complete", completedAt: new Date("2026-10-27T07:59:59.000Z") }),
+      request("delivered", { callbackStatus: "delivered" }), request("delivered-complete", { status: "complete", callbackStatus: "delivered" }),
+      request("processing", { status: "processing" }), request("queued", { status: "queued" }),
       request("too-recent", { completedAt: new Date("2026-10-27T09:58:00.000Z") }));
     const sent: string[] = [];
-    await redeliverFailedCallbacks({ notBefore: floor, now, deliver: (async (id: string) => { sent.push(id); return true; }) as any });
-    expect(sent).toEqual(["eligible"]);
-    expect(buildFailureRecoveryWhere(floor, clock)).toMatchObject({ status: "failed", flowRunId: { not: null }, callbackReviewRequiredAt: null });
+    await redeliverTerminalCallbacks({ notBefore: floor, now, deliver: (async (id: string) => { sent.push(id); return true; }) as any });
+    expect(sent.sort()).toEqual(["complete", "eligible"]);
+    expect(buildTerminalRecoveryWhere(floor, clock)).toMatchObject({ status: { in: ["failed", "complete"] }, flowRunId: { not: null }, callbackReviewRequiredAt: null });
+  });
+
+  it("resends a complete search as complete with its own identity, fence and published count", async () => {
+    rows.push(request("c1", { status: "complete", resultCount: 0 }), request("c2", { status: "complete", resultCount: 7 }));
+    const deliver = vi.fn().mockResolvedValue(true);
+    await redeliverTerminalCallbacks({ notBefore: floor, now, deliver: deliver as any });
+    const byId = Object.fromEntries(deliver.mock.calls.map((c: any[]) => [c[0], c]));
+    expect(byId.c1[3]).toMatchObject({ requestId: "c1", status: "complete", candidateCount: 0, acquisitionGeneration: 1, executionAttemptId: "attempt-c1" });
+    expect(byId.c2[3]).toMatchObject({ status: "complete", candidateCount: 7 });
+    expect(byId.c1[4]).toBe(true);
+    expect(byId.c1[5]).toEqual({ acquisitionGeneration: 1, executionAttemptId: "attempt-c1", processingLeaseId: "lease-c1" });
+  });
+
+  it("both terminal statuses stop at the retry cap and go to review; an operator can release either", async () => {
+    rows.push(request("f", { callbackRedeliveryAttempts: 11 }), request("c", { status: "complete", callbackRedeliveryAttempts: 11 }));
+    const deliver = vi.fn().mockResolvedValue(false);
+    const out = await redeliverTerminalCallbacks({ notBefore: floor, now, deliver: deliver as any });
+    expect(out).toMatchObject({ attempted: 2, failed: 2, review: 2 });
+    for (const id of ["f", "c"]) expect(rows.find(r => r.id === id)).toMatchObject({ callbackRedeliveryAttempts: 12, callbackStatus: "pending" });
+    expect(rows.every(r => r.callbackReviewRequiredAt instanceof Date)).toBe(true);
+    clock = new Date(clock.getTime() + 24 * 3600_000);
+    expect(await redeliverTerminalCallbacks({ notBefore: floor, now, deliver: deliver as any })).toMatchObject({ attempted: 0 });
+    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(await releaseCallbackReview({ requestId: "c", tenantId: "t1" })).toBe(true);
+    expect(rows.find(r => r.id === "c")).toMatchObject({ callbackReviewRequiredAt: null, callbackRedeliveryAttempts: 0 });
   });
 
   it("resends the original execution identity and fence, as a failure", async () => {
     rows.push(request("r1"));
     const deliver = vi.fn().mockResolvedValue(true);
-    await redeliverFailedCallbacks({ notBefore: floor, now, deliver: deliver as any });
+    await redeliverTerminalCallbacks({ notBefore: floor, now, deliver: deliver as any });
     expect(deliver).toHaveBeenCalledWith("r1", "t1", "https://flow.invalid/cb",
       expect.objectContaining({ requestId: "r1", status: "failed", acquisitionGeneration: 1, executionAttemptId: "attempt-r1" }), true,
       { acquisitionGeneration: 1, executionAttemptId: "attempt-r1", processingLeaseId: "lease-r1" });
@@ -87,13 +116,13 @@ describe("failure-callback recovery", () => {
   it("backs off per request and does not retry before the next attempt is due", async () => {
     rows.push(request("r1"));
     const deliver = vi.fn().mockResolvedValue(false);
-    await redeliverFailedCallbacks({ notBefore: floor, now, deliver: deliver as any });
+    await redeliverTerminalCallbacks({ notBefore: floor, now, deliver: deliver as any });
     expect(rows[0].callbackRedeliveryAttempts).toBe(1);
     expect(rows[0].callbackNextRedeliveryAt.getTime() - clock.getTime()).toBe(recoveryBackoffMs(1));
-    await redeliverFailedCallbacks({ notBefore: floor, now, deliver: deliver as any });
+    await redeliverTerminalCallbacks({ notBefore: floor, now, deliver: deliver as any });
     expect(deliver).toHaveBeenCalledTimes(1);
     clock = new Date(clock.getTime() + recoveryBackoffMs(1));
-    await redeliverFailedCallbacks({ notBefore: floor, now, deliver: deliver as any });
+    await redeliverTerminalCallbacks({ notBefore: floor, now, deliver: deliver as any });
     expect(deliver).toHaveBeenCalledTimes(2);
     expect([1, 2, 3, 9, 10, 20].map(recoveryBackoffMs)).toEqual([60_000, 120_000, 240_000, 15_360_000, 21_600_000, 21_600_000]);
   });
@@ -102,18 +131,18 @@ describe("failure-callback recovery", () => {
     for (let n = 0; n < 5; n++) rows.push(request(`poison-${n}`, { completedAt: new Date("2026-10-27T08:30:00.000Z"), callbackRedeliveryAttempts: 6 }));
     rows.push(request("new-failure"));
     const sent: string[] = [];
-    await redeliverFailedCallbacks({ notBefore: floor, now, limit: 2, deliver: (async (id: string) => { sent.push(id); return false; }) as any });
+    await redeliverTerminalCallbacks({ notBefore: floor, now, limit: 2, deliver: (async (id: string) => { sent.push(id); return false; }) as any });
     expect(sent[0]).toBe("new-failure");
     expect(sent).toHaveLength(2);
   });
 
   it("flags an exhausted callback for review, keeps it pending, and an operator can release it", async () => {
     rows.push(request("r1", { callbackRedeliveryAttempts: 11 }));
-    const result = await redeliverFailedCallbacks({ notBefore: floor, now, maxAttempts: 12, deliver: (async () => false) as any });
+    const result = await redeliverTerminalCallbacks({ notBefore: floor, now, maxAttempts: 12, deliver: (async () => false) as any });
     expect(result).toMatchObject({ attempted: 1, failed: 1, review: 1 });
     expect(rows[0]).toMatchObject({ callbackStatus: "pending", callbackReviewRequiredAt: clock, callbackNextRedeliveryAt: null });
     const later = vi.fn();
-    await redeliverFailedCallbacks({ notBefore: floor, now, deliver: later as any });
+    await redeliverTerminalCallbacks({ notBefore: floor, now, deliver: later as any });
     expect(later).not.toHaveBeenCalled();
     expect(await releaseCallbackReview({ requestId: "r1", tenantId: "t1" })).toBe(true);
     expect(rows[0]).toMatchObject({ callbackRedeliveryAttempts: 0, callbackReviewRequiredAt: null });
@@ -123,13 +152,13 @@ describe("failure-callback recovery", () => {
   it("stops once Flow acknowledges, and a lost acknowledgement is simply sent again", async () => {
     rows.push(request("r1"));
     // First attempt: Flow processed it but the response was lost.
-    await redeliverFailedCallbacks({ notBefore: floor, now, deliver: (async () => false) as any });
+    await redeliverTerminalCallbacks({ notBefore: floor, now, deliver: (async () => false) as any });
     clock = new Date(clock.getTime() + recoveryBackoffMs(1));
     const deliver = vi.fn(async () => { rows[0].callbackStatus = "delivered"; return true; });
-    await redeliverFailedCallbacks({ notBefore: floor, now, deliver: deliver as any });
+    await redeliverTerminalCallbacks({ notBefore: floor, now, deliver: deliver as any });
     expect(deliver).toHaveBeenCalledTimes(1);
     clock = new Date(clock.getTime() + 24 * 60 * 60_000);
-    await redeliverFailedCallbacks({ notBefore: floor, now, deliver: deliver as any });
+    await redeliverTerminalCallbacks({ notBefore: floor, now, deliver: deliver as any });
     expect(deliver).toHaveBeenCalledTimes(1);
   });
 
@@ -137,8 +166,8 @@ describe("failure-callback recovery", () => {
     rows.push(request("r1"));
     const deliver = vi.fn().mockResolvedValue(false);
     await Promise.all([
-      redeliverFailedCallbacks({ notBefore: floor, now, deliver: deliver as any }),
-      redeliverFailedCallbacks({ notBefore: floor, now, deliver: deliver as any }),
+      redeliverTerminalCallbacks({ notBefore: floor, now, deliver: deliver as any }),
+      redeliverTerminalCallbacks({ notBefore: floor, now, deliver: deliver as any }),
     ]);
     expect(deliver).toHaveBeenCalledTimes(1);
   });
@@ -153,19 +182,19 @@ describe("failure-callback recovery", () => {
     // State left by a crash after claiming attempt 12 and before flagging it.
     rows.push(request("r1", { callbackRedeliveryAttempts: 12, callbackNextRedeliveryAt: new Date(clock.getTime() + 6 * 3600_000) }));
     const deliver = vi.fn().mockResolvedValue(false);
-    const result = await redeliverFailedCallbacks({ notBefore: floor, now, maxAttempts: 12, deliver: deliver as any });
+    const result = await redeliverTerminalCallbacks({ notBefore: floor, now, maxAttempts: 12, deliver: deliver as any });
     expect(deliver).not.toHaveBeenCalled();
     expect(result).toMatchObject({ attempted: 0, review: 1 });
     expect(rows[0]).toMatchObject({ callbackRedeliveryAttempts: 12, callbackStatus: "pending", callbackReviewRequiredAt: clock });
     // Repeated restarts never send attempt 13.
-    for (let n = 0; n < 3; n++) await redeliverFailedCallbacks({ notBefore: floor, now, maxAttempts: 12, deliver: deliver as any });
+    for (let n = 0; n < 3; n++) await redeliverTerminalCallbacks({ notBefore: floor, now, maxAttempts: 12, deliver: deliver as any });
     expect(deliver).not.toHaveBeenCalled();
     expect(rows[0].callbackRedeliveryAttempts).toBe(12);
   });
   it("the final claim itself is fenced by the budget", async () => {
     rows.push(request("r1", { callbackRedeliveryAttempts: 11 }));
     const deliver = vi.fn(async () => { rows[0].callbackRedeliveryAttempts = 12; return false; });
-    await redeliverFailedCallbacks({ notBefore: floor, now, maxAttempts: 12, deliver: deliver as any });
+    await redeliverTerminalCallbacks({ notBefore: floor, now, maxAttempts: 12, deliver: deliver as any });
     expect(deliver).toHaveBeenCalledTimes(1);
     expect(rows[0].callbackReviewRequiredAt).toEqual(clock);
   });
