@@ -677,8 +677,24 @@ describe.skipIf(!enabled)('RC database authority on a fresh disposable PostgreSQ
   expect(await one('SELECT acquisition_generation result FROM job_sourcing_requests')).toBe(1);
   expect(await one('SELECT count(*)::int result FROM crustdata_acquisition_receipts')).toBe(1);
  });
- it('uncertain purchase cannot be cancelled or automatically retried',async()=>{
+ it('uncertain purchase before any RC work closes terminally once, never cancelled, retried or re-bought',async()=>{
   const f=await fixture(),repository=new RcRepository(async(sql,args)=>(await db.query(sql,args)).rows);
+  await db.query("UPDATE crustdata_acquisition_receipts SET status='uncertain'");
+  const identity={tenantId:tenant,flowRunId:f.flow,executionAttemptId:f.claim.executionAttemptId,processingLeaseId:f.claim.processingLeaseId};
+  expect(await repository.failure(identity,0,3)).toEqual({version:1,state:'terminal'});
+  const closed=await one("SELECT jsonb_build_object('state',state,'revision',revision,'closure',closure_hash IS NOT NULL,'available',rc_available) result FROM rc_sourcing_runs");
+  expect(closed).toMatchObject({state:'closed_unrecoverable',closure:true,available:false});
+  // A lost response is retried: still terminal, closed only once.
+  expect(await repository.failure(identity,1,3)).toEqual({version:1,state:'terminal'});
+  expect(await one('SELECT revision::int result FROM rc_sourcing_runs')).toBe(closed.revision);
+  expect(await one('SELECT cancellation IS NULL result FROM governed_sourcing_bindings')).toBe(true);
+  expect(await one("SELECT count(*)::int result FROM rc_operations_events WHERE kind='stalled'")).toBe(0);
+  expect(await one('SELECT acquisition_generation result FROM job_sourcing_requests')).toBe(1);
+  expect(await one('SELECT count(*)::int result FROM crustdata_acquisition_receipts')).toBe(1);
+  expect((await repository.maintenance({version:1,action:'tick'}) as {stalled:number}).stalled).toBe(0);
+ });
+ it('uncertain purchase after a paid RC dispatch still stalls for operator recovery',async()=>{
+  const f=await dispatched(),repository=new RcRepository(async(sql,args)=>(await db.query(sql,args)).rows);
   await db.query("UPDATE crustdata_acquisition_receipts SET status='uncertain'");
   expect((await repository.failure({tenantId:tenant,flowRunId:f.flow,executionAttemptId:f.claim.executionAttemptId,
    processingLeaseId:f.claim.processingLeaseId},0,3)).state).toBe('stalled');

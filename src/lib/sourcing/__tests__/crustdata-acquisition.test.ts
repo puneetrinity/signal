@@ -24,6 +24,7 @@ import * as provider from '../crustdata-client';
 import {artifactHash} from '../governed-contracts';
 import * as privacyRepository from '@/lib/candidate-privacy/repository';
 import * as privacyDecision from '@/lib/candidate-privacy/decision';
+import {CandidatePrivacyMemoryError} from '@/lib/candidate-privacy/memory-client';
 import {isProviderShortfall} from '../relaxation-ladder';
 
 const requirements: JobRequirements = {
@@ -235,6 +236,38 @@ describe("request-scoped Crustdata acquisition receipts", () => {
     expect(isProviderShortfall(acquired.rawAccounting!.providerTotal,300)).toBe(true);
     expect(300-acquired.rawAccounting!.rawReturnedCount).toBe(299);
     expect(search).toHaveBeenCalledTimes(1);
+  });
+  describe('post-purchase privacy check',()=>{
+    const linked={...exactResult,profiles:[{social_handles:{professional_network_identifier:{profile_url:'https://linkedin.com/in/synthetic-retry'}}}],
+      providerTotal:1,providerTotalRelation:'eq' as const,rawReturnedCount:1};
+    const transient=()=>new CandidatePrivacyMemoryError('candidate_privacy_unavailable',true);
+    beforeEach(()=>{delete process.env.SIGNAL_CANDIDATE_PRIVACY_TEST_ADAPTER;
+      vi.spyOn(privacyRepository,'requireHealthyCandidatePrivacyContext').mockResolvedValue({} as never);});
+    it('retries a transient privacy failure and keeps the paid output without another purchase',async()=>{
+      const proofs=vi.spyOn(privacyDecision,'createCandidateAdmissionProofs').mockRejectedValueOnce(transient()).mockResolvedValue(new Map());
+      const store=new InMemoryReceiptStore(),uncertain=vi.spyOn(store,'markUncertain'),search=vi.fn().mockResolvedValue(linked);
+      const acquired=await acquireCrustdataSearch(acquisitionInput({rankingProtocol:2}),{store,search,privacyRetryDelaysMs:[0,0]});
+      expect(acquired.receiptId).toBeTruthy();expect(proofs).toHaveBeenCalledTimes(2);expect(search).toHaveBeenCalledTimes(1);
+      expect(uncertain).not.toHaveBeenCalled();expect([...store.receipts.values()]).toMatchObject([{status:'complete'}]);
+    });
+    it('stops after the bounded attempts and discards the output as uncertain, never re-buying',async()=>{
+      const proofs=vi.spyOn(privacyDecision,'createCandidateAdmissionProofs').mockRejectedValue(transient());
+      const store=new InMemoryReceiptStore(),search=vi.fn().mockResolvedValue(linked);
+      await expect(acquireCrustdataSearch(acquisitionInput({rankingProtocol:2}),{store,search,privacyRetryDelaysMs:[0,0]}))
+        .rejects.toMatchObject({code:'receipt_uncertain'});
+      expect(proofs).toHaveBeenCalledTimes(3);
+      expect([...store.receipts.values()]).toMatchObject([{status:'uncertain',error:'candidate_privacy_unavailable',result:null}]);
+      await expect(acquireCrustdataSearch(acquisitionInput({rankingProtocol:2}),{store,search,privacyRetryDelaysMs:[0,0]}))
+        .rejects.toMatchObject({code:'receipt_uncertain'});
+      expect(search).toHaveBeenCalledTimes(1);
+    });
+    it('does not retry a non-retryable privacy answer',async()=>{
+      const proofs=vi.spyOn(privacyDecision,'createCandidateAdmissionProofs').mockRejectedValue(new CandidatePrivacyMemoryError('candidate_privacy_conflict',false));
+      const store=new InMemoryReceiptStore(),search=vi.fn().mockResolvedValue(linked);
+      await expect(acquireCrustdataSearch(acquisitionInput({rankingProtocol:2}),{store,search,privacyRetryDelaysMs:[0,0]}))
+        .rejects.toMatchObject({code:'receipt_uncertain'});
+      expect(proofs).toHaveBeenCalledTimes(1);
+    });
   });
   it('seals protocol2 paid counts independently and reuses them without another purchase',async()=>{
     const store=new InMemoryReceiptStore();

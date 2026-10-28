@@ -12,7 +12,7 @@
 
 import http from 'http';
 import { startSourcingWorker, cleanupSourcingQueue, getSourcingQueueStats } from './queue';
-import { redeliverStaleCallbacks } from './callback';
+import { redeliverTerminalCallbacks, parseRedeliveryNotBefore } from './callback-recovery';
 import { createLogger } from '@/lib/logger';
 import {
   startPublicMemoryIngestWorker,
@@ -61,14 +61,10 @@ const CALLBACK_REDELIVERY_INTERVAL_MINUTES = parsePositiveInt(
   10,
   'SOURCING_CALLBACK_REDELIVERY_INTERVAL_MINUTES',
 );
-const CALLBACK_REDELIVERY_MAX_AGE_MINUTES = parsePositiveInt(
-  process.env.SOURCING_CALLBACK_REDELIVERY_MAX_AGE_MINUTES,
-  30,
-  'SOURCING_CALLBACK_REDELIVERY_MAX_AGE_MINUTES',
-);
+// Per-cycle bound for failure-callback recovery (capped at 50 in the recovery).
 const CALLBACK_REDELIVERY_BATCH_SIZE = parsePositiveInt(
   process.env.SOURCING_CALLBACK_REDELIVERY_BATCH_SIZE,
-  50,
+  10,
   'SOURCING_CALLBACK_REDELIVERY_BATCH_SIZE',
 );
 
@@ -134,6 +130,10 @@ if (CONTACT_ENRICHMENT_ENABLED) {
     },
   });
 }
+// Recovery resends only governed failure callbacks finished at or after this
+// instant. Without a valid value the scheduler stays off, so old callbacks are
+// never resent.
+const CALLBACK_REDELIVERY_NOT_BEFORE = parseRedeliveryNotBefore(process.env.SOURCING_CALLBACK_REDELIVERY_NOT_BEFORE);
 let callbackRedeliveryTimer: NodeJS.Timeout | null = null;
 let callbackRedeliveryRunning = false;
 
@@ -145,9 +145,9 @@ async function runCallbackRedeliveryCycle(): Promise<void> {
 
   callbackRedeliveryRunning = true;
   try {
-    const summary = await redeliverStaleCallbacks({
-      maxAgeMinutes: CALLBACK_REDELIVERY_MAX_AGE_MINUTES,
+    const summary = await redeliverTerminalCallbacks({
       limit: CALLBACK_REDELIVERY_BATCH_SIZE,
+      notBefore: CALLBACK_REDELIVERY_NOT_BEFORE!,
     });
     if (summary.attempted > 0) {
       log.info({ ...summary }, 'Callback redelivery cycle completed');
@@ -159,7 +159,9 @@ async function runCallbackRedeliveryCycle(): Promise<void> {
   }
 }
 
-if (CALLBACK_REDELIVERY_ENABLED) {
+if (CALLBACK_REDELIVERY_ENABLED && !CALLBACK_REDELIVERY_NOT_BEFORE) {
+  log.warn('Callback redelivery disabled: SOURCING_CALLBACK_REDELIVERY_NOT_BEFORE missing, invalid or in the future');
+} else if (CALLBACK_REDELIVERY_ENABLED) {
   const intervalMs = CALLBACK_REDELIVERY_INTERVAL_MINUTES * 60 * 1000;
   callbackRedeliveryTimer = setInterval(() => {
     void runCallbackRedeliveryCycle();
@@ -167,8 +169,8 @@ if (CALLBACK_REDELIVERY_ENABLED) {
   log.info(
     {
       intervalMinutes: CALLBACK_REDELIVERY_INTERVAL_MINUTES,
-      maxAgeMinutes: CALLBACK_REDELIVERY_MAX_AGE_MINUTES,
       batchSize: CALLBACK_REDELIVERY_BATCH_SIZE,
+      notBefore: CALLBACK_REDELIVERY_NOT_BEFORE!.toISOString(),
     },
     'Callback redelivery scheduler enabled',
   );

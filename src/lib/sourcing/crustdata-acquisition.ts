@@ -7,6 +7,7 @@ import type { JobRequirements } from "./jd-digest";
 import type { CrustdataSearchResult } from "./crustdata-client";
 import { createCandidateAdmissionProofs } from "@/lib/candidate-privacy/decision";
 import { requireHealthyCandidatePrivacyContext } from "@/lib/candidate-privacy/repository";
+import { CandidatePrivacyMemoryError } from "@/lib/candidate-privacy/memory-client";
 import type {SourcingExecutionFence} from './callback';
 import {z} from 'zod';
 import {GovernedRepository,sendFlowSourcingEvidence} from './governed-authority';
@@ -86,6 +87,8 @@ interface AcquireDependencies {
   waitIntervalMs?: number;
   requirePrivacyHealth?: () => Promise<unknown>;
   beforeReserve?: () => Promise<void>;
+  /** Test seam: waits between post-purchase privacy retries. */
+  privacyRetryDelaysMs?: readonly number[];
 }
 
 export interface AcquireCrustdataSearchInput {
@@ -267,6 +270,29 @@ function crustdataLinkedinUrl(
   const value =
     profile.social_handles?.professional_network_identifier?.profile_url;
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/** The purchase is already paid. The privacy check is a read, and only a
+ * successful decision is ever used, so a bounded retry of transient failures
+ * keeps the paid output without bypassing privacy. Non-retryable answers
+ * (conflict, invalid response) are not retried. */
+const PRIVACY_RETRY_DELAYS_MS = [1_000, 3_000] as const;
+export function isTransientPrivacyFailure(error: unknown): boolean {
+  if (error instanceof CandidatePrivacyMemoryError) return error.retryable;
+  return true;
+}
+async function privacyFilterWithRetry(
+  result: CrustdataSearchResult,
+  delays: readonly number[] = PRIVACY_RETRY_DELAYS_MS,
+): Promise<CrustdataSearchResult> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await privacyFilterCrustdataResult(result);
+    } catch (error) {
+      if (attempt >= delays.length || !isTransientPrivacyFailure(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+    }
+  }
 }
 
 async function privacyFilterCrustdataResult(
@@ -460,7 +486,7 @@ export async function acquireCrustdataSearch(
     }
   }
   try {
-    privacySafeResult = await privacyFilterCrustdataResult(result);
+    privacySafeResult = await privacyFilterWithRetry(result, dependencies.privacyRetryDelaysMs);
   } catch {
     await dependencies.store
       .markUncertain(receipt.id, "candidate_privacy_unavailable")

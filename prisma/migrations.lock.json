@@ -149,6 +149,14 @@
     {
       "name": "20261026000000_private_resume_location",
       "sha256": "0afec2f09f1f7db9db1b7edfcbbb6e4bec384f87c6229825ff8f5362c67d2abc"
+    },
+    {
+      "name": "20261027000000_rc_acquisition_terminal",
+      "sha256": "6c80040cdbf7c07339110018a82f712b084289033f35246d311ccdd06a5d153d"
+    },
+    {
+      "name": "20261027010000_callback_failure_recovery",
+      "sha256": "3173a4e0591a5831589981816c202ce2e573944d7c8f6645055f87bb753648da"
     }
   ]
 }

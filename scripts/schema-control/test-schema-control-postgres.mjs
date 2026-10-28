@@ -290,6 +290,12 @@ try {
   const immutableMigration = '20261019000000_immutable_memory_ingestion';
   const exclusionsMigration = '20261020000000_memory_candidate_exclusions';
   const progressMigration = '20261020010000_memory_wait_progress';
+  const terminalMigration = '20261027000000_rc_acquisition_terminal';
+  const recoveryMigration = '20261027010000_callback_failure_recovery';
+  assert(historicalLock.migrations.at(-1).name === recoveryMigration, 'Unexpected callback recovery tail');
+  historicalLock.migrations.pop();
+  assert(historicalLock.migrations.at(-1).name === terminalMigration, 'Unexpected RC terminal tail');
+  historicalLock.migrations.pop();
   const locationMigration = '20261026000000_private_resume_location';
   assert(historicalLock.migrations.at(-1).name === locationMigration, 'Unexpected resume location tail');
   historicalLock.migrations.pop();
@@ -339,6 +345,9 @@ try {
   await admin.$executeRawUnsafe('DROP TRIGGER memory_acquisition_guard ON public.crustdata_acquisition_receipts');
   await admin.$executeRawUnsafe('ALTER TABLE public.crustdata_acquisition_receipts DROP COLUMN memory_exclusions');
   await admin.$executeRawUnsafe('DROP FUNCTION public.signal_memory_rc_progress(public.rc_sourcing_runs)');
+  await admin.$executeRawUnsafe('ALTER TABLE public.job_sourcing_requests DROP COLUMN callback_redelivery_attempts, DROP COLUMN callback_next_redelivery_at, DROP COLUMN callback_review_required_at');
+  await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1',recoveryMigration);
+  await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1',terminalMigration);
   await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1',locationMigration);
   await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1',progressMigration);
   await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1',exclusionsMigration);
