@@ -191,7 +191,7 @@ export function relevantWorkSources(evidence:CanonicalEvidence,allowed:readonly 
   const out:{intervals:EmploymentInterval[];ref:string}[]=[];
   for(const kind of ['candidate_provided','profile_evidence']) {
     const source=evidence.employmentSources.find(s=>s.kind===kind&&allowed.includes(s.kind)&&Date.parse(s.observedAt)<=Date.parse(asOf));
-    if(source&&source.intervals.length) out.push({intervals:source.intervals,ref:kind==='candidate_provided'?'resume.employment':'profile.employment'});
+    if(source&&source.intervals.length) out.push({intervals:source.intervals,ref:'networkIdentity' in evidence?'network.employment':kind==='candidate_provided'?'resume.employment':'profile.employment'});
   }
   return out;
 }

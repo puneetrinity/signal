@@ -6,7 +6,7 @@ export const PRIVATE_RESUME_FUNCTIONS = [
   'signal_private_ranking_locations(text,uuid,uuid)',
 ];
 export const PRIVATE_RESUME_OWNER_FUNCTIONS = ['signal_private_identity_immutable()','signal_private_evidence_bound(text,jsonb)'];
-export const PRIVATE_RESUME_CATALOG_SHA256='db70ea38b28b4ed1a34b45494cabe5de842d3756738bd6d0a3837ebe9c517aa1';
+export const PRIVATE_RESUME_CATALOG_SHA256='dc71aae61ed27e3089326fb27660047fa1c0ed63301bbfe8195c0e28ee55828c';
 export const PRIVATE_RESUME_CATALOG_SQL=`WITH relations AS (
  SELECT * FROM pg_class WHERE oid='public.private_candidate_sources'::regclass
 ), functions AS (

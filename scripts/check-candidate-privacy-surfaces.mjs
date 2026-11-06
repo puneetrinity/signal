@@ -19,6 +19,10 @@ const ACTIVE_BOUNDARY =
   /\b(prisma\.(?:candidate|jobSourcingCandidate|candidateGlobalLink|contactEnrichmentOperation|publicMemoryIngestOutbox|crustdataAcquisitionReceipt)|searchPeople\s*\(|searchLinkedinProfiles\s*\(|deliverCallback\s*\(|enqueueGraphSync\s*\()/;
 
 const REQUIRED_PATTERNS = new Map([
+  ['src/lib/sourcing/candidate-network.ts', [
+    /networkHitSchema\.parse\(raw\)/, /signal_network_candidate_materialize/,
+    /rankingHash\(hit\.facts\)!==hit\.contentHash/, /NETWORK_PUBLICATION_CONFLICT/,
+  ]],
   ['src/lib/sourcing/rc-skills/repository.ts', [
     /CANDIDATE_PRIVACY_ADMISSION_LOCK/, /requireHealthyCandidatePrivacyContext\(tx\)/,
     /signal_rc_dispatch/, /signal_rc_finish/, /signal_rc_outbox/,
@@ -51,6 +55,8 @@ const REQUIRED_PATTERNS = new Map([
   ['src/lib/sourcing/orchestrator.ts', [
     /candidatePrivacyAllowedRelationWhere\(privacyContext\)/,
     /JOIN "candidate_privacy_projection"/,
+    /validateNetworkPublications\(/, /materializeNetworkPublication\(/,
+    /persistAdmissionProjection\(/,
   ]],
   ['src/lib/sourcing/discovery.ts', [
     /requireHealthyCandidatePrivacyContext\(\)/,

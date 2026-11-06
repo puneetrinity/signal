@@ -56,8 +56,16 @@ jobs:
           CREATE DATABASE signal_ranking_collation_test OWNER signal_collation_owner_test;
           CREATE DATABASE signal_rc_collation_test OWNER signal_collation_owner_test;
           CREATE DATABASE signal_rc_process_test OWNER signal_collation_owner_test;
+          CREATE DATABASE signal_network_test OWNER signal_collation_owner_test;
+          CREATE ROLE p7_discover_runtime_test NOLOGIN NOSUPERUSER NOBYPASSRLS;
+          GRANT p7_discover_runtime_test TO signal_collation_owner_test;
           SQL
       - run: npm run test:governed-sourcing:pg
+      - name: Native Spark publication through existing ranking (restricted owner)
+        env:
+          SIGNAL_NETWORK_DISPOSABLE: '1'
+          SIGNAL_NETWORK_OWNER_URL: postgresql://signal_collation_owner_test:local-test-only@127.0.0.1:55489/signal_network_test
+        run: npx vitest run src/lib/sourcing/__tests__/candidate-network-postgres.integration.test.ts --maxWorkers=1 --no-file-parallelism
       - run: npm run test:rubric-ranking:pg
       - run: npm run test:rc-skills:pg
       - run: npm run test:rc-skills:process

@@ -119,6 +119,7 @@ model Candidate {
   // LinkedIn anchor (URL only - no scraped data)
   identityKind String @default("linkedin")
   privateCandidateRef String? @db.Uuid
+  networkSubjectRef String? @db.Uuid
   linkedinUrl String? // Required by SQL for public identities only
   linkedinId  String? // Never fabricated for resume-only applicants
 
@@ -164,10 +165,12 @@ model Candidate {
   privacyProjections         CandidatePrivacyProjection[]
   rankingItems               GovernedRankingItem[]
   privateSources             PrivateCandidateSource[]
+  networkSources             CandidateNetworkSource[]
 
   // Tenant-scoped unique constraints
   @@unique([tenantId, id])
   @@unique([tenantId, privateCandidateRef])
+  @@unique([tenantId, networkSubjectRef], map: "candidates_tenant_network_subject")
   @@unique([tenantId, linkedinUrl])
   @@unique([tenantId, linkedinId])
   @@index([tenantId])
@@ -200,6 +203,23 @@ model PrivateCandidateSource {
   @@id([tenantId, candidateId, referenceId, generationId])
   @@index([tenantId, linkedPublicId])
   @@map("private_candidate_sources")
+}
+
+/// Redacted, immutable publication snapshots. Runtime uses only guarded routines.
+model CandidateNetworkSource {
+  tenantId String @map("tenant_id")
+  candidateId String @map("candidate_id")
+  publicationId String @map("publication_id") @db.Uuid
+  subjectId String @map("subject_id") @db.Uuid
+  globalCandidateId String @map("global_candidate_id") @db.Uuid
+  authority Json
+  hit Json
+  createdAt DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(6)
+  candidate Candidate @relation(fields: [tenantId, candidateId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@id([tenantId, candidateId, publicationId])
+  @@unique([tenantId, publicationId])
+  @@map("candidate_network_sources")
 }
 
 /// Candidate-keyed, generation-scoped projection of Memory's privacy decision.

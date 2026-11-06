@@ -15,6 +15,7 @@ import { RankingRepository, type RankingRead } from '@/lib/sourcing/rubric/repos
 import {governedSourceSchema} from '@/lib/sourcing/governed-contracts';
 import {privateResumeIdentity,type PrivateResumeIdentity} from '@/lib/sourcing/private-resume-contracts';
 import {revalidateResumeIdentities,publicApplicantIds} from '@/lib/sourcing/private-resume-lane';
+import {networkHitSchema,type NetworkHit} from '@/lib/sourcing/candidate-network';
 import {z} from 'zod';
 import { summarizeIdentitySignals } from '@/lib/sourcing/identity-summary';
 import {
@@ -169,6 +170,7 @@ export async function GET(
 
   let candidates = (sourcingRequest as any).candidates || [];
   const resumeOriginById=new Map<string,PrivateResumeIdentity>();
+  const networkById=new Map<string,NetworkHit>();
   // Candidate-provided résumé location for privacy-admitted previous applicants only.
   const resumeLocationById=new Map<string,{city:string|null;country:string|null}>();
   let governed:any;
@@ -194,6 +196,14 @@ export async function GET(
         if(candidates.some((c:any)=>byId.get(c.candidateId)?.ordinal!==c.rank))throw Error('RANKING_OUTPUT_CONFLICT');
         const command=governedSourceSchema.parse(await repository.call('boundCommand',[tenantId,sourcingRequest.id]));
         if(command.protocolVersion===2&&command.rankingContract.payload.schemaVersion===4) {
+          const nativeRows=await prisma.$queryRaw<Array<{result:unknown}>>`
+            SELECT public.signal_network_ranking_sources(${tenantId},${command.flowRunId}::uuid,${ranking.revisionId}::uuid) AS result`;
+          if(nativeRows.length!==1)throw Error('NETWORK_RANKING_UNAVAILABLE');
+          const native=z.array(z.object({candidateId:z.string().min(1).max(200),hit:z.unknown()}).strict()).max(100).parse(nativeRows[0].result);
+          for(const row of native){
+            if(networkById.has(row.candidateId)||!row.hit||typeof row.hit!=='object'||Array.isArray(row.hit))throw Error('NETWORK_RANKING_UNAVAILABLE');
+            networkById.set(row.candidateId,networkHitSchema.parse({...row.hit,similarity:0}));
+          }
           const rows=await prisma.$queryRaw<Array<{result:unknown}>>`
             SELECT public.signal_private_ranking_sources(${tenantId},${command.flowRunId}::uuid,${ranking.revisionId}::uuid) AS result`;
           if(rows.length!==1)throw Error('PRIVATE_RANKING_UNAVAILABLE');
@@ -216,7 +226,8 @@ export async function GET(
             for(const item of locations)if(resumeOriginById.has(item.candidateId))resumeLocationById.set(item.candidateId,item.location);
           }
           candidates=candidates.filter((candidate:any)=>candidate.candidate.identityKind==='linkedin'
-            || resumeOriginById.has(candidate.candidateId));
+            || resumeOriginById.has(candidate.candidateId)
+            || candidate.candidate.identityKind==='candidate_network'&&networkById.has(candidate.candidateId));
           const links=await prisma.candidateGlobalLink.findMany({where:{tenantId,
             candidateId:{in:candidates.filter((c:any)=>c.candidate.identityKind==='linkedin').map((c:any)=>c.candidateId)}},
             select:{candidateId:true,globalCandidateId:true}});
@@ -316,6 +327,26 @@ export async function GET(
   );
 
   const candidateResults = candidates.map((sc: any) => {
+    const native=networkById.get(sc.candidateId);
+    if(native){
+      if(!ranking||!rankingById.has(sc.candidateId))throw Error('NETWORK_RANKING_UNAVAILABLE');
+      const facts=native.facts,location=facts.currentLocation?[facts.currentLocation.city,facts.currentLocation.displayCountry].filter(Boolean).join(', '):null;
+      return {
+        ranking:{protocolVersion:2,revisionId:ranking.revisionId,contractHash:ranking.contractHash,
+          outputHash:ranking.outputHash,asOf:ranking.asOf,...rankingById.get(sc.candidateId)},
+        candidate:{id:sc.candidateId,name:facts.displayName,nameHint:facts.displayName,headline:facts.headline,headlineHint:facts.headline,
+          location,locationHint:location,company:null,companyHint:null,linkedinUrl:null,profilePictureUrl:null,
+          candidateOrigin:{version:1,kind:'candidate_network',subjectId:native.subjectId,publicationId:native.publicationId,
+            profileVersion:native.profileVersion,preferenceVersion:native.preferenceVersion,consentRevision:native.consentRevision,contentHash:native.contentHash},
+          enrichmentStatus:'completed',confidenceScore:null,lastEnrichedAt:null},
+        sourcingContext:{rank:sc.rank,matchStrength:null,locationStatus:'unverified'},
+        cardSignals:{skillsTopN:facts.skills.slice(0,20),summaryShort:facts.headline,emailAvailable:false,phoneAvailable:false,email:null,phone:null,github:null,twitter:null,activeSeeker:false},
+        // Historical projection only. No profile/provider blob, private preferences,
+        // contact entitlement, résumé download or current-account refresh implied.
+        crustdata:null,snapshot:null,professionalValidation:null,sourceType:'pool',fitScore:null,fitBreakdown:null,
+        matchTier:null,locationMatchType:null,dataConfidence:null,locationLabel:location,
+      };
+    }
     const techSnap = sc.candidate.intelligenceSnapshots.find((s: any) => s.track === 'tech') ?? null;
     const nonTechSnap = sc.candidate.intelligenceSnapshots.find((s: any) => s.track === 'non-tech') ?? null;
     const identitySummary = summarizeIdentitySignals(

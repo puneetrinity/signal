@@ -22,6 +22,92 @@ import { fetchMemorySearch, SearchRetrievalError } from './search-retrieval';
 import { createHash } from 'node:crypto';
 import { readMemoryPacket, type FrozenMemoryPacket } from './immutable-memory-ingest';
 import { memoryDeliveryFailure } from './memory-delivery-diagnostics';
+import { deduplicateNetworkHits, networkSourcingEnabled, revalidatedNetworkHits, type NetworkHit } from './candidate-network';
+
+/** Native requests share the existing service signer and privacy admission.
+ * No provider purchase, redirect, unbounded body or implicit transport retry. */
+async function networkRequest(path:string,tenantId:string,body:unknown,requestId:string|undefined,timeoutMs:number):Promise<unknown> {
+  if(!networkSourcingEnabled() || !tenantId || !Number.isFinite(timeoutMs) || timeoutMs<=0)
+    throw new SearchRetrievalError('configuration');
+  const url=new URL(path,ACTIVEGRAPH_URL);
+  if(url.protocol!=='https:' && !(url.protocol==='http:' && ['127.0.0.1','localhost','[::1]'].includes(url.hostname)))
+    throw new SearchRetrievalError('configuration');
+  const controller=new AbortController();
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  let reader:ReadableStreamDefaultReader<Uint8Array>|undefined;
+  const operation=async()=>{
+    const token=await signActiveGraphJWT(tenantId,'kg:read',requestId);
+    controller.signal.throwIfAborted();
+    const response=await fetch(url,{method:'POST',redirect:'error',signal:controller.signal,
+      headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify(body)});
+    if(!response.ok){
+      await response.body?.cancel();
+      throw new SearchRetrievalError(response.status>=500?'upstream':response.status===429?'rate_limited':
+        response.status===401||response.status===403?'unauthorized':'invalid_contract',response.status>=500||response.status===429);
+    }
+    if(!response.body)throw new SearchRetrievalError('invalid_contract');
+    reader=response.body.getReader();
+    const chunks:Uint8Array[]=[];let bytes=0;
+    for(;;){
+      const part=await reader.read();if(part.done)break;
+      bytes+=part.value.byteLength;
+      if(bytes>32*1024*1024)throw new SearchRetrievalError('invalid_contract');
+      chunks.push(part.value);
+    }
+    controller.signal.throwIfAborted();
+    try{return JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(chunks)));}
+    catch{throw new SearchRetrievalError('invalid_contract');}
+  };
+  try{return await Promise.race([operation(),new Promise<never>((_,reject)=>{
+    timer=setTimeout(()=>{controller.abort();reject(new SearchRetrievalError('transport',true));},Math.min(timeoutMs,15_000));
+  })]);} catch(error){
+    if(error instanceof SearchRetrievalError)throw error;
+    throw new SearchRetrievalError('transport',true);
+  } finally {
+    controller.abort();clearTimeout(timer);
+    void reader?.cancel().catch(()=>undefined);
+  }
+}
+
+/** A single bounded public pool, not an extra native lane beyond the pool cap. */
+export async function searchNetworkPublicPool(requirements:JobRequirements,tenantId:string,limit:number,
+  requestId?:string,timeoutMs=15_000):Promise<{providers:GlobalPoolSearchResult[];network:NetworkHit[];appliedLimit:number}> {
+  if(!Number.isSafeInteger(limit)||limit<1||limit>500)throw new SearchRetrievalError('configuration');
+  const deadline=Date.now()+timeoutMs;
+  await requireHealthyCandidatePrivacyContext();
+  const rawCity=requirements.location?.split(',')[0].trim()||null;
+  const location=rawCity?resolveLocationDeterministic(rawCity):null;
+  const cities=rawCity?[...new Set([rawCity,location?.city,location?.rawCity].filter((x):x is string=>!!x).map(x=>x.toLowerCase()))]:null;
+  const raw=await networkRequest('/global-candidates/search',tenantId,{surface:'public_v2',
+    query_text:buildPoolQueryText(requirements),limit,location_city:rawCity,location_cities:cities},requestId,deadline-Date.now());
+  if(!raw||typeof raw!=='object'||Array.isArray(raw))throw new SearchRetrievalError('invalid_contract');
+  const data=raw as Record<string,unknown>;
+  if(data.surface!=='public_v2'||!Array.isArray(data.results)||!Number.isSafeInteger(data.applied_limit)||
+    (data.applied_limit as number)<1||(data.applied_limit as number)>limit||data.results.length>(data.applied_limit as number)||
+    data.count!==data.results.length)throw new SearchRetrievalError('invalid_contract');
+  const providers:GlobalPoolSearchResult[]=[],native:unknown[]=[];
+  for(const row of data.results){
+    if(row?.kind==='candidate_network')native.push(row);
+    else if(row?.kind==='provider'&&Object.keys(row).sort().join(',')==='kind,profile'&&isPublicGlobalPoolSearchResult(row.profile))
+      providers.push({...row.profile,id:normalizeGlobalCandidateId(row.profile.id)!});
+    else throw new SearchRetrievalError('invalid_contract');
+  }
+  let network:NetworkHit[];
+  try{network=deduplicateNetworkHits(native);}catch{throw new SearchRetrievalError('invalid_contract');}
+  const anchors=[...providers.map((row,index)=>({key:`p:${index}`,globalCandidateId:row.id,linkedinUrl:row.linkedin_url})),
+    ...network.map(hit=>({key:hit.identity,globalCandidateId:hit.globalCandidateId,signalCandidateId:hit.identity}))];
+  const proofs=await createCandidateAdmissionProofs(anchors,undefined,deadline);
+  return {providers:providers.filter((_,index)=>proofs.has(`p:${index}`)),
+    network:network.filter(hit=>proofs.has(hit.identity)),appliedLimit:data.applied_limit as number};
+}
+
+export async function validateNetworkPublications(hits:NetworkHit[],tenantId:string,requestId?:string,timeoutMs=5000):Promise<NetworkHit[]> {
+  if(hits.length>500)throw new SearchRetrievalError('configuration');
+  const checked=deduplicateNetworkHits(hits);
+  const raw=await networkRequest('/global-candidates/network/validate',tenantId,
+    {publicationIds:checked.map(hit=>hit.publicationId),includeResultKeys:true},requestId,timeoutMs);
+  try{return revalidatedNetworkHits(checked,raw);}catch{throw new SearchRetrievalError('invalid_contract');}
+}
 
 export interface StrictMemorySearchOptions { timeoutMs: number }
 

@@ -6,7 +6,37 @@ export const RANKING_TABLES=['governed_ranking_runs','governed_ranking_items'];
 export const RANKING_FUNCTIONS=['signal_ranking_claim(text,uuid,jsonb)','signal_ranking_finish(text,uuid,uuid,jsonb)','signal_ranking_read(text,uuid,uuid)'];
 export const RANKING_PRIVATE_FUNCTIONS=['signal_ranking_immutable()','signal_ranking_canonical(jsonb)',
  'signal_ranking_transport_parse(text)','signal_ranking_rebuild(text,jsonb)','signal_ranking_transport_record(text,text)'];
-export const RANKING_CATALOG_SHA256='46e584ecfbb7d94d188920c1c40810b9ce05f18c570ded46431bcf01f3369d79';
+export const RANKING_CATALOG_SHA256='833d90002e92c02431e05ac92095f0f1cdb19f6e367ce8b45e4440a03525ab2a';
+export const NETWORK_TABLES=['candidate_network_sources'];
+export const NETWORK_FUNCTIONS=['signal_network_candidate_materialize(text,jsonb)','signal_network_ranking_sources(text,uuid,uuid)'];
+export const NETWORK_PRIVATE_FUNCTIONS=['signal_network_identity_immutable()','signal_network_authority_valid(jsonb)','signal_network_facts_valid(jsonb)',
+ 'signal_network_evidence_bound(text,jsonb)','signal_network_evidence_canonical(jsonb)'];
+export const NETWORK_CATALOG_SHA256='1ac03d569f0d04e52ec9f08ce849f3b7e0c9fb19a6cdb92db946e91db1eea7b6';
+export const NETWORK_CATALOG_SQL=`WITH facts AS (SELECT jsonb_build_object(
+ 'table',(SELECT jsonb_build_array(relrowsecurity,relforcerowsecurity,relowner=(SELECT relowner FROM pg_class WHERE oid='public.candidates'::regclass)) FROM pg_class WHERE oid='public.candidate_network_sources'::regclass),
+ 'columns',(SELECT jsonb_agg(jsonb_build_array(a.attname,format_type(a.atttypid,a.atttypmod),a.attnotnull,pg_get_expr(d.adbin,d.adrelid)) ORDER BY a.attnum)
+  FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid='public.candidate_network_sources'::regclass AND a.attnum>0 AND NOT a.attisdropped),
+ 'constraints',(SELECT jsonb_agg(jsonb_build_array(conname,pg_get_constraintdef(oid),convalidated) ORDER BY conname COLLATE "C") FROM pg_constraint WHERE conrelid='public.candidate_network_sources'::regclass OR conrelid='public.candidates'::regclass AND conname='candidates_identity_shape'),
+ 'indexes',(SELECT jsonb_agg(jsonb_build_array(pg_get_indexdef(indexrelid),indisvalid,indisready) ORDER BY indexrelid::regclass::text COLLATE "C") FROM pg_index WHERE indrelid='public.candidate_network_sources'::regclass OR indexrelid='public.candidates_tenant_network_subject'::regclass),
+ 'policies',(SELECT jsonb_agg(jsonb_build_array(p.polname,p.polcmd,p.polpermissive,p.polroles=ARRAY[c.relowner],pg_get_expr(p.polqual,p.polrelid),pg_get_expr(p.polwithcheck,p.polrelid)) ORDER BY p.polname COLLATE "C") FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid WHERE c.oid='public.candidate_network_sources'::regclass),
+ 'triggers',(SELECT jsonb_agg(jsonb_build_array(tgname,pg_get_triggerdef(oid),tgenabled) ORDER BY tgname COLLATE "C") FROM pg_trigger WHERE NOT tgisinternal AND tgfoid='public.signal_network_identity_immutable()'::regprocedure),
+ 'functions',(SELECT jsonb_agg(jsonb_build_array(p.oid::regprocedure::text,pg_get_functiondef(p.oid),p.proowner=(SELECT relowner FROM pg_class WHERE oid='public.candidates'::regclass)) ORDER BY p.oid::regprocedure::text COLLATE "C") FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND starts_with(p.proname,'signal_network_'))
+ ) value) SELECT encode(sha256(convert_to(value::text,'UTF8')),'hex') digest FROM facts`;
+/** @param {any} tx @param {{role?: string, allowOwner?: boolean}} options */
+export async function assertNetworkCatalog(tx,{role,allowOwner=false}={}){
+ const [catalog]=await tx.$queryRawUnsafe(NETWORK_CATALOG_SQL);
+ if(catalog?.digest!==NETWORK_CATALOG_SHA256)throw Error('Network sourcing catalog mismatch');
+ if(allowOwner)return;
+ const [rights]=await tx.$queryRawUnsafe(`SELECT
+  NOT EXISTS(SELECT 1 FROM unnest($2::text[]) n CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) p WHERE has_table_privilege(coalesce($1,current_user),'public.'||n,p))
+  AND NOT EXISTS(SELECT 1 FROM unnest($2::text[]) n CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) p WHERE has_any_column_privilege(coalesce($1,current_user),'public.'||n,p))
+  AND NOT EXISTS(SELECT 1 FROM unnest($3::text[]) n WHERE NOT has_function_privilege(coalesce($1,current_user),n,'EXECUTE'))
+  AND NOT EXISTS(SELECT 1 FROM unnest($4::text[]) n WHERE has_function_privilege(coalesce($1,current_user),n,'EXECUTE'))
+  AND NOT EXISTS(SELECT 1 FROM unnest($3::text[]||$4::text[]) n JOIN pg_proc p ON p.oid=to_regprocedure(n)
+   CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee=0 OR (a.grantee<>p.proowner AND a.is_grantable)) AS ok`,
+  role??null,NETWORK_TABLES,NETWORK_FUNCTIONS,NETWORK_PRIVATE_FUNCTIONS);
+ if(rights?.ok!==true)throw Error('Network sourcing runtime privileges mismatch');
+}
 export const RANKING_CATALOG_SQL=`WITH relations AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname='public' AND c.relname LIKE 'governed_ranking_%' AND c.relkind IN ('r','p')
