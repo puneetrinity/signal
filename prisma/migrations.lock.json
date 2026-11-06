@@ -157,6 +157,10 @@
     {
       "name": "20261027010000_callback_failure_recovery",
       "sha256": "3173a4e0591a5831589981816c202ce2e573944d7c8f6645055f87bb753648da"
+    },
+    {
+      "name": "20261103000000_candidate_network_sourcing",
+      "sha256": "4cab374813f04042d3e140270b14384b5e3c5bf1ab502a11b2439a73424de6b0"
     }
   ]
 }

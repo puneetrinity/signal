@@ -5,7 +5,7 @@ import { assertCoreRelations, assertIdentity, assertRuntimePrivileges, beginBoun
   createPrisma, readIdentity, readPrismaLedger, readReleaseHealth } from './database.mjs';
 import { assertPrismaLedger, loadMigrationLock } from './manifest.mjs';
 import {assertGovernedSourcingCatalog} from '../check-governed-sourcing.mjs';
-import {assertRankingCatalog} from '../check-rubric-ranking.mjs';
+import {assertRankingCatalog,assertNetworkCatalog} from '../check-rubric-ranking.mjs';
 import {assertRcCatalog} from '../check-rc-skills.mjs';
 import {assertPrivateResumeAccess} from '../check-private-resume.mjs';
 import {assertImmutableMemoryCatalog} from '../check-immutable-memory-ingest.mjs';
@@ -55,6 +55,7 @@ try {
     });
     await assertGovernedSourcingCatalog(tx,{allowOwner:isDisposableDevelopment(runtime,runtime.runtimeUrl)});
     await assertRankingCatalog(tx,{allowOwner:isDisposableDevelopment(runtime,runtime.runtimeUrl)});
+    await assertNetworkCatalog(tx,{allowOwner:isDisposableDevelopment(runtime,runtime.runtimeUrl)});
     await assertRcCatalog(tx,{allowOwner:isDisposableDevelopment(runtime,runtime.runtimeUrl)});
     await assertPrivateResumeAccess(tx,{allowOwner:isDisposableDevelopment(runtime,runtime.runtimeUrl)});
     await assertImmutableMemoryCatalog(tx,{allowOwner:isDisposableDevelopment(runtime,runtime.runtimeUrl)});

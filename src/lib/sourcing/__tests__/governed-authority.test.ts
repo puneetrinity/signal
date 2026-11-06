@@ -150,8 +150,12 @@ describe('actual governed results route',()=>{
         orderedSignalIds:['app-1','app-2','public-3'],rankingRevision:id,rankingHash:hash,contractHash:hash});
       vi.spyOn(RankingRepository.prototype,'read').mockResolvedValue({protocolVersion:2,flowRunId:id,revisionId:id,outputHash:hash,contractHash:hash,
         asOf:'2026-10-01T00:00:00.000Z',items:[{candidateId:'app-1',ordinal:1},{candidateId:'app-2',ordinal:2},{candidateId:'public-3',ordinal:3}]} as never);
-      resultMocks.queryRaw.mockReset().mockImplementation(async (strings:TemplateStringsArray)=>strings.join('').includes('signal_private_ranking_locations')
-        ?[{result:locations}]:[{result:[{candidateId:'app-1',identity:applicant(1)},{candidateId:'app-2',identity:applicant(2)}]}]);
+      resultMocks.queryRaw.mockReset().mockImplementation(async (strings:TemplateStringsArray)=>{
+        const query=strings.join('');
+        if(query.includes('signal_network_ranking_sources')) return [{result:[]}];
+        return query.includes('signal_private_ranking_locations')
+          ?[{result:locations}]:[{result:[{candidateId:'app-1',identity:applicant(1)},{candidateId:'app-2',identity:applicant(2)}]}];
+      });
       resultMocks.revalidate.mockReset().mockResolvedValue(allowed.map(applicant));
       resultMocks.links.mockReset().mockResolvedValue([]);resultMocks.applicants.mockReset().mockResolvedValue(new Set());
     }

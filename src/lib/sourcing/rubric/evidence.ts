@@ -4,6 +4,7 @@ import { normalize } from './taxonomy';
 import type { EmploymentInterval } from './experience';
 import { calculateExperience } from './experience';
 import {privateResumeIdentity} from '../private-resume-contracts';
+import {networkAuthoritySchema,networkHitSchema,type NetworkHit} from '../candidate-network';
 
 const term=z.string().min(1).max(500);
 const field=z.enum(['title','skill','seniority','function','domain','city','country','work_arrangement','certification','language','education_requirement','work_eligibility']);
@@ -66,7 +67,22 @@ export const evidenceV2Schema=evidenceBase.extend({version:z.literal('rubric-evi
     new Set(v.employmentSources.map(s=>s.kind)).size!==v.employmentSources.length)
     ctx.addIssue({code:z.ZodIssueCode.custom,message:'Foreign or duplicate employment source'});
 });
-export const evidenceSchema=z.union([evidenceV1Schema,evidenceV2Schema]).superRefine((v,ctx)=>{
+// A separate, explicitly bound native variant. The existing private résumé
+// schema still forbids public candidate-provided employment.
+export const networkEvidenceSchema=evidenceBase.extend({version:z.literal('rubric-evidence-v2'),
+  employment:z.array(roleSchema).max(0),networkIdentity:networkAuthoritySchema,
+  employmentSources:z.array(z.object({kind:z.literal('candidate_provided'),scope:z.literal('public'),
+    organizationRef:z.null(),sourceVersion:z.string().regex(/^[a-f0-9]{64}$/),sourceHash:z.string().regex(/^[a-f0-9]{64}$/),
+    observedAt:z.string().datetime(),referenceId:z.string().uuid(),intervals:z.array(roleSchema).max(200),
+  }).strict()).length(1),
+}).strict().superRefine((v,ctx)=>{
+  const source=v.employmentSources[0],identity=v.networkIdentity;
+  if(source.referenceId!==identity.publicationId||source.sourceHash!==identity.contentHash||source.sourceVersion!==identity.contentHash||
+    v.facts.some(f=>f.kind!=='candidate_provided'||f.scope!=='public'||f.organizationRef!==null||
+      f.sourceVersion!==identity.contentHash||f.observedAt!==source.observedAt||!f.ref.startsWith('network.')))
+    ctx.addIssue({code:z.ZodIssueCode.custom,message:'Native publication evidence binding mismatch'});
+});
+export const evidenceSchema=z.union([evidenceV1Schema,evidenceV2Schema,networkEvidenceSchema]).superRefine((v,ctx)=>{
   if(evidenceBytes(v)>EVIDENCE_MAX_BYTES)ctx.addIssue({code:z.ZodIssueCode.custom,message:'Evidence too large'});
 });
 export type CanonicalEvidence=z.infer<typeof evidenceSchema>;
@@ -81,9 +97,34 @@ export function selectEmployment(evidence:CanonicalEvidence, allowed:readonly st
     if(!source)continue;
     const measured=calculateExperience(source.intervals,asOf);
     if(measured.status==='measured'||measured.status==='bounded')return {
-      intervals:source.intervals,ref:kind==='candidate_provided'?'resume.employment':'profile.employment'};
+      intervals:source.intervals,ref:'networkIdentity' in evidence?'network.employment':kind==='candidate_provided'?'resume.employment':'profile.employment'};
   }
   return {intervals:[],ref:'employment'};
+}
+
+/** Candidate-confirmed structured facts only: no headline-derived skills,
+ * name/photo scoring, private preferences, résumé or provider masquerading. */
+export function adaptNetworkPublication(candidateId:string,organizationRef:string,raw:NetworkHit):CanonicalEvidence {
+  const hit=networkHitSchema.parse(raw),facts:EvidenceFact[]=[];
+  const observedAt=new Date(hit.observedAt).toISOString();
+  const add=(field:EvidenceFact['field'],value:string|undefined,ref:string)=>{
+    if(value?.trim())facts.push({field,value:normalize(value),ref:`network.${ref}`,kind:'candidate_provided',
+      sourceVersion:hit.contentHash,observedAt,scope:'public',organizationRef:null});
+  };
+  hit.facts.skills.forEach((s,i)=>add('skill',s,`skills.${i}`));
+  hit.facts.employment.forEach((role,i)=>add('title',role.title,`employment.${i}.title`));
+  add('city',hit.facts.currentLocation?.city,'location.city');
+  add('country',hit.facts.currentLocation?.countryCode,'location.country');
+  hit.facts.education.forEach((school,i)=>add('education_requirement',school.qualification,`education.${i}.qualification`));
+  const networkIdentity=networkAuthoritySchema.parse({subjectId:hit.subjectId,publicationId:hit.publicationId,
+    profileVersion:hit.profileVersion,preferenceVersion:hit.preferenceVersion,consentRevision:hit.consentRevision,contentHash:hit.contentHash});
+  const result=networkEvidenceSchema.parse({candidateId,organizationRef,version:'rubric-evidence-v2',facts,employment:[],networkIdentity,
+    employmentSources:[{kind:'candidate_provided',scope:'public',organizationRef:null,sourceVersion:hit.contentHash,
+      sourceHash:hit.contentHash,observedAt,referenceId:hit.publicationId,intervals:hit.facts.employment.map(role=>({
+        title:role.title,start:role.start?.value??null,end:role.end?.value??null,ongoing:role.current}))}]});
+  const bytes=evidenceBytes({...result,presentationSource:'pool_enriched'});
+  if(bytes>EVIDENCE_MAX_BYTES)throw new OversizedEvidenceError({candidateId,reason:'evidence_too_large',evidenceHash:rankingHash(result),bytes,limit:EVIDENCE_MAX_BYTES});
+  return result;
 }
 const record=(v:unknown):Record<string,unknown>=>v!==null && typeof v==='object' && !Array.isArray(v)?v as Record<string,unknown>:{};
 const objects=(v:unknown)=>Array.isArray(v)?v.map(record):[];

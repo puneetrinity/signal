@@ -105,9 +105,9 @@ async function safetyProof() {
       row.database_name !== databaseName ||
       row.role_name !== 'signal_schema_control_test_runner' ||
       ![null, '127.0.0.1', '::1'].includes(row.server_addr) ||
-      Math.floor(row.server_version_num / 10000) !== 16
+      ![16, 17].includes(Math.floor(row.server_version_num / 10000))
     ) {
-      throw new Error('Refusing schema-control integration: local PostgreSQL 16 safety proof failed');
+      throw new Error('Refusing schema-control integration: local PostgreSQL 16/17 safety proof failed');
     }
   });
 }
@@ -292,6 +292,9 @@ try {
   const progressMigration = '20261020010000_memory_wait_progress';
   const terminalMigration = '20261027000000_rc_acquisition_terminal';
   const recoveryMigration = '20261027010000_callback_failure_recovery';
+  const networkMigration = '20261103000000_candidate_network_sourcing';
+  assert(historicalLock.migrations.at(-1).name === networkMigration, 'Unexpected network sourcing tail');
+  historicalLock.migrations.pop();
   assert(historicalLock.migrations.at(-1).name === recoveryMigration, 'Unexpected callback recovery tail');
   historicalLock.migrations.pop();
   assert(historicalLock.migrations.at(-1).name === terminalMigration, 'Unexpected RC terminal tail');
@@ -342,6 +345,13 @@ try {
   // Rewind only attested empty fixtures; never bypass a nonempty packet guard.
   const [packetRows] = await admin.$queryRawUnsafe('SELECT count(*)::integer count FROM public.public_memory_ingest_requests');
   assert(packetRows.count===0,'Historical rehearsal requires empty immutable packet table');
+  const [networkRows] = await admin.$queryRawUnsafe('SELECT count(*)::integer count FROM public.candidate_network_sources');
+  assert(networkRows.count===0,'Historical rehearsal requires empty native publication table');
+  await admin.$executeRawUnsafe('DROP TRIGGER network_identity_immutable ON public.candidates');
+  await admin.$executeRawUnsafe('DROP TABLE public.candidate_network_sources');
+  const networkRoutines=await admin.$queryRawUnsafe("SELECT p.oid::regprocedure::text signature FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND starts_with(p.proname,'signal_network_')");
+  for(const {signature} of networkRoutines)await admin.$executeRawUnsafe(`DROP FUNCTION ${signature}`);
+  await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1',networkMigration);
   await admin.$executeRawUnsafe('DROP TRIGGER memory_acquisition_guard ON public.crustdata_acquisition_receipts');
   await admin.$executeRawUnsafe('ALTER TABLE public.crustdata_acquisition_receipts DROP COLUMN memory_exclusions');
   await admin.$executeRawUnsafe('DROP FUNCTION public.signal_memory_rc_progress(public.rc_sourcing_runs)');
@@ -365,7 +375,7 @@ try {
     await admin.$executeRawUnsafe(`DROP FUNCTION public.${signature}`);
   await admin.$executeRawUnsafe('DROP TABLE public.private_candidate_sources');
   await admin.$executeRawUnsafe('ALTER TABLE public.candidates DROP CONSTRAINT candidates_identity_shape');
-  await admin.$executeRawUnsafe('ALTER TABLE public.candidates DROP COLUMN "identityKind", DROP COLUMN "privateCandidateRef", ALTER COLUMN "linkedinUrl" SET NOT NULL, ALTER COLUMN "linkedinId" SET NOT NULL');
+  await admin.$executeRawUnsafe('ALTER TABLE public.candidates DROP COLUMN "identityKind", DROP COLUMN "privateCandidateRef", DROP COLUMN "networkSubjectRef", ALTER COLUMN "linkedinUrl" SET NOT NULL, ALTER COLUMN "linkedinId" SET NOT NULL');
   await admin.$executeRawUnsafe('DELETE FROM public."_prisma_migrations" WHERE migration_name=$1', privateMigration);
   for (const table of RC_TABLES) {
     const [row] = await admin.$queryRawUnsafe(`SELECT count(*)::integer count FROM public.${table}`);
